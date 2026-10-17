@@ -6,6 +6,7 @@
 
 mod core;
 mod graph;
+mod share;
 mod tray;
 mod ui;
 
@@ -21,6 +22,8 @@ fn main() {
             }
             tray::run()
         }
+        Some("--share-link") => args.get(1).iter().for_each(|p| share::share_link(std::path::Path::new(p))),
+        Some("--view-online") => args.get(1).iter().for_each(|p| share::view_online(std::path::Path::new(p))),
         Some("--version") => println!("{} {}", core::APP_NAME, env!("CARGO_PKG_VERSION")),
         Some("--help") | Some("-h") => {
             println!("{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --client <onedrive arguments>",

@@ -64,6 +64,14 @@ export component AppWindow inherits Window {
     background: Palette.background;
 
     // ---------------- navigation
+    in property <bool> dark;
+    changed dark => {
+        Palette.color-scheme = self.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+    init => {
+        Palette.color-scheme = self.dark ? ColorScheme.dark : ColorScheme.light;
+    }
+
     in property <[AccountRow]> accounts;
     in-out property <int> current: -1; // >=0 account, -1 add account, -2 app settings
     callback select(int);
@@ -85,6 +93,7 @@ export component AppWindow inherits Window {
     in-out property <string> s-name;
     callback rename();
     callback open-folder();
+    callback open-online();
     callback sync-now();
     callback set-background(bool);
     callback sign-in();
@@ -364,6 +373,12 @@ export component AppWindow inherits Window {
                                                 text: "Open";
                                                 clicked => {
                                                     root.open-folder();
+                                                }
+                                            }
+                                            if root.s-signed-in: Button {
+                                                text: "Open online";
+                                                clicked => {
+                                                    root.open-online();
                                                 }
                                             }
                                         }

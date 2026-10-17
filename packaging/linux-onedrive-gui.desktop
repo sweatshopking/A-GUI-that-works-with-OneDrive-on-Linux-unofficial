@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Linux OneDrive GUI
+GenericName=OneDrive Sync
+Comment=Sync OneDrive and SharePoint folders
+Exec=linux-onedrive-gui
+Icon=linux-onedrive-gui
+Terminal=false
+Categories=Network;FileTransfer;Qt;
+Keywords=onedrive;sharepoint;microsoft;sync;cloud;
+StartupNotify=true
+StartupWMClass=linux-onedrive-gui

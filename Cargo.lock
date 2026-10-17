@@ -1886,7 +1886,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2ea15059d70bc31b1a8b1eb4c34f2c5df04cb7e53f36179b43c0261231d646"
 dependencies = [
  "accesskit",
- "async-channel",
  "bitflags 2.13.2",
  "cfg-if",
  "chrono",
@@ -1899,7 +1898,6 @@ dependencies = [
  "icu_normalizer",
  "image",
  "js-sys",
- "ksni",
  "lyon_algorithms",
  "lyon_extra",
  "lyon_geom",
@@ -2442,15 +2440,9 @@ version = "0.3.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "814b44c24cd2cb236c3b8a41c7f08237b452a8e76ecaa81f1cec40b5b678215b"
 dependencies = [
- "async-executor",
- "async-io",
- "async-lock",
- "futures-channel",
- "futures-lite",
  "futures-util",
  "pastey",
  "serde",
- "task-local",
  "tokio",
  "zbus",
 ]
@@ -2542,6 +2534,20 @@ name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
+
+[[package]]
+name = "linux-onedrive-gui"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "ksni",
+ "libc",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "ureq",
+]
 
 [[package]]
 name = "linux-raw-sys"
@@ -3193,19 +3199,6 @@ checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
 dependencies = [
  "critical-section",
  "portable-atomic",
-]
-
-[[package]]
-name = "onedrive-tray"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "ksni",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "ureq",
 ]
 
 [[package]]
@@ -4430,15 +4423,6 @@ dependencies = [
  "filetime",
  "libc",
  "xattr",
-]
-
-[[package]]
-name = "task-local"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2972044a9e5e448a506a7ff6f0d03b566d8ef4cd6918a58fc59835a0f8666626"
-dependencies = [
- "pin-project-lite",
 ]
 
 [[package]]

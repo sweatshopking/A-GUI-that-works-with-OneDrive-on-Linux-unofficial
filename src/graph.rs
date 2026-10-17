@@ -171,7 +171,6 @@ pub struct Library {
     pub site: String,
     pub name: String,
     pub drive_id: String,
-    pub url: String,
 }
 
 /// Finds document libraries on SharePoint sites matching `query` ("*" lists every site you can see).
@@ -188,7 +187,6 @@ pub fn find_libraries(tok: &Token, query: &str) -> Result<Vec<Library>, String> 
                 site: site.clone(),
                 name: d["name"].as_str().unwrap_or("").to_string(),
                 drive_id: d["id"].as_str().unwrap_or("").to_string(),
-                url: d["webUrl"].as_str().unwrap_or("").to_string(),
             });
         }
     }
@@ -204,4 +202,43 @@ pub fn human_size(b: u64) -> String {
         i += 1;
     }
     if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", units[i]) }
+}
+
+fn item_url(drive_id: Option<&str>, rel: &str) -> String {
+    let p = rel.trim_matches('/');
+    let base = drive_base(drive_id);
+    if p.is_empty() { format!("{base}/root") } else { format!("{base}/root:/{}:", p.split('/').map(enc).collect::<Vec<_>>().join("/")) }
+}
+
+/// The OneDrive website address for a file or folder (`rel` relative to the account's folder).
+pub fn item_web_url(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<String, String> {
+    let v = get(tok, &format!("{}?$select=webUrl", item_url(drive_id, rel)))?;
+    v["webUrl"].as_str().map(String::from).ok_or_else(|| "OneDrive didn't return a web address.".into())
+}
+
+pub fn web_url(tok: &Token, drive_id: Option<&str>) -> Result<String, String> {
+    item_web_url(tok, drive_id, "")
+}
+
+/// Creates a view-only sharing link. Tries "anyone with the link" first and falls back to
+/// "people in your organisation" where the tenant doesn't allow anonymous links.
+pub fn create_link(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<String, String> {
+    let url = format!("{}/createLink", item_url(drive_id, rel));
+    let mut last = String::new();
+    for scope in ["anonymous", "organization"] {
+        let mut resp = agent()
+            .post(&url)
+            .header("Authorization", &format!("Bearer {}", tok.access))
+            .send_json(serde_json::json!({ "type": "view", "scope": scope }))
+            .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
+        let status = resp.status().as_u16();
+        let v: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
+        if status < 400 {
+            if let Some(u) = v["link"]["webUrl"].as_str() {
+                return Ok(u.to_string());
+            }
+        }
+        last = v["error"]["message"].as_str().unwrap_or("couldn't create a link").to_string();
+    }
+    Err(last)
 }

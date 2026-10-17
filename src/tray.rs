@@ -10,6 +10,7 @@ use chrono::{DateTime, Local};
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 
+use crate::share;
 use crate::core::{self, AccountInfo, AccountPrefs, AppSettings, LogEvent, Phase, Status, UnitState};
 
 const RECENT_MAX: usize = 15;
@@ -51,7 +52,6 @@ impl Acc {
             last_complete: self.last_complete,
             last_error: self.last_error.clone(),
             unit: self.unit.clone(),
-            resyncing: self.resyncing,
         }
     }
 }
@@ -143,6 +143,31 @@ impl Tray {
             }
             .into(),
         );
+        if a.unit.enabled && a.info.signed_in {
+            let pause_items: Vec<MenuItem<Self>> = if a.prefs.paused() {
+                vec![StandardItem {
+                    label: "Resume syncing".into(),
+                    icon_name: "media-playback-start".into(),
+                    activate: Box::new(move |t: &mut Self| t.pause(idx, 0)),
+                    ..Default::default()
+                }
+                .into()]
+            } else {
+                [("Pause for 1 hour", 3600), ("Pause for 4 hours", 4 * 3600), ("Pause until tomorrow", -1)]
+                    .into_iter()
+                    .map(|(label, secs)| {
+                        StandardItem {
+                            label: label.into(),
+                            icon_name: "media-playback-pause".into(),
+                            activate: Box::new(move |t: &mut Self| t.pause(idx, secs)),
+                            ..Default::default()
+                        }
+                        .into()
+                    })
+                    .collect()
+            };
+            items.extend(pause_items);
+        }
         let recent: Vec<MenuItem<Self>> = if a.recent.is_empty() {
             vec![StandardItem { label: "Nothing yet".into(), enabled: false, ..Default::default() }.into()]
         } else {
@@ -182,9 +207,11 @@ impl Tray {
     fn sync_now(&mut self, idx: usize) {
         let a = &mut self.accs[idx];
         // a manual sync outside the schedule window is allowed for an hour
-        if !a.prefs.schedule.allows(Local::now().time()) {
+        if !a.prefs.sync_allowed() {
             let mut s = AppSettings::load();
-            s.prefs_mut(&a.info.confdir).override_until = Local::now().timestamp() + 3600;
+            let p = s.prefs_mut(&a.info.confdir);
+            p.override_until = Local::now().timestamp() + 3600;
+            p.pause_until = 0;
             let _ = s.save();
             a.prefs = s.prefs(&a.info.confdir);
         }
@@ -200,6 +227,32 @@ impl Tray {
                     core::run_detached("systemctl", &["--user", "start", &u]);
                 }
             }
+        }
+    }
+
+    /// Pauses for `secs` seconds (-1 = until 06:00 tomorrow, 0 = resume).
+    fn pause(&mut self, idx: usize, secs: i64) {
+        let a = &mut self.accs[idx];
+        let now = Local::now();
+        let until = match secs {
+            0 => 0,
+            -1 => (now.date_naive() + chrono::Days::new(1))
+                .and_hms_opt(6, 0, 0)
+                .and_then(|t| t.and_local_timezone(Local).single())
+                .map(|t| t.timestamp())
+                .unwrap_or(now.timestamp() + 12 * 3600),
+            s => now.timestamp() + s,
+        };
+        let mut s = AppSettings::load();
+        let p = s.prefs_mut(&a.info.confdir);
+        p.pause_until = until;
+        p.override_until = 0;
+        let _ = s.save();
+        a.prefs = s.prefs(&a.info.confdir);
+        if let Some(u) = &a.info.unit {
+            let verb = if until == 0 { "start" } else { "stop" };
+            a.unit.active = until == 0;
+            core::run_detached("systemctl", &["--user", verb, u]);
         }
     }
 
@@ -328,6 +381,7 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
 /// Every few seconds: re-read accounts and settings, poll systemd, and apply schedules.
 fn poll(handle: ksni::blocking::Handle<Tray>) {
     let mut following: HashSet<String> = HashSet::new();
+    let mut last_phase: std::collections::HashMap<String, Phase> = std::collections::HashMap::new();
     loop {
         let settings = AppSettings::load();
         let infos = core::discover(&settings);
@@ -339,20 +393,32 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
             })
             .collect();
 
-        // schedules: start or stop enabled services to match their window
-        let now = Local::now();
+        // schedules and pauses: start or stop enabled services to match
+        let mut expired_pause = false;
         for (info, (st, resyncing)) in infos.iter().zip(&states) {
             let prefs = settings.prefs(&info.confdir);
             let Some(unit) = &info.unit else { continue };
-            if !prefs.schedule.enabled || !st.enabled || *resyncing || !info.signed_in {
+            let managed_by_time = prefs.schedule.enabled || prefs.pause_until > 0;
+            if !managed_by_time || !st.enabled || *resyncing || !info.signed_in {
                 continue;
             }
-            let allowed = prefs.schedule.allows(now.time()) || prefs.override_until > now.timestamp();
+            let allowed = prefs.sync_allowed();
             if allowed && !st.active && !st.failed {
+                expired_pause |= prefs.pause_until > 0 && !prefs.paused();
                 core::run_detached("systemctl", &["--user", "start", unit]);
             } else if !allowed && st.active {
                 core::run_detached("systemctl", &["--user", "stop", unit]);
             }
+        }
+
+        if expired_pause {
+            let mut s = AppSettings::load();
+            for p in s.accounts.values_mut() {
+                if p.pause_until > 0 && !p.paused() {
+                    p.pause_until = 0;
+                }
+            }
+            let _ = s.save();
         }
 
         for i in &infos {
@@ -382,6 +448,24 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
                 t.accs.push(a);
             }
         });
+        // tell the user when an account newly needs attention
+        let phases: Vec<(String, String, Phase)> = handle
+            .update(|t: &mut Tray| t.accs.iter().map(|a| (a.info.key(), a.info.name.clone(), a.status().phase)).collect())
+            .unwrap_or_default();
+        for (key, name, phase) in &phases {
+            let before = last_phase.insert(key.clone(), *phase);
+            let bad = |p: Phase| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut);
+            if let Some(before) = before {
+                if bad(*phase) && !bad(before) {
+                    let body = match phase {
+                        Phase::SignedOut => "Microsoft needs you to sign in again. Open the tray menu to fix it.",
+                        Phase::NeedsResync => "The sync engine needs a full resync. Open Settings to review and apply it.",
+                        _ => "Syncing hit an error. Open the tray menu for details.",
+                    };
+                    share::notify(&format!("OneDrive: {name}"), body);
+                }
+            }
+        }
         // a unit that was removed stops its follower on its next log line; forget it so a re-add works
         following.retain(|u| handle.update(|t: &mut Tray| t.accs.iter().any(|a| a.info.unit.as_deref() == Some(u))).unwrap_or(false));
         thread::sleep(Duration::from_secs(3));

@@ -124,6 +124,20 @@ pub struct AccountPrefs {
     /// Unix time until which a manual "Sync now" overrides the schedule.
     #[serde(default)]
     pub override_until: i64,
+    /// Unix time until which syncing is paused from the tray.
+    #[serde(default)]
+    pub pause_until: i64,
+}
+
+impl AccountPrefs {
+    pub fn paused(&self) -> bool {
+        self.pause_until > Local::now().timestamp()
+    }
+    /// Whether the background service should be running right now.
+    pub fn sync_allowed(&self) -> bool {
+        let now = Local::now();
+        !self.paused() && (self.schedule.allows(now.time()) || self.override_until > now.timestamp())
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -698,7 +712,6 @@ pub struct Status {
     pub last_complete: Option<DateTime<Local>>,
     pub last_error: Option<String>,
     pub unit: UnitState,
-    pub resyncing: bool,
 }
 
 impl Status {
@@ -713,6 +726,10 @@ impl Status {
             Phase::Error => "Error".into(),
             Phase::Stopped => "Stopped".into(),
             Phase::Off => "Background sync off".into(),
+            Phase::Paused if prefs.paused() => match Local.timestamp_opt(prefs.pause_until, 0).single() {
+                Some(t) => format!("Paused until {}", short_time(t)),
+                None => "Paused".into(),
+            },
             Phase::Paused => format!("Paused by schedule until {}", prefs.schedule.from),
             Phase::Resyncing => "Full resync running…".into(),
             Phase::SignedOut => "Signed out".into(),
@@ -740,7 +757,7 @@ pub fn compose_phase(acc: &AccountInfo, prefs: &AccountPrefs, unit: &UnitState, 
         if log_phase == Phase::NeedsResync {
             return Phase::NeedsResync;
         }
-        if unit.enabled && !prefs.schedule.allows(Local::now().time()) {
+        if unit.enabled && !prefs.sync_allowed() {
             return Phase::Paused;
         }
         if unit.failed {
