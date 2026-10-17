@@ -203,9 +203,11 @@ pub struct Library {
     pub site: String,
     pub name: String,
     pub drive_id: String,
+    pub web_url: String,
 }
 
 /// Finds document libraries on SharePoint sites matching `query` ("*" lists every site you can see).
+/// Microsoft only returns sites the signed-in account is allowed to open.
 pub fn find_libraries(tok: &Token, query: &str) -> Result<Vec<Library>, String> {
     let q = if query.trim().is_empty() {
         "*"
@@ -215,29 +217,163 @@ pub fn find_libraries(tok: &Token, query: &str) -> Result<Vec<Library>, String> 
     let sites = get_all(
         tok,
         format!(
-            "{GRAPH}/sites?search={}&$select=id,displayName,webUrl&$top=50",
+            "{GRAPH}/sites?search={}&$select=id,displayName&$top=50",
             enc(q)
         ),
     )?;
     let mut out = Vec::new();
     for s in sites.iter().take(30) {
-        let Some(id) = s["id"].as_str() else { continue };
-        let site = s["displayName"].as_str().unwrap_or("").to_string();
-        let Ok(drives) = get_all(
-            tok,
-            format!("{GRAPH}/sites/{}/drives?$select=id,name,webUrl", enc(id)),
-        ) else {
+        let (Some(id), name) = (s["id"].as_str(), s["displayName"].as_str().unwrap_or("")) else {
             continue;
         };
-        for d in drives {
-            out.push(Library {
-                site: site.clone(),
-                name: d["name"].as_str().unwrap_or("").to_string(),
-                drive_id: d["id"].as_str().unwrap_or("").to_string(),
-            });
+        // sites you can see but not open (403) are skipped
+        if let Ok(libs) = site_libraries(tok, id, name) {
+            out.extend(libs);
         }
     }
     Ok(out)
+}
+
+fn site_libraries(tok: &Token, site_id: &str, site_name: &str) -> Result<Vec<Library>, String> {
+    let drives = get_all(
+        tok,
+        format!(
+            "{GRAPH}/sites/{}/drives?$select=id,name,webUrl",
+            enc(site_id)
+        ),
+    )?;
+    Ok(drives
+        .iter()
+        .map(|d| Library {
+            site: site_name.to_string(),
+            name: d["name"].as_str().unwrap_or("").to_string(),
+            drive_id: d["id"].as_str().unwrap_or("").to_string(),
+            web_url: d["webUrl"].as_str().unwrap_or("").to_string(),
+        })
+        .collect())
+}
+
+/// Splits a SharePoint address into (host, site path), e.g.
+/// `https://contoso.sharepoint.com/sites/Team/Shared%20Documents/x` -> ("contoso.sharepoint.com", "/sites/Team").
+/// The site path is empty for the root site.
+pub fn parse_site_url(url: &str) -> Option<(String, String)> {
+    let rest = url
+        .trim()
+        .strip_prefix("https://")
+        .or_else(|| url.trim().strip_prefix("http://"))?;
+    let rest = rest.split(['?', '#']).next().unwrap_or(rest);
+    let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+    if !host.contains('.') {
+        return None;
+    }
+    let segs: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    let site = match segs.as_slice() {
+        [kind, name, ..]
+            if ["sites", "teams", "personal"].contains(&kind.to_lowercase().as_str()) =>
+        {
+            format!("/{kind}/{name}")
+        }
+        _ => String::new(),
+    };
+    Some((host.to_lowercase(), site))
+}
+
+/// Libraries of the site at a pasted address, plus the index of the library the address points
+/// into, if it points into one.
+pub fn libraries_at_url(tok: &Token, url: &str) -> Result<(Vec<Library>, Option<usize>), String> {
+    let (host, path) = parse_site_url(url)
+        .ok_or_else(|| "That doesn't look like a SharePoint address. Copy it from your browser's address bar — it starts with https://".to_string())?;
+    let site_url = if path.is_empty() {
+        format!("{GRAPH}/sites/{host}")
+    } else {
+        format!("{GRAPH}/sites/{host}:{path}")
+    };
+    let site = get(tok, &format!("{site_url}?$select=id,displayName"))
+        .map_err(|e| format!("Couldn't open that site with this account: {e}"))?;
+    let id = site["id"]
+        .as_str()
+        .ok_or("Microsoft didn't return the site.")?;
+    let libs = site_libraries(tok, id, site["displayName"].as_str().unwrap_or(""))?;
+    let wanted = percent_decode(url).to_lowercase();
+    let pick = libs.iter().position(|l| {
+        !l.web_url.is_empty() && url_within(&wanted, &percent_decode(&l.web_url).to_lowercase())
+    });
+    Ok((libs, pick))
+}
+
+/// True when `url` is `base` or somewhere below it (whole path segments, so /Model isn't /Models).
+fn url_within(url: &str, base: &str) -> bool {
+    let base = base.trim_end_matches('/');
+    url.strip_prefix(base)
+        .is_some_and(|rest| rest.is_empty() || rest.starts_with(['/', '?', '#']))
+}
+
+fn percent_decode(s: &str) -> String {
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let (Some(&h), Some(&l)) = (b.get(i + 1), b.get(i + 2))
+            && let (Some(h), Some(l)) = (hex(h), hex(l))
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn site_urls() {
+        let p = |u: &str| parse_site_url(u);
+        assert_eq!(
+            p(
+                "https://Contoso.sharepoint.com/sites/Team/Shared%20Documents/Forms/AllItems.aspx?id=1"
+            ),
+            Some(("contoso.sharepoint.com".into(), "/sites/Team".into()))
+        );
+        assert_eq!(
+            p("https://contoso.sharepoint.com/teams/x"),
+            Some(("contoso.sharepoint.com".into(), "/teams/x".into()))
+        );
+        assert_eq!(
+            p("https://contoso.sharepoint.com/"),
+            Some(("contoso.sharepoint.com".into(), String::new()))
+        );
+        assert_eq!(p("contoso"), None);
+        assert_eq!(p("Marketing"), None);
+    }
+
+    #[test]
+    fn library_matching() {
+        assert!(url_within(
+            "https://x/sites/a/model/forms/allitems.aspx",
+            "https://x/sites/a/model"
+        ));
+        assert!(url_within(
+            "https://x/sites/a/model",
+            "https://x/sites/a/model/"
+        ));
+        assert!(!url_within(
+            "https://x/sites/a/models/forms",
+            "https://x/sites/a/model"
+        ));
+    }
+
+    #[test]
+    fn decoding() {
+        assert_eq!(percent_decode("Shared%20Documents%2"), "Shared Documents%2");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
 }
 
 pub fn human_size(b: u64) -> String {

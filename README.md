@@ -22,7 +22,8 @@ If anyone has any suggestions or bugs, please let me know.
 ## Features
 
 - **Personal, work/school and SharePoint** — add as many accounts and document libraries as you like.
-  SharePoint libraries are found by searching for the site name.
+  For SharePoint, paste the site or library address from your browser, or pick from the sites your work
+  account belongs to. Only sites that account can already open ever appear.
 - **Sign in and out from the app** — your browser opens, you log in, and the app picks it up by itself.
 - **Pick folders** — browse everything in your OneDrive, including folders that aren't on this computer yet,
   and tick the ones you want.

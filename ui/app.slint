@@ -844,24 +844,27 @@ export component AppWindow inherits Window {
                                 HorizontalLayout {
                                     spacing: 8px;
                                     Text {
-                                        text: "Site name";
+                                        text: "Site";
                                         width: 120px;
                                         vertical-alignment: center;
                                     }
                                     LineEdit {
                                         text <=> root.add-query;
-                                        placeholder-text: "Part of the site's name, or leave empty to list all";
+                                        placeholder-text: "Paste the site's address, or type part of its name";
                                         accepted => {
                                             root.add-search();
                                         }
                                     }
                                     Button {
-                                        text: "Search";
+                                        text: "Find";
                                         enabled: !root.add-busy;
                                         clicked => {
                                             root.add-search();
                                         }
                                     }
+                                }
+                                Hint {
+                                    text: "Copy the address from your browser while viewing the SharePoint site or library. Leave it empty to list the sites you belong to — only sites this account can already open appear.";
                                 }
                                 if root.add-libraries.length > 0: Rectangle {
                                     height: min(root.add-libraries.length * 30px + 8px, 220px);

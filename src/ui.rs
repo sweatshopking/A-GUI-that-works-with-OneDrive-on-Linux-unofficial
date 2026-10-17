@@ -1713,6 +1713,8 @@ fn add_browse(ctx: &Shared) {
     );
 }
 
+/// Finds libraries from what was typed: a pasted SharePoint address opens that site; anything
+/// else searches the sites the chosen account belongs to (empty lists them all).
 fn add_search(ctx: &Shared) {
     let c = ctx.borrow();
     let ui = c.ui();
@@ -1721,26 +1723,38 @@ fn add_search(ctx: &Shared) {
         ui.set_add_msg(ss("Add and sign in to a work or school account first."));
         return;
     };
-    let query = ui.get_add_query().to_string();
+    let query = ui.get_add_query().trim().to_string();
     let cached = c.token(&from.key());
     ui.set_add_busy(true);
-    ui.set_add_msg(ss("Searching…"));
+    ui.set_add_msg(ss(if query.starts_with("http") {
+        "Opening that site…"
+    } else {
+        "Looking through your sites…"
+    }));
     drop(c);
     let key = from.key();
     bg(
         move || {
             let t = token_for(&from.confdir, cached)?;
-            let libs = graph::find_libraries(&as_graph(&t), &query)?;
-            Ok::<_, String>((t, libs))
+            let found = if query.starts_with("http") {
+                graph::libraries_at_url(&as_graph(&t), &query)?
+            } else {
+                (graph::find_libraries(&as_graph(&t), &query)?, None)
+            };
+            Ok::<_, String>((t, found))
         },
         move |ctx, r| {
             let mut c = ctx.borrow_mut();
             let ui = c.ui();
             ui.set_add_busy(false);
             match r {
-                Ok((t, libs)) => {
+                Ok((t, (libs, pick))) => {
                     c.tokens.insert(key, t);
-                    ui.set_add_msg(ss(if libs.is_empty() { "No libraries found. Try part of the site's name, or leave the box empty to list everything you can access." } else { "" }));
+                    ui.set_add_msg(ss(if libs.is_empty() {
+                        "No libraries found. Paste the site's address from your browser, or type part of its name."
+                    } else {
+                        ""
+                    }));
                     let labels: Vec<SharedString> = libs
                         .iter()
                         .map(|l| ss(format!("{}  —  {}", l.site, l.name)))
@@ -1748,6 +1762,12 @@ fn add_search(ctx: &Shared) {
                     ui.set_add_libraries(ModelRc::new(VecModel::from(labels)));
                     ui.set_add_lib_index(-1);
                     c.libraries = libs;
+                    // a single library, or an address pointing into one, picks itself
+                    let auto = pick.or((c.libraries.len() == 1).then_some(0));
+                    drop(c);
+                    if let Some(i) = auto {
+                        add_lib_picked(ctx, i);
+                    }
                 }
                 Err(e) => ui.set_add_msg(ss(e)),
             }
