@@ -15,6 +15,10 @@ slint = { version = "1.18.1", default-features = false, features = ["std", "back
 ureq = { version = "3.4.2", features = ["json"] }
 libc = "0.2"
 
+[features]
+# scripted UI driver used by the automated tests (see src/testdrive.rs)
+test-driver = []
+
 [build-dependencies]
 slint-build = "1.18.1"
 

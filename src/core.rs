@@ -648,7 +648,9 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
             if needs_done && !msg.ends_with("done") {
                 return None;
             }
-            let path = rest.split(" ... ").next().unwrap_or(rest).trim().to_string();
+            let path = rest.split(" ... ").next().unwrap_or(rest).trim();
+            // newer clients print paths relative to the sync folder as "./a/b"
+            let path = path.strip_prefix("./").unwrap_or(path).to_string();
             return Some(LogEvent::File { kind, path });
         }
     }
@@ -839,6 +841,7 @@ mod tests {
     fn log_lines() {
         assert!(matches!(parse_log("Uploading new file: a/b.txt ... done"), Some(LogEvent::File { kind: "↑", .. })));
         assert!(parse_log("Uploading new file: a/b.txt ... failed").is_none());
+        assert!(matches!(parse_log("Downloading file: ./x/y.pdf ... done"), Some(LogEvent::File { path, .. }) if path == "x/y.pdf"));
         assert!(matches!(parse_log("Sync with Microsoft OneDrive is complete"), Some(LogEvent::Complete)));
     }
 }

@@ -65,6 +65,7 @@ struct SignIn {
     stdin: Option<ChildStdin>,
     out: Arc<Mutex<String>>,
     url: Option<String>,
+    url_file: Option<PathBuf>,
     enable_after: bool,
     finished: bool,
 }
@@ -79,6 +80,7 @@ struct Preview {
     pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
     running: bool,
+    folders_changed: bool,
 }
 
 struct Snapshot {
@@ -142,6 +144,12 @@ impl Ctx {
     fn token(&self, key: &str) -> Option<CachedToken> {
         self.tokens.get(key).filter(|t| t.expires > Instant::now()).cloned()
     }
+}
+
+/// The open account. A function rather than `ctx.borrow().current_account()` inline so the borrow
+/// ends here: inside `if let` a temporary borrow would otherwise last for the whole block.
+fn current(ctx: &Shared) -> Option<AccountInfo> {
+    ctx.borrow().current_account()
 }
 
 fn token_for(confdir: &Path, cached: Option<CachedToken>) -> Result<CachedToken, String> {
@@ -342,6 +350,10 @@ fn load_quota(ctx: &Shared, acc: &AccountInfo) {
                     if q.total > 0 {
                         ui.set_s_quota(ss(format!("{} of {} used", graph::human_size(q.used), graph::human_size(q.total))));
                         ui.set_s_quota_frac((q.used as f64 / q.total as f64) as f32);
+                    } else if q.used > 0 {
+                        // SharePoint libraries often report usage without a total
+                        ui.set_s_quota(ss(format!("{} used", graph::human_size(q.used))));
+                        ui.set_s_quota_frac(0.0);
                     }
                     ui.set_s_owner(ss(q.owner));
                 }
@@ -379,7 +391,7 @@ fn load_options(ctx: &Shared, acc: &AccountInfo) {
 }
 
 fn save_options(ctx: &Shared) {
-    let Some(acc) = ctx.borrow().current_account() else { return };
+    let Some(acc) = current(ctx) else { return };
     let ui = ctx.borrow().ui();
     let sched_on = ui.get_o_sched_on();
     let (from, to) = (ui.get_o_from().trim().to_string(), ui.get_o_to().trim().to_string());
@@ -400,6 +412,8 @@ fn save_options(ctx: &Shared) {
         return;
     }
     ctx.borrow_mut().settings = s.clone();
+    ui.set_f_allowed(ui.get_o_allow_resync());
+    render_tree(ctx);
 
     let cfg = ClientConfig::load(&acc.confdir);
     let mut plain: Vec<(String, Option<String>)> = Vec::new();
@@ -601,7 +615,7 @@ fn folder_changes(c: &Ctx, ui: &AppWindow) -> Option<(Vec<String>, Option<bool>)
 }
 
 fn folder_expand(ctx: &Shared, i: usize) {
-    let Some(acc) = ctx.borrow().current_account() else { return };
+    let Some(acc) = current(ctx) else { return };
     let action = {
         let mut c = ctx.borrow_mut();
         let Some(n) = c.tree.rows.get(i).cloned() else { return };
@@ -648,7 +662,7 @@ fn folder_check(ctx: &Shared, i: usize) {
 }
 
 fn folders_apply(ctx: &Shared) {
-    let Some(acc) = ctx.borrow().current_account() else { return };
+    let Some(acc) = current(ctx) else { return };
     let ui = ctx.borrow().ui();
     let Some((lines, root_files)) = folder_changes(&ctx.borrow(), &ui) else { return };
     let config = root_files.map(|r| vec![("sync_root_files".to_string(), r.then(|| "true".to_string()))]).unwrap_or_default();
@@ -719,6 +733,7 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
         pid: pid.clone(),
         cancelled: cancelled.clone(),
         running: true,
+        folders_changed: change.sync_list.is_some(),
     });
     bg(
         move || -> Result<bool, String> {
@@ -756,11 +771,12 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
                 return;
             }
             let output = p.out.lock().unwrap().clone();
+            let folders_changed = p.folders_changed;
             let ui = c.ui();
             ui.set_p_busy(false);
             match r {
                 Ok(ok) => {
-                    let s = summarize(&output, ok);
+                    let s = summarize(&output, ok, folders_changed);
                     ui.set_p_text(ss(s.text));
                     ui.set_p_warn(ss(s.warn));
                     ui.set_p_can_apply(s.can_apply);
@@ -780,7 +796,11 @@ struct Summary {
     can_apply: bool,
 }
 
-fn summarize(output: &str, ok: bool) -> Summary {
+fn summarize(output: &str, ok: bool, folders_changed: bool) -> Summary {
+    let clean = |p: &str| {
+        let p = p.split(" ... ").next().unwrap_or(p).trim();
+        p.strip_prefix("./").unwrap_or(p).to_string()
+    };
     let num_after = |line: &str, prefix: &str| -> Option<u64> { line.trim().strip_prefix(prefix)?.trim().parse().ok() };
     let (mut downloads, mut uploads) = (0u64, 0u64);
     let (mut online_del, mut local_del, mut errors): (Vec<String>, Vec<String>, Vec<String>) = (vec![], vec![], vec![]);
@@ -791,9 +811,9 @@ fn summarize(output: &str, ok: bool) -> Summary {
         } else if let Some(n) = num_after(l, "New items to upload to Microsoft OneDrive:") {
             uploads += n;
         } else if let Some(p) = l.strip_prefix("Deleting item from Microsoft OneDrive: ") {
-            online_del.push(p.to_string());
+            online_del.push(clean(p));
         } else if let Some(p) = l.strip_prefix("Deleting local file: ").or_else(|| l.strip_prefix("Deleting local directory: ")) {
-            local_del.push(p.split(" ... ").next().unwrap_or(p).to_string());
+            local_del.push(clean(p));
         } else if l.starts_with("ERROR") {
             errors.push(l.to_string());
         }
@@ -812,7 +832,9 @@ fn summarize(output: &str, ok: bool) -> Summary {
     text.push_str(&format!("  •  upload {uploads} item(s) to OneDrive\n"));
     text.push_str(&format!("  •  delete {} item(s) online\n", online_del.len()));
     text.push_str(&format!("  •  delete {} item(s) on this computer\n", local_del.len()));
-    text.push_str("\nFolders you stop syncing stay on this computer; they just stop being kept in sync.");
+    if folders_changed {
+        text.push_str("\nFolders you stop syncing stay on this computer; they just stop being kept in sync.");
+    }
     let mut warn = String::new();
     for (label, list) in [("Online deletions", &online_del), ("Deletions on this computer", &local_del)] {
         if !list.is_empty() {
@@ -985,6 +1007,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
     let out = Arc::new(Mutex::new(String::new()));
     let mut cmd = core::client_command();
     cmd.arg("--confdir").arg(&acc.confdir);
+    let url_file = browser_shim(&mut cmd);
     let child = cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn();
     let ui = ctx.borrow().ui();
     let mut child = match child {
@@ -1016,7 +1039,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
     ui.set_si_done(false);
     ui.set_si_paste(ss(""));
     ui.set_si_visible(true);
-    ctx.borrow_mut().signin = Some(SignIn { key: acc.key(), child, stdin, out, url: None, enable_after, finished: false });
+    ctx.borrow_mut().signin = Some(SignIn { key: acc.key(), child, stdin, out, url: None, url_file, enable_after, finished: false });
 }
 
 /// Called on a timer while a sign-in is running.
@@ -1029,7 +1052,8 @@ fn poll_signin(ctx: &Shared) {
     }
     let text = si.out.lock().unwrap().clone();
     if si.url.is_none() {
-        si.url = text.split_whitespace().find(|w| w.starts_with("https://login.") && w.contains("authorize")).map(String::from);
+        let from_shim = si.url_file.as_ref().and_then(|f| fs::read_to_string(f).ok()).map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        si.url = from_shim.or_else(|| text.split_whitespace().find(|w| w.starts_with("https://login.") && w.contains("authorize")).map(String::from));
         ui.set_si_has_url(si.url.is_some());
     }
     if !ui.get_si_need_paste() && text.contains("Paste redirect URI here") {
@@ -1060,10 +1084,48 @@ fn poll_signin(ctx: &Shared) {
             .find(|l| !l.is_empty() && !l.starts_with("Paste"))
             .unwrap_or("The sign-in didn't finish.")
             .to_string();
-        ui.set_si_text(ss(format!("Sign-in didn't complete.\n\n{detail}")));
+        ui.set_si_text(ss(format!("Sign-in didn't complete.\n\n{}", friendly_signin_error(&detail))));
         ui.set_si_done(true);
         ui.set_si_need_paste(false);
     }
+}
+
+/// Turns the client's command-line oriented errors into something a person can act on.
+fn friendly_signin_error(detail: &str) -> String {
+    let d = detail.to_lowercase();
+    if d.contains("--reauth") || d.contains("invalid_grant") || d.contains("authorisation code") {
+        "Microsoft didn't accept the sign-in. Please try again, and make sure you finish logging in in the browser.".into()
+    } else if d.contains("timed out") || d.contains("timeout") {
+        "The sign-in timed out. Please try again.".into()
+    } else if d.contains("aadsts") {
+        format!("Microsoft reported a problem: {detail}")
+    } else if d.contains("unable to reach") || d.contains("network") || d.contains("could not resolve") {
+        "Couldn't reach Microsoft. Check your internet connection and try again.".into()
+    } else {
+        detail.to_string()
+    }
+}
+
+/// Puts a small `xdg-open` wrapper first on the client's PATH that records the sign-in address
+/// before opening the browser, so we can offer "open again" and "copy link".
+fn browser_shim(cmd: &mut Command) -> Option<PathBuf> {
+    let base = std::env::var("XDG_RUNTIME_DIR").map(PathBuf::from).unwrap_or_else(|_| std::env::temp_dir());
+    let dir = base.join(core::APP_ID).join("shim");
+    fs::create_dir_all(&dir).ok()?;
+    let url_file = dir.join("last-url");
+    let _ = fs::remove_file(&url_file);
+    let real = std::env::var_os("PATH").unwrap_or_default().to_string_lossy().to_string();
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$1\" > {}\nPATH={}\nexec xdg-open \"$@\"\n",
+        sh_quote(&url_file.to_string_lossy()),
+        sh_quote(&real)
+    );
+    let shim = dir.join("xdg-open");
+    fs::write(&shim, script).ok()?;
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o700)).ok()?;
+    cmd.env("PATH", format!("{}:{real}", dir.display()));
+    Some(url_file)
 }
 
 fn after_sign_in(acc: AccountInfo, enable: bool) {
@@ -1136,7 +1198,7 @@ fn signin_close(ctx: &Shared) {
 }
 
 fn sign_out(ctx: &Shared) {
-    let Some(acc) = ctx.borrow().current_account() else { return };
+    let Some(acc) = current(ctx) else { return };
     ctx.borrow().ui().set_s_busy(true);
     bg(
         move || {
@@ -1163,7 +1225,7 @@ fn sign_out(ctx: &Shared) {
 // ---------------------------------------------------------------- remove
 
 fn remove_confirm(ctx: &Shared) {
-    let Some(acc) = ctx.borrow().current_account() else { return };
+    let Some(acc) = current(ctx) else { return };
     let delete_config = ctx.borrow().ui().get_r_delete_config();
     let ui = ctx.borrow().ui();
     ui.set_r_visible(false);
@@ -1588,7 +1650,7 @@ pub fn run(account: Option<String>) {
     }
     on!(on_select, |c, i: i32| select(c, i));
     on!(on_rename, |c| {
-        let Some(acc) = c.borrow().current_account() else { return };
+        let Some(acc) = current(c) else { return };
         let name = c.borrow().ui().get_s_name().trim().to_string();
         if name.is_empty() {
             return;
@@ -1605,12 +1667,12 @@ pub fn run(account: Option<String>) {
         refresh(c);
     });
     on!(on_open_folder, |c| {
-        if let Some(a) = c.borrow().current_account() {
+        if let Some(a) = current(c) {
             core::open_path(&a.sync_dir);
         }
     });
     on!(on_sync_now, |c| {
-        let Some(acc) = c.borrow().current_account() else { return };
+        let Some(acc) = current(c) else { return };
         let mut s = AppSettings::load();
         s.prefs_mut(&acc.confdir).override_until = Local::now().timestamp() + 3600;
         let _ = s.save();
@@ -1626,7 +1688,7 @@ pub fn run(account: Option<String>) {
         refresh(c);
     });
     on!(on_set_background, |c, on: bool| {
-        let Some(acc) = c.borrow().current_account() else { return };
+        let Some(acc) = current(c) else { return };
         c.borrow().ui().set_s_busy(true);
         bg(
             move || -> Result<(), String> {
@@ -1647,14 +1709,14 @@ pub fn run(account: Option<String>) {
         );
     });
     on!(on_sign_in, |c| {
-        if let Some(acc) = c.borrow().current_account() {
+        if let Some(acc) = current(c) {
             let enable = acc.unit.as_deref().is_none_or(|u| !core::unit_state(u).enabled);
             sign_in(c, &acc, enable);
         }
     });
     on!(on_sign_out, |c| sign_out(c));
     on!(on_remove_account, |c| {
-        let Some(acc) = c.borrow().current_account() else { return };
+        let Some(acc) = current(c) else { return };
         let ui = c.borrow().ui();
         ui.set_r_text(ss(format!(
             "Stop syncing \"{}\" on this computer?\n\nYour files in {} stay where they are, and nothing is deleted online.",
@@ -1667,8 +1729,20 @@ pub fn run(account: Option<String>) {
     on!(on_r_confirm, |c| remove_confirm(c));
     on!(on_r_cancel, |c| c.borrow().ui().set_r_visible(false));
     on!(on_si_open_url, |c| {
-        if let Some(u) = c.borrow().signin.as_ref().and_then(|s| s.url.clone()) {
+        let url = c.borrow().signin.as_ref().and_then(|s| s.url.clone());
+        if let Some(u) = url {
             core::run_detached("xdg-open", &[&u]);
+        }
+    });
+    on!(on_si_copy_url, |c| {
+        let url = c.borrow().signin.as_ref().and_then(|s| s.url.clone());
+        if let Some(u) = url {
+            let ok = crate::share::copy_to_clipboard(&u);
+            c.borrow().ui().set_si_text(ss(if ok {
+                "Sign-in link copied. Paste it into any browser, log in, and this window will update by itself."
+            } else {
+                "Couldn't reach the clipboard. Use \"Open sign-in page again\" instead."
+            }));
         }
     });
     on!(on_si_submit, |c| signin_submit(c));
@@ -1678,14 +1752,14 @@ pub fn run(account: Option<String>) {
     on!(on_f_expand, |c, i: i32| folder_expand(c, i as usize));
     on!(on_f_check, |c, i: i32| folder_check(c, i as usize));
     on!(on_f_reload, |c| {
-        if let Some(acc) = c.borrow().current_account() {
+        if let Some(acc) = current(c) {
             load_folders(c, &acc, true);
         }
     });
     on!(on_f_apply, |c| folders_apply(c));
     on!(on_o_save, |c| save_options(c));
     on!(on_a_refresh, |c| {
-        if let Some(acc) = c.borrow().current_account() {
+        if let Some(acc) = current(c) {
             load_activity(c, &acc);
         }
     });
@@ -1712,7 +1786,7 @@ pub fn run(account: Option<String>) {
     on!(on_app_add_to_menu, |c| add_to_menu(c));
     on!(on_open_url, |_c, u: SharedString| core::run_detached("xdg-open", &[u.as_str()]));
     on!(on_open_online, |c| {
-        let Some(acc) = c.borrow().current_account() else { return };
+        let Some(acc) = current(c) else { return };
         let cached = c.borrow().token(&acc.key());
         bg(
             move || {
@@ -1737,7 +1811,8 @@ pub fn run(account: Option<String>) {
                     return slint::CloseRequestResponse::KeepWindowShown;
                 }
             }
-            if let Some(mut si) = w.borrow_mut().signin.take() {
+            let signin = w.borrow_mut().signin.take();
+            if let Some(mut si) = signin {
                 let _ = si.child.kill();
                 let _ = si.child.wait();
             }
@@ -1762,6 +1837,8 @@ pub fn run(account: Option<String>) {
             }
         });
     }
+    #[cfg(feature = "test-driver")]
+    let _driver = crate::testdrive::start(&ui);
     ui.run().expect("event loop failed");
     CTX.with(|c| *c.borrow_mut() = None);
 }
@@ -1772,14 +1849,16 @@ mod tests {
 
     #[test]
     fn summary_counts() {
-        let out = "Number of items to download from Microsoft OneDrive: 3\nNew items to upload to Microsoft OneDrive: 2\nDeleting item from Microsoft OneDrive: a/b.txt\nDeleting local file: c.txt ... done\n";
-        let s = summarize(out, true);
+        let out = "Number of items to download from Microsoft OneDrive: 3\nNew items to upload to Microsoft OneDrive: 2\nDeleting item from Microsoft OneDrive: ./a/b.txt\nDeleting local file: c.txt ... done\nDeleting the saved application sync status ...\n";
+        let s = summarize(out, true, true);
         assert!(s.text.contains("download 3"));
         assert!(s.text.contains("upload 2"));
         assert!(s.text.contains("delete 1 item(s) online"));
-        assert!(s.warn.contains("a/b.txt") && s.warn.contains("c.txt"));
+        assert!(s.warn.contains("  a/b.txt") && s.warn.contains("  c.txt"));
+        assert!(s.text.contains("delete 1 item(s) on this computer"));
         assert!(s.can_apply);
-        assert!(!summarize("ERROR: boom", false).can_apply);
+        assert!(!summarize("ERROR: boom", false, false).can_apply);
+        assert!(!summarize("", true, false).text.contains("Folders you stop"));
     }
 
     #[test]

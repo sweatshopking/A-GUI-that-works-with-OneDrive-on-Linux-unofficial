@@ -7,6 +7,8 @@
 mod core;
 mod graph;
 mod share;
+#[cfg(feature = "test-driver")]
+mod testdrive;
 mod tray;
 mod ui;
 

@@ -74,6 +74,7 @@ export component AppWindow inherits Window {
 
     in property <[AccountRow]> accounts;
     in-out property <int> current: -1; // >=0 account, -1 add account, -2 app settings
+    in-out property <int> tab: 0;
     callback select(int);
 
     // ---------------- status tab
@@ -108,6 +109,7 @@ export component AppWindow inherits Window {
     in property <bool> si-done;
     in-out property <string> si-paste;
     callback si-open-url();
+    callback si-copy-url();
     callback si-submit();
     callback si-close();
 
@@ -289,6 +291,7 @@ export component AppWindow inherits Window {
                 }
 
                 TabWidget {
+                    current-index <=> root.tab;
                     Tab {
                         title: "Status";
                         ScrollView {
@@ -1065,6 +1068,12 @@ export component AppWindow inherits Window {
                 HorizontalLayout {
                     spacing: 8px;
                     alignment: end;
+                    if root.si-has-url && !root.si-done: Button {
+                        text: "Copy link";
+                        clicked => {
+                            root.si-copy-url();
+                        }
+                    }
                     if root.si-has-url && !root.si-done: Button {
                         text: "Open sign-in page again";
                         clicked => {
