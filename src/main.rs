@@ -20,9 +20,12 @@ fn main() {
     match args.first().map(String::as_str) {
         Some("--client") => run_client(&args[1..]),
         Some("--tray") => {
-            if tray::already_running() {
-                return;
-            }
+            // held for the life of the process; a second tray finds the name taken and leaves
+            let _instance = match dbus::claim_name(core::TRAY_BUS_NAME) {
+                dbus::Claim::TakenByAnother => return,
+                dbus::Claim::Owned(c) => Some(c),
+                dbus::Claim::Unavailable => None,
+            };
             tray::run()
         }
         Some("--share-link") => args

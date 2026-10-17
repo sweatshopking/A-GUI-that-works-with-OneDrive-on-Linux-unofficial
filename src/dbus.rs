@@ -91,3 +91,27 @@ pub fn klipper_set(text: &str) -> bool {
     )
     .is_ok()
 }
+
+/// Result of [`claim_name`].
+pub enum Claim {
+    Owned(Connection),
+    TakenByAnother,
+    /// No session bus; callers should just carry on.
+    Unavailable,
+}
+
+/// Claims a well-known bus name for as long as the returned connection is kept alive. Only one
+/// process can hold it, so this is a reliable "already running" check however we were started
+/// (package, AppImage, or a build directory).
+pub fn claim_name(name: &str) -> Claim {
+    use zbus::fdo::{RequestNameFlags, RequestNameReply};
+    let Ok(c) = Connection::session() else {
+        return Claim::Unavailable;
+    };
+    match c.request_name_with_flags(name, RequestNameFlags::DoNotQueue.into()) {
+        Ok(RequestNameReply::PrimaryOwner | RequestNameReply::AlreadyOwner) => Claim::Owned(c),
+        // zbus reports a name held elsewhere as an error rather than a reply
+        Ok(_) | Err(zbus::Error::NameTaken) => Claim::TakenByAnother,
+        Err(_) => Claim::Unavailable,
+    }
+}

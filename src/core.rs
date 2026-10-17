@@ -13,6 +13,8 @@ use serde::{Deserialize, Serialize};
 pub const APP_ID: &str = "linux-onedrive-gui";
 pub const APP_NAME: &str = "Linux OneDrive GUI";
 pub const MANAGED_MARK: &str = "# Managed by linux-onedrive-gui";
+/// Session-bus name the tray owns while it runs, so only one tray ever starts.
+pub const TRAY_BUS_NAME: &str = "io.github.sweatshopking.LinuxOnedriveGui.Tray";
 
 // ---------------------------------------------------------------- paths
 

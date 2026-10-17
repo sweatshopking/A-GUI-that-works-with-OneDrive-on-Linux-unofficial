@@ -652,26 +652,3 @@ pub fn run() {
         thread::park();
     }
 }
-
-/// True if a tray instance is already registered on the session bus.
-pub fn already_running() -> bool {
-    let me = std::process::id();
-    std::fs::read_dir("/proc")
-        .map(|rd| {
-            rd.flatten().any(|e| {
-                let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
-                    return false;
-                };
-                if pid == me {
-                    return false;
-                }
-                let cmd = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
-                let args: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
-                let is_us = args
-                    .first()
-                    .is_some_and(|a| String::from_utf8_lossy(a).contains(core::APP_ID));
-                is_us && args.iter().any(|a| *a == b"--tray")
-            })
-        })
-        .unwrap_or(false)
-}
