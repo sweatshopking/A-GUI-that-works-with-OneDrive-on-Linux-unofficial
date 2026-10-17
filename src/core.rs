@@ -852,8 +852,8 @@ pub fn icon_theme_path() -> Option<PathBuf> {
         .map(|p| p.canonicalize().unwrap_or(p))
 }
 
-/// Only the log lines that matter for status, however busy the log is. Falls back to a plain
-/// tail on systems whose journalctl lacks --grep.
+/// Only the log lines that matter for status, however busy the log is, oldest first.
+/// Falls back to a plain tail on systems whose journalctl lacks --grep.
 pub fn journal_status_lines(unit: &str) -> Vec<String> {
     let pattern = "Starting a sync|Sync with Microsoft OneDrive is complete|ERROR|Unable to |--resync|requires authentication|re-authenticate|invalid_grant";
     let out = Command::new("journalctl")
@@ -874,13 +874,27 @@ pub fn journal_status_lines(unit: &str) -> Vec<String> {
     match out {
         // exit status 1 with nothing on stderr just means "no matching lines"
         Ok(o) if o.status.success() || (o.status.code() == Some(1) && o.stderr.is_empty()) => {
-            String::from_utf8_lossy(&o.stdout)
-                .lines()
-                .map(String::from)
-                .collect()
+            chronological(
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(String::from)
+                    .collect(),
+            )
         }
         _ => journal_tail(unit, 400),
     }
+}
+
+/// Sorts `short-unix` journal lines by their timestamp. journalctl --grep together with -n
+/// returns the newest match first, unlike a plain tail.
+fn chronological(mut lines: Vec<String>) -> Vec<String> {
+    let stamp = |l: &String| {
+        l.split_once(' ')
+            .and_then(|(t, _)| t.parse::<f64>().ok())
+            .unwrap_or(0.0)
+    };
+    lines.sort_by(|a, b| stamp(a).total_cmp(&stamp(b)));
+    lines
 }
 
 pub fn journal_tail(unit: &str, lines: usize) -> Vec<String> {
@@ -1097,6 +1111,18 @@ mod tests {
         assert_eq!(sync_list_folder("/Documents/"), Some("/Documents".into()));
         assert_eq!(sync_list_folder("Pictures/*"), Some("/Pictures".into()));
         assert_eq!(sync_list_folder("!/Junk"), None);
+    }
+
+    #[test]
+    fn journal_order() {
+        let lines = vec![
+            "20.5 h onedrive[1]: b".to_string(),
+            "10.0 h onedrive[1]: a".to_string(),
+        ];
+        assert_eq!(
+            chronological(lines),
+            vec!["10.0 h onedrive[1]: a", "20.5 h onedrive[1]: b"]
+        );
     }
 
     #[test]

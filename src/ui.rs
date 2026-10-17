@@ -1987,7 +1987,7 @@ fn add_to_menu(ctx: &Shared) {
     })();
     let ui = ctx.borrow().ui();
     ui.set_app_msg(ss(match r {
-        Ok(()) => "Added. Look for \"Linux OneDrive GUI\" in your applications menu. Dolphin also gets \"Copy OneDrive link\" and \"View on OneDrive\" in its right-click menu.".to_string(),
+        Ok(()) => "Added. Look for \"Linux OneDrive GUI\" in your applications menu. Right-clicking a file in Dolphin now also shows a OneDrive menu with \"Copy sharing link\" and \"View on the OneDrive website\".".to_string(),
         Err(e) => format!("Couldn't add it: {e}"),
     }));
 }

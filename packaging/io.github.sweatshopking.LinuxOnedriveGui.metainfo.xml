@@ -25,8 +25,18 @@
   <developer id="io.github.sweatshopking">
     <name>sweatshopking</name>
   </developer>
+  <screenshots>
+    <screenshot type="default">
+      <image>https://raw.githubusercontent.com/sweatshopking/Linux-Onedrive-GUI/main/docs/screenshots/status-light.png</image>
+      <caption>Account status</caption>
+    </screenshot>
+    <screenshot>
+      <image>https://raw.githubusercontent.com/sweatshopking/Linux-Onedrive-GUI/main/docs/screenshots/folders-dark.png</image>
+      <caption>Choosing which folders to sync</caption>
+    </screenshot>
+  </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
-    <release version="0.1.0" date="2026-10-18"/>
+    <release version="1.0.0" date="2026-10-18"/>
   </releases>
 </component>

@@ -1,10 +1,15 @@
 [package]
 name = "linux-onedrive-gui"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 description = "Tray app and settings window for the OneDrive Client for Linux"
 license = "GPL-3.0-or-later"
-authors = ["josh"]
+authors = ["sweatshopking"]
+repository = "https://github.com/sweatshopking/Linux-Onedrive-GUI"
+homepage = "https://github.com/sweatshopking/Linux-Onedrive-GUI"
+readme = "README.md"
+keywords = ["onedrive", "sharepoint", "sync", "tray", "linux"]
+categories = ["gui"]
 
 [dependencies]
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }

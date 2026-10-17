@@ -217,6 +217,7 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "add_lib_picked" => ui.invoke_add_lib_picked(n),
         "add_create" => ui.invoke_add_create(),
         "app_autostart_toggled" => ui.invoke_app_autostart_toggled(),
+        "app_add_to_menu" => ui.invoke_app_add_to_menu(),
         _ => return false,
     }
     true
