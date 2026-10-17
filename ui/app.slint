@@ -1,0 +1,1179 @@
+import { Button, CheckBox, ComboBox, LineEdit, ListView, StandardTableView, TabWidget, Switch, ProgressIndicator, Spinner, ScrollView, Palette } from "std-widgets.slint";
+
+export struct AccountRow {
+    name: string,
+    kind: string,
+    status: string,
+    tone: int, // 0 ok, 1 busy, 2 problem, 3 off
+}
+
+export struct FolderRow {
+    name: string,
+    depth: int,
+    expanded: bool,
+    has-children: bool,
+    loading: bool,
+    checked: bool,
+    inherited: bool,
+}
+
+component Title inherits Text {
+    font-size: 20px;
+    font-weight: 700;
+    overflow: elide;
+}
+
+component Heading inherits Text {
+    font-size: 14px;
+    font-weight: 600;
+}
+
+component Hint inherits Text {
+    wrap: word-wrap;
+    font-size: 12px;
+    color: Palette.foreground.with-alpha(0.65);
+}
+
+component ToneDot inherits Rectangle {
+    in property <int> tone;
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: tone == 0 ? #2e9d4f : tone == 1 ? #2f7fe0 : tone == 2 ? #d93f3f : #8a8a8a;
+}
+
+component Card inherits Rectangle {
+    border-radius: 8px;
+    background: Palette.alternate-background;
+    border-width: 1px;
+    border-color: Palette.border;
+}
+
+component Overlay inherits Rectangle {
+    background: #00000088;
+    TouchArea { }  // swallow clicks behind the dialog
+}
+
+export component AppWindow inherits Window {
+    title: "Linux OneDrive GUI";
+    icon: @image-url("../assets/linux-onedrive-gui.svg");
+    preferred-width: 1020px;
+    preferred-height: 700px;
+    min-width: 780px;
+    min-height: 540px;
+    background: Palette.background;
+
+    // ---------------- navigation
+    in property <[AccountRow]> accounts;
+    in-out property <int> current: -1; // >=0 account, -1 add account, -2 app settings
+    callback select(int);
+
+    // ---------------- status tab
+    in property <string> s-kind;
+    in property <string> s-folder;
+    in property <string> s-status;
+    in property <int> s-tone;
+    in property <string> s-last;
+    in property <string> s-error;
+    in property <string> s-quota;
+    in property <float> s-quota-frac;
+    in property <string> s-owner;
+    in property <bool> s-signed-in;
+    in property <bool> s-bg-enabled;
+    in property <bool> s-busy;
+    in property <string> s-msg;
+    in-out property <string> s-name;
+    callback rename();
+    callback open-folder();
+    callback sync-now();
+    callback set-background(bool);
+    callback sign-in();
+    callback sign-out();
+    callback remove-account();
+
+    // ---------------- sign-in dialog
+    in property <bool> si-visible;
+    in property <string> si-text;
+    in property <bool> si-need-paste;
+    in property <bool> si-has-url;
+    in property <bool> si-done;
+    in-out property <string> si-paste;
+    callback si-open-url();
+    callback si-submit();
+    callback si-close();
+
+    // ---------------- folders tab
+    in-out property <bool> f-sync-all;
+    in-out property <bool> f-root-files;
+    in property <[FolderRow]> f-rows;
+    in property <string> f-msg;
+    in property <bool> f-loading;
+    in property <bool> f-dirty;
+    in property <bool> f-allowed;
+    callback f-sync-all-toggled();
+    callback f-root-toggled();
+    callback f-expand(int);
+    callback f-check(int);
+    callback f-reload();
+    callback f-apply();
+
+    // ---------------- options tab
+    in-out property <int> o-interval;
+    in-out property <bool> o-sched-on;
+    in-out property <string> o-from;
+    in-out property <string> o-to;
+    in-out property <int> o-rate;
+    in-out property <bool> o-recycle;
+    in-out property <bool> o-notify;
+    in-out property <bool> o-skip-hidden;
+    in-out property <string> o-skip-files;
+    in-out property <bool> o-allow-resync;
+    in property <string> o-msg;
+    callback o-save();
+
+    // ---------------- activity tab
+    in property <[[StandardListViewItem]]> a-rows;
+    in-out property <int> a-current: -1;
+    callback a-refresh();
+    callback a-show(int);
+
+    // ---------------- resync preview dialog
+    in property <bool> p-visible;
+    in property <bool> p-busy;
+    in property <string> p-title;
+    in property <string> p-text;
+    in property <string> p-warn;
+    in property <string> p-live;
+    in property <bool> p-can-apply;
+    callback p-apply();
+    callback p-cancel();
+
+    // ---------------- remove dialog
+    in property <bool> r-visible;
+    in property <string> r-text;
+    in-out property <bool> r-delete-config: true;
+    callback r-confirm();
+    callback r-cancel();
+
+    // ---------------- add account page
+    in-out property <int> add-mode: 0; // 0 choose, 1 onedrive, 2 sharepoint
+    in-out property <string> add-name;
+    in-out property <string> add-folder;
+    in property <string> add-msg;
+    in property <bool> add-busy;
+    in property <[string]> add-from;
+    in-out property <int> add-from-index;
+    in-out property <string> add-query;
+    in property <[string]> add-libraries;
+    in-out property <int> add-lib-index: -1;
+    callback add-choose(int);
+    callback add-browse();
+    callback add-search();
+    callback add-lib-picked(int);
+    callback add-create();
+
+    // ---------------- app page
+    in-out property <bool> app-autostart;
+    in property <string> app-version;
+    in property <string> app-client;
+    in property <bool> app-is-appimage;
+    in property <string> app-msg;
+    callback app-autostart-toggled();
+    callback app-add-to-menu();
+    callback open-url(string);
+
+    HorizontalLayout {
+        width: root.width;
+        height: root.height;
+
+        // ======== sidebar
+        Rectangle {
+            width: 250px;
+            background: Palette.alternate-background;
+            VerticalLayout {
+                padding: 12px;
+                spacing: 6px;
+                Text {
+                    text: "Accounts";
+                    font-size: 13px;
+                    font-weight: 600;
+                    color: Palette.foreground.with-alpha(0.7);
+                }
+                for acc[i] in root.accounts: Rectangle {
+                    height: 54px;
+                    border-radius: 6px;
+                    background: root.current == i ? Palette.selection-background.with-alpha(0.35) : ta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+                    ta := TouchArea {
+                        clicked => {
+                            root.select(i);
+                        }
+                    }
+                    HorizontalLayout {
+                        padding-left: 10px;
+                        padding-right: 8px;
+                        spacing: 10px;
+                        alignment: start;
+                        ToneDot {
+                            tone: acc.tone;
+                            y: (parent.height - self.height) / 2;
+                        }
+                        VerticalLayout {
+                            alignment: center;
+                            Text {
+                                text: acc.name;
+                                font-weight: 600;
+                                overflow: elide;
+                                width: 180px;
+                            }
+                            Text {
+                                text: acc.status;
+                                font-size: 11px;
+                                overflow: elide;
+                                width: 180px;
+                                color: Palette.foreground.with-alpha(0.65);
+                            }
+                        }
+                    }
+                }
+                Button {
+                    text: "+ Add account";
+                    primary: root.accounts.length == 0;
+                    clicked => {
+                        root.select(-1);
+                    }
+                }
+                Rectangle {
+                    vertical-stretch: 1;
+                }
+                Button {
+                    text: "App settings";
+                    clicked => {
+                        root.select(-2);
+                    }
+                }
+            }
+        }
+
+        // ======== main area
+        Rectangle {
+            horizontal-stretch: 1;
+
+            // ---- account view
+            if root.current >= 0: VerticalLayout {
+                padding: 16px;
+                spacing: 10px;
+                HorizontalLayout {
+                    spacing: 10px;
+                    ToneDot {
+                        tone: root.s-tone;
+                        y: (parent.height - self.height) / 2;
+                    }
+                    Title {
+                        text: root.accounts[root.current].name;
+                        horizontal-stretch: 1;
+                    }
+                    Text {
+                        text: root.s-status;
+                        vertical-alignment: center;
+                        font-size: 14px;
+                    }
+                }
+
+                TabWidget {
+                    Tab {
+                        title: "Status";
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 12px;
+                                alignment: start;
+
+                                if !root.s-signed-in: Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 8px;
+                                        Heading {
+                                            text: "This account isn't signed in";
+                                        }
+                                        Hint {
+                                            text: "Sign in with your Microsoft account. Your browser will open so you can log in, then you'll come back here automatically.";
+                                        }
+                                        HorizontalLayout {
+                                            alignment: start;
+                                            Button {
+                                                text: "Sign in…";
+                                                primary: true;
+                                                clicked => {
+                                                    root.sign-in();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 8px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Name";
+                                                width: 120px;
+                                                vertical-alignment: center;
+                                            }
+                                            LineEdit {
+                                                text <=> root.s-name;
+                                                accepted => {
+                                                    root.rename();
+                                                }
+                                            }
+                                            Button {
+                                                text: "Rename";
+                                                clicked => {
+                                                    root.rename();
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Type";
+                                                width: 120px;
+                                            }
+                                            Text {
+                                                text: root.s-kind + (root.s-owner != "" ? "  ·  " + root.s-owner : "");
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Folder";
+                                                width: 120px;
+                                                vertical-alignment: center;
+                                            }
+                                            Text {
+                                                text: root.s-folder;
+                                                overflow: elide;
+                                                horizontal-stretch: 1;
+                                                vertical-alignment: center;
+                                            }
+                                            Button {
+                                                text: "Open";
+                                                clicked => {
+                                                    root.open-folder();
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Last sync";
+                                                width: 120px;
+                                            }
+                                            Text {
+                                                text: root.s-last;
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        if root.s-quota != "": VerticalLayout {
+                                            spacing: 4px;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                Text {
+                                                    text: "Storage";
+                                                    width: 120px;
+                                                }
+                                                Text {
+                                                    text: root.s-quota;
+                                                    horizontal-stretch: 1;
+                                                }
+                                            }
+                                            ProgressIndicator {
+                                                progress: root.s-quota-frac;
+                                                height: 6px;
+                                            }
+                                        }
+                                        if root.s-error != "": Text {
+                                            text: root.s-error;
+                                            color: #d93f3f;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                }
+
+                                if root.s-signed-in: Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 10px;
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            VerticalLayout {
+                                                horizontal-stretch: 1;
+                                                Heading {
+                                                    text: "Background sync";
+                                                }
+                                                Hint {
+                                                    text: "Keeps this folder in sync all the time, including after you restart.";
+                                                }
+                                            }
+                                            Switch {
+                                                checked: root.s-bg-enabled;
+                                                enabled: !root.s-busy;
+                                                toggled => {
+                                                    root.set-background(self.checked);
+                                                }
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Button {
+                                                text: "Sync now";
+                                                enabled: !root.s-busy;
+                                                clicked => {
+                                                    root.sync-now();
+                                                }
+                                            }
+                                            Button {
+                                                text: "Sign out";
+                                                enabled: !root.s-busy;
+                                                clicked => {
+                                                    root.sign-out();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    alignment: start;
+                                    spacing: 8px;
+                                    Button {
+                                        text: "Remove account from this computer…";
+                                        enabled: !root.s-busy;
+                                        clicked => {
+                                            root.remove-account();
+                                        }
+                                    }
+                                    if root.s-busy: Spinner {
+                                        indeterminate: true;
+                                        width: 22px;
+                                        height: 22px;
+                                    }
+                                }
+                                if root.s-msg != "": Hint {
+                                    text: root.s-msg;
+                                }
+                            }
+                        }
+                    }
+
+                    Tab {
+                        title: "Folders";
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Sync everything";
+                                checked <=> root.f-sync-all;
+                                toggled => {
+                                    root.f-sync-all-toggled();
+                                }
+                            }
+                            Hint {
+                                text: root.f-sync-all ? "Every folder in this account is kept on this computer. Untick to choose specific folders." : "Only the ticked folders (and everything inside them) are kept on this computer.";
+                            }
+                            if !root.f-sync-all: CheckBox {
+                                text: "Also sync files that sit at the top level (outside any folder)";
+                                checked <=> root.f-root-files;
+                                toggled => {
+                                    root.f-root-toggled();
+                                }
+                            }
+                            if !root.f-sync-all: Card {
+                                vertical-stretch: 1;
+                                ListView {
+                                    for row[i] in root.f-rows: HorizontalLayout {
+                                        height: 30px;
+                                        padding-left: 6px + row.depth * 22px;
+                                        spacing: 4px;
+                                        Rectangle {
+                                            width: 22px;
+                                            Text {
+                                                text: row.loading ? "…" : !row.has-children ? "" : row.expanded ? "▾" : "▸";
+                                                font-size: 14px;
+                                            }
+                                            TouchArea {
+                                                enabled: row.has-children;
+                                                clicked => {
+                                                    root.f-expand(i);
+                                                }
+                                            }
+                                        }
+                                        CheckBox {
+                                            text: row.name;
+                                            checked: row.checked;
+                                            enabled: !row.inherited;
+                                            toggled => {
+                                                root.f-check(i);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if root.f-sync-all: Rectangle {
+                                vertical-stretch: 1;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                if root.f-loading: Spinner {
+                                    indeterminate: true;
+                                    width: 22px;
+                                    height: 22px;
+                                }
+                                Hint {
+                                    text: root.f-msg;
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Reload";
+                                    clicked => {
+                                        root.f-reload();
+                                    }
+                                }
+                                Button {
+                                    text: "Apply changes…";
+                                    primary: true;
+                                    enabled: root.f-dirty && root.f-allowed;
+                                    clicked => {
+                                        root.f-apply();
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Tab {
+                        title: "Options";
+                        ScrollView {
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 12px;
+                                alignment: start;
+
+                                Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 8px;
+                                        Heading {
+                                            text: "When to sync";
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Full check every";
+                                                vertical-alignment: center;
+                                                width: 150px;
+                                            }
+                                            ComboBox {
+                                                model: ["5 minutes", "10 minutes", "15 minutes", "30 minutes", "1 hour", "2 hours"];
+                                                current-index <=> root.o-interval;
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        Hint {
+                                            text: "Changes on this computer are sent right away, and personal accounts also get online changes instantly. This sets how often a full check runs as well.";
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            CheckBox {
+                                                text: "Only sync between";
+                                                checked <=> root.o-sched-on;
+                                            }
+                                            LineEdit {
+                                                text <=> root.o-from;
+                                                enabled: root.o-sched-on;
+                                                width: 80px;
+                                                placeholder-text: "23:00";
+                                            }
+                                            Text {
+                                                text: "and";
+                                                vertical-alignment: center;
+                                            }
+                                            LineEdit {
+                                                text <=> root.o-to;
+                                                enabled: root.o-sched-on;
+                                                width: 80px;
+                                                placeholder-text: "07:00";
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        Hint {
+                                            text: "Use 24-hour times. The window can cross midnight (for example 23:00 to 07:00 for overnight only). \"Sync now\" still works outside it for an hour. Needs the tray icon running.";
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Speed limit";
+                                                vertical-alignment: center;
+                                                width: 150px;
+                                            }
+                                            ComboBox {
+                                                model: ["No limit", "1 MB/s", "2 MB/s", "5 MB/s", "10 MB/s", "25 MB/s", "50 MB/s"];
+                                                current-index <=> root.o-rate;
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        Hint {
+                                            text: "Applies to each file being transferred.";
+                                        }
+                                    }
+                                }
+
+                                Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 8px;
+                                        Heading {
+                                            text: "Files";
+                                        }
+                                        CheckBox {
+                                            text: "When a file is deleted online, move it to this computer's Trash instead of deleting it";
+                                            checked <=> root.o-recycle;
+                                        }
+                                        CheckBox {
+                                            text: "Show desktop notifications for synced files";
+                                            checked <=> root.o-notify;
+                                        }
+                                        CheckBox {
+                                            text: "Don't sync hidden files and folders (names starting with a dot) *";
+                                            checked <=> root.o-skip-hidden;
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Never sync files named *";
+                                                vertical-alignment: center;
+                                            }
+                                            LineEdit {
+                                                text <=> root.o-skip-files;
+                                                placeholder-text: "~*|.~*|*.tmp|*.swp|*.partial";
+                                            }
+                                        }
+                                        Hint {
+                                            text: "Separate patterns with | — for example  *.tmp|~*|Thumbs.db";
+                                        }
+                                    }
+                                }
+
+                                Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 8px;
+                                        Heading {
+                                            text: "Safety";
+                                        }
+                                        CheckBox {
+                                            text: "Allow full resyncs for this account";
+                                            checked <=> root.o-allow-resync;
+                                        }
+                                        Hint {
+                                            text: "Changing which folders sync, or the settings marked *, makes the sync engine rebuild its view of everything (a full resync). You always get a preview of what would be downloaded, uploaded or deleted before anything happens. Turn this off to lock those settings.";
+                                        }
+                                    }
+                                }
+
+                                HorizontalLayout {
+                                    spacing: 10px;
+                                    Hint {
+                                        text: root.o-msg;
+                                        horizontal-stretch: 1;
+                                        vertical-alignment: center;
+                                    }
+                                    Button {
+                                        text: "Save";
+                                        primary: true;
+                                        clicked => {
+                                            root.o-save();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Tab {
+                        title: "Activity";
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            StandardTableView {
+                                vertical-stretch: 1;
+                                columns: [{ title: "When", width: 120px }, { title: "What", width: 110px }, { title: "File", horizontal-stretch: 1 }];
+                                rows: root.a-rows;
+                                current-row <=> root.a-current;
+                            }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Hint {
+                                    text: "Recent uploads, downloads and deletions from the sync log.";
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                }
+                                Button {
+                                    text: "Show in folder";
+                                    enabled: root.a-current >= 0;
+                                    clicked => {
+                                        root.a-show(root.a-current);
+                                    }
+                                }
+                                Button {
+                                    text: "Refresh";
+                                    clicked => {
+                                        root.a-refresh();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ---- add account
+            if root.current == -1: ScrollView {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+                    alignment: start;
+                    Title {
+                        text: root.accounts.length == 0 ? "Welcome — let's add your OneDrive" : "Add an account";
+                    }
+                    if root.add-mode == 0: VerticalLayout {
+                        spacing: 12px;
+                        Hint {
+                            text: "What would you like to sync?";
+                            font-size: 14px;
+                        }
+                        Card {
+                            height: 86px;
+                            TouchArea {
+                                clicked => {
+                                    root.add-choose(1);
+                                }
+                            }
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 4px;
+                                Heading {
+                                    text: "OneDrive";
+                                }
+                                Hint {
+                                    text: "A personal Microsoft account (Outlook, Hotmail, Live) or a work or school account.";
+                                }
+                            }
+                        }
+                        Card {
+                            height: 86px;
+                            TouchArea {
+                                clicked => {
+                                    root.add-choose(2);
+                                }
+                            }
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 4px;
+                                Heading {
+                                    text: "SharePoint library";
+                                }
+                                Hint {
+                                    text: "A document library from a SharePoint or Teams site. You'll need a work or school account added first.";
+                                }
+                            }
+                        }
+                    }
+                    if root.add-mode == 1 || root.add-mode == 2: VerticalLayout {
+                        spacing: 10px;
+                        if root.add-mode == 2: Card {
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+                                Heading {
+                                    text: "1. Find the library";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Using account";
+                                        width: 120px;
+                                        vertical-alignment: center;
+                                    }
+                                    ComboBox {
+                                        model: root.add-from;
+                                        current-index <=> root.add-from-index;
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Site name";
+                                        width: 120px;
+                                        vertical-alignment: center;
+                                    }
+                                    LineEdit {
+                                        text <=> root.add-query;
+                                        placeholder-text: "Part of the site's name, or leave empty to list all";
+                                        accepted => {
+                                            root.add-search();
+                                        }
+                                    }
+                                    Button {
+                                        text: "Search";
+                                        enabled: !root.add-busy;
+                                        clicked => {
+                                            root.add-search();
+                                        }
+                                    }
+                                }
+                                if root.add-libraries.length > 0: Rectangle {
+                                    height: min(root.add-libraries.length * 30px + 8px, 220px);
+                                    border-width: 1px;
+                                    border-color: Palette.border;
+                                    border-radius: 6px;
+                                    ListView {
+                                        for lib[i] in root.add-libraries: Rectangle {
+                                            height: 30px;
+                                            background: root.add-lib-index == i ? Palette.selection-background.with-alpha(0.35) : lta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+                                            lta := TouchArea {
+                                                clicked => {
+                                                    root.add-lib-picked(i);
+                                                }
+                                            }
+                                            Text {
+                                                x: 10px;
+                                                text: lib;
+                                                vertical-alignment: center;
+                                                height: parent.height;
+                                                overflow: elide;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Card {
+                            VerticalLayout {
+                                padding: 14px;
+                                spacing: 8px;
+                                Heading {
+                                    text: root.add-mode == 2 ? "2. Where to keep it" : "Name and folder";
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Name";
+                                        width: 120px;
+                                        vertical-alignment: center;
+                                    }
+                                    LineEdit {
+                                        text <=> root.add-name;
+                                        placeholder-text: "e.g. Personal, Work";
+                                    }
+                                }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Local folder";
+                                        width: 120px;
+                                        vertical-alignment: center;
+                                    }
+                                    LineEdit {
+                                        text <=> root.add-folder;
+                                    }
+                                    Button {
+                                        text: "Browse…";
+                                        clicked => {
+                                            root.add-browse();
+                                        }
+                                    }
+                                }
+                                Hint {
+                                    text: "Best to pick an empty or new folder. Anything already in it will be uploaded.";
+                                }
+                            }
+                        }
+                        HorizontalLayout {
+                            spacing: 8px;
+                            alignment: start;
+                            Button {
+                                text: "Back";
+                                clicked => {
+                                    root.add-choose(0);
+                                }
+                            }
+                            Button {
+                                text: root.add-mode == 2 ? "Add library" : "Continue and sign in…";
+                                primary: true;
+                                enabled: !root.add-busy;
+                                clicked => {
+                                    root.add-create();
+                                }
+                            }
+                            if root.add-busy: Spinner {
+                                indeterminate: true;
+                                width: 22px;
+                                height: 22px;
+                            }
+                        }
+                    }
+                    if root.add-msg != "": Text {
+                        text: root.add-msg;
+                        wrap: word-wrap;
+                    }
+                }
+            }
+
+            // ---- app settings
+            if root.current == -2: ScrollView {
+                VerticalLayout {
+                    padding: 20px;
+                    spacing: 12px;
+                    alignment: start;
+                    Title {
+                        text: "App settings";
+                    }
+                    Card {
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 8px;
+                            CheckBox {
+                                text: "Show the tray icon when I log in";
+                                checked <=> root.app-autostart;
+                                toggled => {
+                                    root.app-autostart-toggled();
+                                }
+                            }
+                            Hint {
+                                text: "Syncing itself keeps running in the background either way. The tray icon shows status and runs sync schedules.";
+                            }
+                            if root.app-is-appimage: HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Button {
+                                    text: "Add to my applications menu";
+                                    clicked => {
+                                        root.app-add-to-menu();
+                                    }
+                                }
+                            }
+                            if root.app-msg != "": Hint {
+                                text: root.app-msg;
+                            }
+                        }
+                    }
+                    Card {
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 6px;
+                            Heading {
+                                text: "About";
+                            }
+                            Text {
+                                text: "Linux OneDrive GUI " + root.app-version;
+                            }
+                            Text {
+                                text: root.app-client;
+                                wrap: word-wrap;
+                            }
+                            Hint {
+                                text: "Free software under the GNU GPL v3. Syncing is done by the OneDrive Client for Linux by abraunegg (GPL v3). Not made by or affiliated with Microsoft. OneDrive is a trademark of Microsoft.";
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                spacing: 8px;
+                                Button {
+                                    text: "Project page";
+                                    clicked => {
+                                        root.open-url("https://github.com/sweatshopking/Linux-Onedrive-GUI");
+                                    }
+                                }
+                                Button {
+                                    text: "Sync engine (abraunegg/onedrive)";
+                                    clicked => {
+                                        root.open-url("https://github.com/abraunegg/onedrive");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // ======== dialogs
+    if root.si-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(560px, root.width - 40px);
+            height: si-layout.preferred-height;
+            background: Palette.background;
+            si-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: "Sign in to Microsoft";
+                    font-size: 16px;
+                }
+                Text {
+                    text: root.si-text;
+                    wrap: word-wrap;
+                }
+                if root.si-need-paste: LineEdit {
+                    text <=> root.si-paste;
+                    placeholder-text: "https://login.microsoftonline.com/common/oauth2/nativeclient?code=…";
+                    accepted => {
+                        root.si-submit();
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    if root.si-has-url && !root.si-done: Button {
+                        text: "Open sign-in page again";
+                        clicked => {
+                            root.si-open-url();
+                        }
+                    }
+                    if root.si-need-paste: Button {
+                        text: "Finish sign-in";
+                        primary: true;
+                        clicked => {
+                            root.si-submit();
+                        }
+                    }
+                    Button {
+                        text: root.si-done ? "Close" : "Cancel";
+                        primary: root.si-done;
+                        clicked => {
+                            root.si-close();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.p-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(640px, root.width - 40px);
+            height: p-layout.preferred-height;
+            background: Palette.background;
+            p-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: root.p-title;
+                    font-size: 16px;
+                }
+                if root.p-busy: HorizontalLayout {
+                    spacing: 10px;
+                    Spinner {
+                        indeterminate: true;
+                        width: 22px;
+                        height: 22px;
+                    }
+                    Text {
+                        text: root.p-live;
+                        overflow: elide;
+                        horizontal-stretch: 1;
+                        vertical-alignment: center;
+                    }
+                }
+                Text {
+                    text: root.p-text;
+                    wrap: word-wrap;
+                }
+                if root.p-warn != "": Text {
+                    text: root.p-warn;
+                    wrap: word-wrap;
+                    color: #d93f3f;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.p-cancel();
+                        }
+                    }
+                    Button {
+                        text: "Apply";
+                        primary: true;
+                        enabled: root.p-can-apply && !root.p-busy;
+                        clicked => {
+                            root.p-apply();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.r-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(560px, root.width - 40px);
+            height: r-layout.preferred-height;
+            background: Palette.background;
+            r-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: "Remove account";
+                    font-size: 16px;
+                }
+                Text {
+                    text: root.r-text;
+                    wrap: word-wrap;
+                }
+                CheckBox {
+                    text: "Also sign out and delete this account's sync settings";
+                    checked <=> root.r-delete-config;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.r-cancel();
+                        }
+                    }
+                    Button {
+                        text: "Remove";
+                        primary: true;
+                        clicked => {
+                            root.r-confirm();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
