@@ -1,6 +1,6 @@
 //! System tray icon: live status per account, quick controls, and the sync schedule enforcer.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -532,7 +532,7 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
 /// Every few seconds: re-read accounts and settings, poll systemd, and apply schedules.
 fn poll(handle: ksni::blocking::Handle<Tray>) {
     let mut following: HashSet<String> = HashSet::new();
-    let mut last_phase: std::collections::HashMap<String, Phase> = std::collections::HashMap::new();
+    let mut last_phase: HashMap<String, Phase> = HashMap::new();
     loop {
         let settings = AppSettings::load();
         let infos = core::discover(&settings);

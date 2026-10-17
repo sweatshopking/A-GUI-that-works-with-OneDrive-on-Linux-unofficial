@@ -1,6 +1,6 @@
 [package]
 name = "linux-onedrive-gui"
-version = "1.0.0"
+version = "0.0.1"
 edition = "2024"
 description = "Tray app and settings window for the OneDrive Client for Linux"
 license = "GPL-3.0-or-later"
