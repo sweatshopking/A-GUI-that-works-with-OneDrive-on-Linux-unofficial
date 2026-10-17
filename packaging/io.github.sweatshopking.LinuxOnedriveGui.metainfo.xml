@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.sweatshopking.LinuxOnedriveGui</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later</project_license>
+  <name>Linux OneDrive GUI</name>
+  <summary>Sync OneDrive and SharePoint folders</summary>
+  <description>
+    <p>
+      A friendly front end for the OneDrive Client for Linux. Sign in with your Microsoft account,
+      pick which folders to keep on your computer, and keep them in sync in the background.
+    </p>
+    <ul>
+      <li>Personal, work or school OneDrive accounts and SharePoint libraries</li>
+      <li>Tray icon with live status, recent files, pause and "sync now"</li>
+      <li>Choose folders, set sync schedules and speed limits</li>
+      <li>Preview of every full resync before anything changes</li>
+      <li>Copy sharing links from the file manager</li>
+    </ul>
+    <p>Not made by or affiliated with Microsoft. OneDrive is a trademark of Microsoft.</p>
+  </description>
+  <launchable type="desktop-id">linux-onedrive-gui.desktop</launchable>
+  <url type="homepage">https://github.com/sweatshopking/Linux-Onedrive-GUI</url>
+  <url type="bugtracker">https://github.com/sweatshopking/Linux-Onedrive-GUI/issues</url>
+  <developer id="io.github.sweatshopking">
+    <name>sweatshopking</name>
+  </developer>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="0.1.0" date="2026-10-18"/>
+  </releases>
+</component>

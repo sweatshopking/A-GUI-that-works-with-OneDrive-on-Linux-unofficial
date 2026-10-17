@@ -24,15 +24,31 @@ fn main() {
             }
             tray::run()
         }
-        Some("--share-link") => args.get(1).iter().for_each(|p| share::share_link(std::path::Path::new(p))),
-        Some("--view-online") => args.get(1).iter().for_each(|p| share::view_online(std::path::Path::new(p))),
+        Some("--share-link") => args
+            .get(1)
+            .iter()
+            .for_each(|p| share::share_link(std::path::Path::new(p))),
+        Some("--view-online") => args
+            .get(1)
+            .iter()
+            .for_each(|p| share::view_online(std::path::Path::new(p))),
         Some("--version") => println!("{} {}", core::APP_NAME, env!("CARGO_PKG_VERSION")),
         Some("--help") | Some("-h") => {
-            println!("{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --client <onedrive arguments>",
-                core::APP_NAME, env!("CARGO_PKG_VERSION"), core::APP_ID, core::APP_ID, core::APP_ID)
+            println!(
+                "{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --client <onedrive arguments>",
+                core::APP_NAME,
+                env!("CARGO_PKG_VERSION"),
+                core::APP_ID,
+                core::APP_ID,
+                core::APP_ID
+            )
         }
         _ => {
-            let account = args.iter().position(|a| a == "--account").and_then(|i| args.get(i + 1)).cloned();
+            let account = args
+                .iter()
+                .position(|a| a == "--account")
+                .and_then(|i| args.get(i + 1))
+                .cloned();
             ui::run(account)
         }
     }
@@ -40,7 +56,10 @@ fn main() {
 
 fn run_client(args: &[String]) {
     let Some(bin) = core::client_binary() else {
-        eprintln!("The onedrive client wasn't found. Reinstall {} or install the 'onedrive' package.", core::APP_NAME);
+        eprintln!(
+            "The onedrive client wasn't found. Reinstall {} or install the 'onedrive' package.",
+            core::APP_NAME
+        );
         std::process::exit(127);
     };
     let err = std::process::Command::new(bin).args(args).exec();

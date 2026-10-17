@@ -21,7 +21,9 @@ pub fn home() -> PathBuf {
 }
 
 pub fn config_home() -> PathBuf {
-    std::env::var("XDG_CONFIG_HOME").map(PathBuf::from).unwrap_or_else(|_| home().join(".config"))
+    std::env::var("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join(".config"))
 }
 
 pub fn app_dir() -> PathBuf {
@@ -48,14 +50,19 @@ pub fn client_binary() -> Option<PathBuf> {
         return Some(PathBuf::from(p));
     }
     let mut cands = Vec::new();
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            cands.push(dir.join("../lib").join(APP_ID).join("onedrive"));
-            cands.push(dir.join("onedrive"));
-        }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        cands.push(dir.join("../lib").join(APP_ID).join("onedrive"));
+        cands.push(dir.join("onedrive"));
     }
     if let Ok(appdir) = std::env::var("APPDIR") {
-        cands.push(PathBuf::from(&appdir).join("usr/lib").join(APP_ID).join("onedrive"));
+        cands.push(
+            PathBuf::from(&appdir)
+                .join("usr/lib")
+                .join(APP_ID)
+                .join("onedrive"),
+        );
         cands.push(PathBuf::from(&appdir).join("usr/bin/onedrive"));
     }
     if let Some(p) = cands.into_iter().find(|p| p.is_file()) {
@@ -84,12 +91,15 @@ pub fn client_version() -> Option<String> {
     let bin = client_binary()?;
     let out = Command::new(bin).arg("--version").output().ok()?;
     let s = String::from_utf8_lossy(&out.stdout);
-    s.split_whitespace().last().map(|v| v.trim_start_matches('v').to_string())
+    s.split_whitespace()
+        .last()
+        .map(|v| v.trim_start_matches('v').to_string())
 }
 
 // ---------------------------------------------------------------- app settings
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
 pub struct Schedule {
     pub enabled: bool,
     pub from: String, // "HH:MM"
@@ -102,8 +112,14 @@ impl Schedule {
         if !self.enabled {
             return true;
         }
-        let (Some(a), Some(b)) = (parse_hhmm(&self.from), parse_hhmm(&self.to)) else { return true };
-        if a <= b { now >= a && now < b } else { now >= a || now < b }
+        let (Some(a), Some(b)) = (parse_hhmm(&self.from), parse_hhmm(&self.to)) else {
+            return true;
+        };
+        if a <= b {
+            now >= a && now < b
+        } else {
+            now >= a || now < b
+        }
     }
 }
 
@@ -111,21 +127,31 @@ pub fn parse_hhmm(s: &str) -> Option<chrono::NaiveTime> {
     chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
 }
 
-#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+fn is_zero(n: &i64) -> bool {
+    *n == 0
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
+#[serde(default)]
 pub struct AccountPrefs {
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default)]
-    pub kind: Option<String>, // "personal" | "business" | "sharepoint"
-    #[serde(default)]
+    /// "personal", "business" or "sharepoint"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "is_default")]
     pub schedule: Schedule,
-    #[serde(default)]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_resync: Option<bool>,
     /// Unix time until which a manual "Sync now" overrides the schedule.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "is_zero")]
     pub override_until: i64,
     /// Unix time until which syncing is paused from the tray.
-    #[serde(default)]
+    #[serde(skip_serializing_if = "is_zero")]
     pub pause_until: i64,
 }
 
@@ -136,16 +162,18 @@ impl AccountPrefs {
     /// Whether the background service should be running right now.
     pub fn sync_allowed(&self) -> bool {
         let now = Local::now();
-        !self.paused() && (self.schedule.allows(now.time()) || self.override_until > now.timestamp())
+        !self.paused()
+            && (self.schedule.allows(now.time()) || self.override_until > now.timestamp())
     }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
+#[serde(default)]
 pub struct AppSettings {
     /// Keyed by config directory path.
-    #[serde(default)]
     pub accounts: BTreeMap<String, AccountPrefs>,
-    #[serde(default)]
+    /// Config directories the user removed but whose (unmanaged) service still exists.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<String>,
 }
 
@@ -154,28 +182,53 @@ impl AppSettings {
         app_dir().join("settings.json")
     }
     pub fn load() -> Self {
-        fs::read_to_string(Self::path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+        fs::read_to_string(Self::path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
     }
     pub fn save(&self) -> std::io::Result<()> {
-        fs::create_dir_all(app_dir())?;
-        atomic_write(&Self::path(), serde_json::to_string_pretty(self).unwrap().as_bytes())
+        create_private_dir(&app_dir())?;
+        let mut tidy = self.clone();
+        tidy.accounts.retain(|_, p| *p != AccountPrefs::default());
+        atomic_write(
+            &Self::path(),
+            serde_json::to_string_pretty(&tidy).unwrap().as_bytes(),
+        )
     }
     pub fn prefs(&self, confdir: &Path) -> AccountPrefs {
-        self.accounts.get(&confdir.to_string_lossy().to_string()).cloned().unwrap_or_default()
+        self.accounts
+            .get(&confdir.to_string_lossy().to_string())
+            .cloned()
+            .unwrap_or_default()
     }
     pub fn prefs_mut(&mut self, confdir: &Path) -> &mut AccountPrefs {
-        self.accounts.entry(confdir.to_string_lossy().to_string()).or_default()
+        self.accounts
+            .entry(confdir.to_string_lossy().to_string())
+            .or_default()
     }
 }
 
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("tmp-lodg");
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".tmp-{}", std::process::id()));
+    let tmp = path.with_file_name(name);
     {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
     }
     fs::rename(tmp, path)
+}
+
+/// Creates a directory readable only by the user (config dirs hold sign-in tokens).
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
 }
 
 // ---------------------------------------------------------------- client config file
@@ -189,7 +242,9 @@ pub struct ClientConfig {
 impl ClientConfig {
     pub fn load(confdir: &Path) -> Self {
         let path = confdir.join("config");
-        let lines = fs::read_to_string(&path).map(|s| s.lines().map(String::from).collect()).unwrap_or_default();
+        let lines = fs::read_to_string(&path)
+            .map(|s| s.lines().map(String::from).collect())
+            .unwrap_or_default();
         ClientConfig { path, lines }
     }
 
@@ -202,14 +257,22 @@ impl ClientConfig {
     }
 
     pub fn get(&self, key: &str) -> Option<String> {
-        self.lines.iter().rev().find(|l| Self::key_of(l) == Some(key)).map(|l| {
-            let v = l.split_once('=').unwrap().1.trim();
-            v.strip_prefix('"').and_then(|v| v.strip_suffix('"')).unwrap_or(v).to_string()
-        })
+        self.lines
+            .iter()
+            .rev()
+            .find(|l| Self::key_of(l) == Some(key))
+            .map(|l| {
+                let v = l.split_once('=').unwrap().1.trim();
+                v.strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(v)
+                    .to_string()
+            })
     }
 
     pub fn get_bool(&self, key: &str) -> bool {
-        self.get(key).is_some_and(|v| v.eq_ignore_ascii_case("true"))
+        self.get(key)
+            .is_some_and(|v| v.eq_ignore_ascii_case("true"))
     }
 
     /// Sets (or with `None` removes) a key.
@@ -224,8 +287,8 @@ impl ClientConfig {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
-        if let Some(d) = self.path.parent() {
-            fs::create_dir_all(d)?;
+        if let Some(d) = self.path.parent().filter(|d| !d.exists()) {
+            create_private_dir(d)?;
         }
         let mut s = self.lines.join("\n");
         s.push('\n');
@@ -267,7 +330,8 @@ pub fn write_sync_list(confdir: &Path, entries: &[String]) -> std::io::Result<()
         }
         return Ok(());
     }
-    let mut s = format!("# Written by {APP_NAME}. One folder per line; '/' is the top of your OneDrive.\n");
+    let mut s =
+        format!("# Written by {APP_NAME}. One folder per line; '/' is the top of your OneDrive.\n");
     for e in entries {
         s.push_str(e);
         s.push('\n');
@@ -281,22 +345,42 @@ pub fn sync_list_folder(rule: &str) -> Option<String> {
         return None;
     }
     let r = rule.trim_end_matches("/*").trim_end_matches('/');
-    let r = if r.starts_with('/') { r.to_string() } else { format!("/{r}") };
+    let r = if r.starts_with('/') {
+        r.to_string()
+    } else {
+        format!("/{r}")
+    };
     (r.len() > 1).then_some(r)
 }
 
 /// Filesystems that can't store Unix permissions, where the client must not try to set them.
 pub fn needs_disable_permission_set(dir: &Path) -> bool {
-    let probe = dir.ancestors().find(|a| a.exists()).unwrap_or(Path::new("/"));
-    let out = Command::new("findmnt").args(["-no", "FSTYPE", "-T"]).arg(probe).output();
-    let fs = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
-    matches!(fs.as_str(), "ntfs" | "ntfs3" | "fuseblk" | "vfat" | "exfat" | "msdos" | "cifs" | "smb3")
+    let probe = dir
+        .ancestors()
+        .find(|a| a.exists())
+        .unwrap_or(Path::new("/"));
+    let out = Command::new("findmnt")
+        .args(["-no", "FSTYPE", "-T"])
+        .arg(probe)
+        .output();
+    let fs = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    matches!(
+        fs.as_str(),
+        "ntfs" | "ntfs3" | "fuseblk" | "vfat" | "exfat" | "msdos" | "cifs" | "smb3"
+    )
 }
 
 // ---------------------------------------------------------------- systemd
 
 pub fn systemctl(args: &[&str]) -> (bool, String) {
-    match Command::new("systemctl").arg("--user").args(args).stderr(Stdio::piped()).output() {
+    match Command::new("systemctl")
+        .arg("--user")
+        .args(args)
+        .stderr(Stdio::piped())
+        .output()
+    {
         Ok(o) => {
             let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
             s.push_str(&String::from_utf8_lossy(&o.stderr));
@@ -310,7 +394,10 @@ pub fn unit_props(unit: &str, props: &str) -> HashMap<String, String> {
     systemctl(&["show", "-p", props, unit])
         .1
         .lines()
-        .filter_map(|l| l.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .filter_map(|l| {
+            l.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
         .collect()
 }
 
@@ -325,21 +412,31 @@ pub struct UnitState {
 }
 
 pub fn unit_state(unit: &str) -> UnitState {
-    let p = unit_props(unit, "LoadState,ActiveState,SubState,UnitFileState,ExecMainStatus");
+    let p = unit_props(
+        unit,
+        "LoadState,ActiveState,SubState,UnitFileState,ExecMainStatus",
+    );
     let active = p.get("ActiveState").map(String::as_str).unwrap_or("");
     UnitState {
         exists: p.get("LoadState").map(String::as_str) == Some("loaded"),
         active: matches!(active, "active" | "activating" | "reloading"),
-        starting: active == "activating" || p.get("SubState").map(String::as_str) == Some("start-pre"),
+        starting: active == "activating"
+            || p.get("SubState").map(String::as_str) == Some("start-pre"),
         failed: active == "failed",
         enabled: p.get("UnitFileState").map(String::as_str) == Some("enabled"),
-        exit_status: p.get("ExecMainStatus").and_then(|s| s.parse().ok()).filter(|s| *s != 0),
+        exit_status: p
+            .get("ExecMainStatus")
+            .and_then(|s| s.parse().ok())
+            .filter(|s| *s != 0),
     }
 }
 
 /// Name of the transient unit used for a one-off resync of an account.
 pub fn resync_unit(confdir: &Path) -> String {
-    format!("{APP_ID}-resync-{}.service", slug(&confdir.file_name().unwrap_or_default().to_string_lossy()))
+    format!(
+        "{APP_ID}-resync-{}.service",
+        slug(&confdir.file_name().unwrap_or_default().to_string_lossy())
+    )
 }
 
 pub fn slug(s: &str) -> String {
@@ -352,11 +449,20 @@ pub fn slug(s: &str) -> String {
         }
     }
     let out = out.trim_matches('-').to_string();
-    if out.is_empty() { "account".into() } else { out }
+    if out.is_empty() {
+        "account".into()
+    } else {
+        out
+    }
 }
 
 fn systemd_quote(s: &str) -> String {
-    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%"))
+    format!(
+        "\"{}\"",
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('%', "%%")
+    )
 }
 
 /// Writes (or rewrites) the user unit we manage for an account.
@@ -390,23 +496,27 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
 /// Keeps our managed units pointing at wherever this app now lives (AppImages get moved).
 pub fn repair_managed_units() {
     let me = self_command().to_string_lossy().to_string();
-    let Ok(rd) = fs::read_dir(user_unit_dir()) else { return };
+    let Ok(rd) = fs::read_dir(user_unit_dir()) else {
+        return;
+    };
     let mut changed = false;
     for e in rd.flatten() {
         let p = e.path();
-        let Ok(text) = fs::read_to_string(&p) else { continue };
+        let Ok(text) = fs::read_to_string(&p) else {
+            continue;
+        };
         if !text.contains(MANAGED_MARK) {
             continue;
         }
         let new: Vec<String> = text
             .lines()
             .map(|l| {
-                if let Some(rest) = l.strip_prefix("ExecStart=") {
-                    if let Some(idx) = rest.find(" --client") {
-                        let cur = rest[..idx].trim_matches('"').replace("%%", "%");
-                        if cur != me {
-                            return format!("ExecStart={}{}", systemd_quote(&me), &rest[idx..]);
-                        }
+                if let Some(rest) = l.strip_prefix("ExecStart=")
+                    && let Some(idx) = rest.find(" --client")
+                {
+                    let cur = rest[..idx].trim_matches('"').replace("%%", "%");
+                    if cur != me {
+                        return format!("ExecStart={}{}", systemd_quote(&me), &rest[idx..]);
                     }
                 }
                 l.to_string()
@@ -451,7 +561,9 @@ impl AccountInfo {
 }
 
 fn units_in(dir: &Path) -> Vec<(String, String)> {
-    let Ok(rd) = fs::read_dir(dir) else { return vec![] };
+    let Ok(rd) = fs::read_dir(dir) else {
+        return vec![];
+    };
     rd.flatten()
         .filter_map(|e| {
             let n = e.file_name().to_string_lossy().to_string();
@@ -462,11 +574,15 @@ fn units_in(dir: &Path) -> Vec<(String, String)> {
 }
 
 fn confdir_from_exec(text: &str) -> Option<PathBuf> {
-    let line = text.lines().find(|l| l.trim_start().starts_with("ExecStart="))?;
+    let line = text
+        .lines()
+        .find(|l| l.trim_start().starts_with("ExecStart="))?;
     let mut words = shell_words(line.split_once('=')?.1);
     while let Some(w) = words.first() {
         if w == "--confdir" {
-            return words.get(1).map(|d| expand_tilde(&d.replace("%h", &home().to_string_lossy())));
+            return words
+                .get(1)
+                .map(|d| expand_tilde(&d.replace("%h", &home().to_string_lossy())));
         }
         if let Some(d) = w.strip_prefix("--confdir=") {
             return Some(expand_tilde(&d.replace("%h", &home().to_string_lossy())));
@@ -510,7 +626,9 @@ fn shell_words(s: &str) -> Vec<String> {
 }
 
 fn description_name(text: &str) -> Option<String> {
-    let d = text.lines().find_map(|l| l.trim().strip_prefix("Description="))?;
+    let d = text
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("Description="))?;
     let (a, b) = (d.find('(')?, d.rfind(')')?);
     (b > a + 1).then(|| d[a + 1..b].to_string())
 }
@@ -520,19 +638,28 @@ fn description_name(text: &str) -> Option<String> {
 pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
     let mut by_dir: BTreeMap<PathBuf, (Option<String>, bool, Option<String>)> = BTreeMap::new();
     let mut sys_units: Vec<(String, String)> = Vec::new();
-    for d in ["/usr/lib/systemd/user", "/lib/systemd/user", "/etc/systemd/user"] {
+    for d in [
+        "/usr/lib/systemd/user",
+        "/lib/systemd/user",
+        "/etc/systemd/user",
+    ] {
         sys_units.extend(units_in(Path::new(d)));
     }
     let user_units = units_in(&user_unit_dir());
     let user_names: Vec<&String> = user_units.iter().map(|(n, _)| n).collect();
-    let mut all: Vec<(String, String, bool)> = user_units.iter().map(|(n, t)| (n.clone(), t.clone(), true)).collect();
+    let mut all: Vec<(String, String, bool)> = user_units
+        .iter()
+        .map(|(n, t)| (n.clone(), t.clone(), true))
+        .collect();
     for (n, t) in &sys_units {
         if !user_names.contains(&n) {
             all.push((n.clone(), t.clone(), false));
         }
     }
     for (unit, text, is_user) in all {
-        let Some(dir) = confdir_from_exec(&text) else { continue };
+        let Some(dir) = confdir_from_exec(&text) else {
+            continue;
+        };
         if !is_user {
             // a distro-provided unit only counts once it is enabled or the account exists
             let st = unit_state(&unit);
@@ -567,16 +694,29 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
             let cfg = ClientConfig::load(&confdir);
             let prefs = settings.prefs(&confdir);
             let drive_id = cfg.get("drive_id").filter(|s| !s.is_empty());
-            let kind = prefs
-                .kind
-                .clone()
-                .unwrap_or_else(|| if drive_id.is_some() { "sharepoint".into() } else { String::new() });
-            let base = confdir.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let kind = prefs.kind.clone().unwrap_or_else(|| {
+                if drive_id.is_some() {
+                    "sharepoint".into()
+                } else {
+                    String::new()
+                }
+            });
+            let base = confdir
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .to_string();
             let name = prefs.name.clone().or(desc).unwrap_or_else(|| {
                 if base == "onedrive" {
-                    "OneDrive".into()
+                    match kind.as_str() {
+                        "personal" => "Personal".into(),
+                        "business" => "Work or school".into(),
+                        _ => "OneDrive".into(),
+                    }
                 } else {
-                    base.trim_start_matches("onedrive").trim_start_matches(['-', '_', '.']).to_string()
+                    base.trim_start_matches("onedrive")
+                        .trim_start_matches(['-', '_', '.'])
+                        .to_string()
                 }
             });
             let name = if name.is_empty() { base.clone() } else { name };
@@ -592,7 +732,12 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
             }
         })
         .collect();
-    out.sort_by_key(|a| (a.confdir != config_home().join("onedrive"), a.name.to_lowercase()));
+    out.sort_by_key(|a| {
+        (
+            a.confdir != config_home().join("onedrive"),
+            a.name.to_lowercase(),
+        )
+    });
     out
 }
 
@@ -601,8 +746,20 @@ pub fn ensure_unit(acc: &AccountInfo) -> std::io::Result<String> {
     if let Some(u) = &acc.unit {
         return Ok(u.clone());
     }
-    let base = acc.confdir.file_name().unwrap_or_default().to_string_lossy().to_string();
-    let unit = if base == "onedrive" { "onedrive.service".into() } else { format!("onedrive-{}.service", slug(base.trim_start_matches("onedrive"))) };
+    let base = acc
+        .confdir
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let unit = if base == "onedrive" {
+        "onedrive.service".into()
+    } else {
+        format!(
+            "onedrive-{}.service",
+            slug(base.trim_start_matches("onedrive"))
+        )
+    };
     write_managed_unit(&unit, &acc.name, &acc.confdir)?;
     Ok(unit)
 }
@@ -630,7 +787,11 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
     if msg.contains("--resync") && (msg.contains("required") || msg.contains("must")) {
         return Some(LogEvent::NeedsResync);
     }
-    if msg.contains("requires authentication") || msg.contains("Please authorise this application") || msg.contains("re-authenticate") || msg.contains("invalid_grant") {
+    if msg.contains("requires authentication")
+        || msg.contains("Please authorise this application")
+        || msg.contains("re-authenticate")
+        || msg.contains("invalid_grant")
+    {
         return Some(LogEvent::NeedsLogin);
     }
     if msg.starts_with("ERROR") || msg.contains("ERROR:") || msg.starts_with("Unable to ") {
@@ -641,7 +802,11 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
         ("Uploading modified file: ", "↑", true),
         ("Downloading file: ", "↓", true),
         ("Deleting local file: ", "✕", false),
-        ("Successfully deleted item from Microsoft OneDrive: ", "✕", false),
+        (
+            "Successfully deleted item from Microsoft OneDrive: ",
+            "✕",
+            false,
+        ),
         ("Creating local directory: ", "+", false),
     ] {
         if let Some(rest) = msg.strip_prefix(prefix) {
@@ -665,12 +830,80 @@ pub fn split_journal_line(line: &str) -> Option<(DateTime<Local>, &str)> {
     Some((Local.timestamp_opt(secs, 0).single()?, msg))
 }
 
+/// Where our icons live when we're not installed system-wide (AppImage or a source checkout).
+pub fn icon_theme_path() -> Option<PathBuf> {
+    let mut cands = Vec::new();
+    if let Ok(appdir) = std::env::var("APPDIR") {
+        cands.push(PathBuf::from(appdir).join("usr/share/icons"));
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        cands.push(dir.join("../share/icons"));
+        cands.push(dir.join("../../../assets/icons")); // target/<profile>/<bin> in a checkout
+        cands.push(dir.join("../../../../assets/icons"));
+    }
+    cands
+        .into_iter()
+        .find(|p| {
+            p.join("hicolor/scalable/status/linux-onedrive-gui-ok.svg")
+                .exists()
+        })
+        .map(|p| p.canonicalize().unwrap_or(p))
+}
+
+/// Only the log lines that matter for status, however busy the log is. Falls back to a plain
+/// tail on systems whose journalctl lacks --grep.
+pub fn journal_status_lines(unit: &str) -> Vec<String> {
+    let pattern = "Starting a sync|Sync with Microsoft OneDrive is complete|ERROR|Unable to |--resync|requires authentication|re-authenticate|invalid_grant";
+    let out = Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            unit,
+            "-n",
+            "60",
+            "-o",
+            "short-unix",
+            "--no-pager",
+            "-q",
+            "--grep",
+            pattern,
+        ])
+        .output();
+    match out {
+        // exit status 1 with nothing on stderr just means "no matching lines"
+        Ok(o) if o.status.success() || (o.status.code() == Some(1) && o.stderr.is_empty()) => {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(String::from)
+                .collect()
+        }
+        _ => journal_tail(unit, 400),
+    }
+}
+
 pub fn journal_tail(unit: &str, lines: usize) -> Vec<String> {
     Command::new("journalctl")
-        .args(["--user", "-u", unit, "-n", &lines.to_string(), "-o", "short-unix", "--no-pager", "-q"])
+        .args([
+            "--user",
+            "-u",
+            unit,
+            "-n",
+            &lines.to_string(),
+            "-o",
+            "short-unix",
+            "--no-pager",
+            "-q",
+        ])
         .stderr(Stdio::null())
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(String::from)
+                .collect()
+        })
         .unwrap_or_default()
 }
 
@@ -689,12 +922,13 @@ pub enum Phase {
 }
 
 impl Phase {
+    /// Our own status icons (assets/icons), so the tray looks the same on every desktop.
     pub fn icon(self) -> &'static str {
         match self {
-            Phase::Syncing | Phase::Unknown | Phase::Resyncing => "state-sync",
-            Phase::UpToDate => "state-ok",
-            Phase::Error | Phase::NeedsResync | Phase::SignedOut => "state-error",
-            Phase::Stopped | Phase::Off | Phase::Paused => "state-offline",
+            Phase::Syncing | Phase::Unknown | Phase::Resyncing => "linux-onedrive-gui-sync",
+            Phase::UpToDate => "linux-onedrive-gui-ok",
+            Phase::Error | Phase::NeedsResync | Phase::SignedOut => "linux-onedrive-gui-error",
+            Phase::Stopped | Phase::Off | Phase::Paused => "linux-onedrive-gui-off",
         }
     }
 }
@@ -728,10 +962,12 @@ impl Status {
             Phase::Error => "Error".into(),
             Phase::Stopped => "Stopped".into(),
             Phase::Off => "Background sync off".into(),
-            Phase::Paused if prefs.paused() => match Local.timestamp_opt(prefs.pause_until, 0).single() {
-                Some(t) => format!("Paused until {}", short_time(t)),
-                None => "Paused".into(),
-            },
+            Phase::Paused if prefs.paused() => {
+                match Local.timestamp_opt(prefs.pause_until, 0).single() {
+                    Some(t) => format!("Paused until {}", short_time(t)),
+                    None => "Paused".into(),
+                }
+            }
             Phase::Paused => format!("Paused by schedule until {}", prefs.schedule.from),
             Phase::Resyncing => "Full resync running…".into(),
             Phase::SignedOut => "Signed out".into(),
@@ -742,7 +978,13 @@ impl Status {
 }
 
 /// Works out the phase from a fresh look at systemd plus log-derived state.
-pub fn compose_phase(acc: &AccountInfo, prefs: &AccountPrefs, unit: &UnitState, resyncing: bool, log_phase: Phase) -> Phase {
+pub fn compose_phase(
+    acc: &AccountInfo,
+    prefs: &AccountPrefs,
+    unit: &UnitState,
+    resyncing: bool,
+    log_phase: Phase,
+) -> Phase {
     if resyncing {
         return Phase::Resyncing;
     }
@@ -765,13 +1007,22 @@ pub fn compose_phase(acc: &AccountInfo, prefs: &AccountPrefs, unit: &UnitState, 
         if unit.failed {
             return Phase::Error;
         }
-        return if unit.enabled { Phase::Stopped } else { Phase::Off };
+        return if unit.enabled {
+            Phase::Stopped
+        } else {
+            Phase::Off
+        };
     }
     log_phase
 }
 
 pub fn run_detached(prog: &str, args: &[&str]) {
-    if let Ok(mut c) = Command::new(prog).args(args).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    if let Ok(mut c) = Command::new(prog)
+        .args(args)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
         std::thread::spawn(move || {
             let _ = c.wait();
         });
@@ -789,9 +1040,16 @@ pub fn show_in_folder(p: &Path) {
         let uri = format!("file://{}", p.to_string_lossy());
         let ok = Command::new("gdbus")
             .args([
-                "call", "--session", "--dest", "org.freedesktop.FileManager1",
-                "--object-path", "/org/freedesktop/FileManager1",
-                "--method", "org.freedesktop.FileManager1.ShowItems", &format!("['{}']", uri.replace('\'', "%27")), "",
+                "call",
+                "--session",
+                "--dest",
+                "org.freedesktop.FileManager1",
+                "--object-path",
+                "/org/freedesktop/FileManager1",
+                "--method",
+                "org.freedesktop.FileManager1.ShowItems",
+                &format!("['{}']", uri.replace('\'', "%27")),
+                "",
             ])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -813,11 +1071,19 @@ mod tests {
     #[test]
     fn schedule_windows() {
         let t = |s: &str| parse_hhmm(s).unwrap();
-        let night = Schedule { enabled: true, from: "23:00".into(), to: "07:00".into() };
+        let night = Schedule {
+            enabled: true,
+            from: "23:00".into(),
+            to: "07:00".into(),
+        };
         assert!(night.allows(t("23:30")));
         assert!(night.allows(t("03:00")));
         assert!(!night.allows(t("12:00")));
-        let day = Schedule { enabled: true, from: "09:00".into(), to: "17:00".into() };
+        let day = Schedule {
+            enabled: true,
+            from: "09:00".into(),
+            to: "17:00".into(),
+        };
         assert!(day.allows(t("09:00")) && !day.allows(t("17:00")));
         assert!(Schedule::default().allows(t("12:00")));
     }
@@ -825,7 +1091,10 @@ mod tests {
     #[test]
     fn exec_parsing() {
         let u = "ExecStart=\"/home/a b/x.AppImage\" --client --monitor --confdir \"/home/x/.config/onedrive-work\"\n";
-        assert_eq!(confdir_from_exec(u), Some(PathBuf::from("/home/x/.config/onedrive-work")));
+        assert_eq!(
+            confdir_from_exec(u),
+            Some(PathBuf::from("/home/x/.config/onedrive-work"))
+        );
         let u = "ExecStart=/usr/bin/onedrive --monitor\n";
         assert_eq!(confdir_from_exec(u), Some(config_home().join("onedrive")));
     }
@@ -839,9 +1108,17 @@ mod tests {
 
     #[test]
     fn log_lines() {
-        assert!(matches!(parse_log("Uploading new file: a/b.txt ... done"), Some(LogEvent::File { kind: "↑", .. })));
+        assert!(matches!(
+            parse_log("Uploading new file: a/b.txt ... done"),
+            Some(LogEvent::File { kind: "↑", .. })
+        ));
         assert!(parse_log("Uploading new file: a/b.txt ... failed").is_none());
-        assert!(matches!(parse_log("Downloading file: ./x/y.pdf ... done"), Some(LogEvent::File { path, .. }) if path == "x/y.pdf"));
-        assert!(matches!(parse_log("Sync with Microsoft OneDrive is complete"), Some(LogEvent::Complete)));
+        assert!(
+            matches!(parse_log("Downloading file: ./x/y.pdf ... done"), Some(LogEvent::File { path, .. }) if path == "x/y.pdf")
+        );
+        assert!(matches!(
+            parse_log("Sync with Microsoft OneDrive is complete"),
+            Some(LogEvent::Complete)
+        ));
     }
 }

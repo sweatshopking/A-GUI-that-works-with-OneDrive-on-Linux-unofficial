@@ -10,8 +10,10 @@ use chrono::{DateTime, Local};
 use ksni::blocking::TrayMethods;
 use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
 
+use crate::core::{
+    self, AccountInfo, AccountPrefs, AppSettings, LogEvent, Phase, Status, UnitState,
+};
 use crate::share;
-use crate::core::{self, AccountInfo, AccountPrefs, AppSettings, LogEvent, Phase, Status, UnitState};
 
 const RECENT_MAX: usize = 15;
 
@@ -48,7 +50,13 @@ impl Acc {
     }
     fn status(&self) -> Status {
         Status {
-            phase: core::compose_phase(&self.info, &self.prefs, &self.unit, self.resyncing, self.log_phase),
+            phase: core::compose_phase(
+                &self.info,
+                &self.prefs,
+                &self.unit,
+                self.resyncing,
+                self.log_phase,
+            ),
             last_complete: self.last_complete,
             last_error: self.last_error.clone(),
             unit: self.unit.clone(),
@@ -77,11 +85,21 @@ fn open_settings(account: Option<&str>) {
 impl Tray {
     fn overall(&self) -> Phase {
         let ps: Vec<Phase> = self.accs.iter().map(|a| a.status().phase).collect();
-        if ps.iter().any(|p| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut)) {
+        if ps
+            .iter()
+            .any(|p| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut))
+        {
             Phase::Error
-        } else if ps.iter().any(|p| matches!(p, Phase::Syncing | Phase::Resyncing | Phase::Unknown)) {
+        } else if ps
+            .iter()
+            .any(|p| matches!(p, Phase::Syncing | Phase::Resyncing | Phase::Unknown))
+        {
             Phase::Syncing
-        } else if ps.is_empty() || ps.iter().all(|p| matches!(p, Phase::Off | Phase::Stopped | Phase::Paused)) {
+        } else if ps.is_empty()
+            || ps
+                .iter()
+                .all(|p| matches!(p, Phase::Off | Phase::Stopped | Phase::Paused))
+        {
             Phase::Off
         } else {
             Phase::UpToDate
@@ -93,18 +111,36 @@ impl Tray {
         let st = a.status();
         let text = st.text(&a.prefs);
         let key = a.info.key();
-        let mut items: Vec<MenuItem<Self>> =
-            vec![StandardItem { label: text.clone(), icon_name: st.phase.icon().into(), enabled: false, ..Default::default() }.into()];
-        if st.phase == Phase::Error {
-            if let Some(e) = &a.last_error {
-                items.push(StandardItem { label: e.chars().take(90).collect(), enabled: false, ..Default::default() }.into());
+        let mut items: Vec<MenuItem<Self>> = vec![
+            StandardItem {
+                label: text.clone(),
+                icon_name: st.phase.icon().into(),
+                enabled: false,
+                ..Default::default()
             }
+            .into(),
+        ];
+        if st.phase == Phase::Error
+            && let Some(e) = &a.last_error
+        {
+            items.push(
+                StandardItem {
+                    label: e.chars().take(90).collect(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
         }
         if matches!(st.phase, Phase::SignedOut | Phase::NeedsResync) {
             let k = key.clone();
             items.push(
                 StandardItem {
-                    label: if st.phase == Phase::SignedOut { "Sign in…".into() } else { "Fix in settings…".into() },
+                    label: if st.phase == Phase::SignedOut {
+                        "Sign in…".into()
+                    } else {
+                        "Fix in settings…".into()
+                    },
                     icon_name: "dialog-password".into(),
                     activate: Box::new(move |_: &mut Self| open_settings(Some(&k))),
                     ..Default::default()
@@ -144,39 +180,65 @@ impl Tray {
             .into(),
         );
         if a.unit.enabled && a.info.signed_in {
-            let pause_items: Vec<MenuItem<Self>> = if a.prefs.paused() {
-                vec![StandardItem {
-                    label: "Resume syncing".into(),
-                    icon_name: "media-playback-start".into(),
-                    activate: Box::new(move |t: &mut Self| t.pause(idx, 0)),
-                    ..Default::default()
-                }
-                .into()]
+            if a.prefs.paused() {
+                items.push(
+                    StandardItem {
+                        label: "Resume syncing".into(),
+                        icon_name: "media-playback-start".into(),
+                        activate: Box::new(move |t: &mut Self| t.pause(idx, 0)),
+                        ..Default::default()
+                    }
+                    .into(),
+                );
             } else {
-                [("Pause for 1 hour", 3600), ("Pause for 4 hours", 4 * 3600), ("Pause until tomorrow", -1)]
+                let choices = [
+                    ("For 1 hour", 3600),
+                    ("For 4 hours", 4 * 3600),
+                    ("Until tomorrow morning", -1),
+                ];
+                let submenu = choices
                     .into_iter()
                     .map(|(label, secs)| {
                         StandardItem {
                             label: label.into(),
-                            icon_name: "media-playback-pause".into(),
                             activate: Box::new(move |t: &mut Self| t.pause(idx, secs)),
                             ..Default::default()
                         }
                         .into()
                     })
-                    .collect()
-            };
-            items.extend(pause_items);
+                    .collect();
+                items.push(
+                    SubMenu {
+                        label: "Pause syncing".into(),
+                        icon_name: "media-playback-pause".into(),
+                        submenu,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
         }
         let recent: Vec<MenuItem<Self>> = if a.recent.is_empty() {
-            vec![StandardItem { label: "Nothing yet".into(), enabled: false, ..Default::default() }.into()]
+            vec![
+                StandardItem {
+                    label: "Nothing yet".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            ]
         } else {
             a.recent
                 .iter()
                 .enumerate()
                 .map(|(i, r)| {
                     StandardItem {
-                        label: format!("{} {}   {}", r.kind, r.path.replace('_', "__"), core::short_time(r.when)),
+                        label: format!(
+                            "{} {}   {}",
+                            r.kind,
+                            r.path.replace('_', "__"),
+                            core::short_time(r.when)
+                        ),
                         activate: Box::new(move |t: &mut Self| {
                             let a = &t.accs[idx];
                             if let Some(r) = a.recent.get(i) {
@@ -190,7 +252,15 @@ impl Tray {
                 .collect()
         };
         items.push(MenuItem::Separator);
-        items.push(SubMenu { label: "Recent files".into(), icon_name: "document-open-recent".into(), submenu: recent, ..Default::default() }.into());
+        items.push(
+            SubMenu {
+                label: "Recent files".into(),
+                icon_name: "document-open-recent".into(),
+                submenu: recent,
+                ..Default::default()
+            }
+            .into(),
+        );
         let k = key.clone();
         items.push(
             StandardItem {
@@ -201,7 +271,13 @@ impl Tray {
             }
             .into(),
         );
-        SubMenu { label: format!("{} — {}", a.info.name, text), icon_name: st.phase.icon().into(), submenu: items, ..Default::default() }.into()
+        SubMenu {
+            label: format!("{} — {}", a.info.name, text),
+            icon_name: st.phase.icon().into(),
+            submenu: items,
+            ..Default::default()
+        }
+        .into()
     }
 
     fn sync_now(&mut self, idx: usize) {
@@ -272,7 +348,15 @@ impl Tray {
         a.unit.enabled = on;
         a.unit.active = on;
         a.unit.starting = on;
-        core::run_detached("systemctl", &["--user", if on { "enable" } else { "disable" }, "--now", &unit]);
+        core::run_detached(
+            "systemctl",
+            &[
+                "--user",
+                if on { "enable" } else { "disable" },
+                "--now",
+                &unit,
+            ],
+        );
     }
 }
 
@@ -288,19 +372,47 @@ impl ksni::Tray for Tray {
     fn icon_name(&self) -> String {
         self.overall().icon().into()
     }
+    fn icon_theme_path(&self) -> String {
+        core::icon_theme_path()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    }
     fn status(&self) -> ksni::Status {
-        if self.overall() == Phase::Error { ksni::Status::NeedsAttention } else { ksni::Status::Active }
+        if self.overall() == Phase::Error {
+            ksni::Status::NeedsAttention
+        } else {
+            ksni::Status::Active
+        }
     }
     fn tool_tip(&self) -> ksni::ToolTip {
-        let lines: Vec<String> =
-            self.accs.iter().map(|a| format!("{}: {}", a.info.name, a.status().text(&a.prefs))).collect();
-        let description = if lines.is_empty() { "No accounts yet — open Settings to add one".into() } else { lines.join("\n") };
-        ksni::ToolTip { title: "OneDrive".into(), description, ..Default::default() }
+        let lines: Vec<String> = self
+            .accs
+            .iter()
+            .map(|a| format!("{}: {}", a.info.name, a.status().text(&a.prefs)))
+            .collect();
+        let description = if lines.is_empty() {
+            "No accounts yet — open Settings to add one".into()
+        } else {
+            lines.join("\n")
+        };
+        ksni::ToolTip {
+            title: "OneDrive".into(),
+            description,
+            ..Default::default()
+        }
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let mut m: Vec<MenuItem<Self>> = (0..self.accs.len()).map(|i| self.account_menu(i)).collect();
+        let mut m: Vec<MenuItem<Self>> =
+            (0..self.accs.len()).map(|i| self.account_menu(i)).collect();
         if m.is_empty() {
-            m.push(StandardItem { label: "No accounts yet".into(), enabled: false, ..Default::default() }.into());
+            m.push(
+                StandardItem {
+                    label: "No accounts yet".into(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
         }
         m.push(MenuItem::Separator);
         m.push(
@@ -325,11 +437,71 @@ impl ksni::Tray for Tray {
     }
 }
 
+/// Applies one log event to the account using `unit`. Returns Some(false) once that account is gone.
+fn apply_event(
+    handle: &ksni::blocking::Handle<Tray>,
+    unit: &str,
+    when: DateTime<Local>,
+    ev: LogEvent,
+) -> Option<bool> {
+    handle.update(|t: &mut Tray| {
+        let Some(a) = t
+            .accs
+            .iter_mut()
+            .find(|a| a.info.unit.as_deref() == Some(unit))
+        else {
+            return false;
+        };
+        match ev {
+            LogEvent::Syncing => a.log_phase = Phase::Syncing,
+            LogEvent::Complete => {
+                a.log_phase = Phase::UpToDate;
+                a.last_complete = Some(when);
+                a.last_error = None;
+            }
+            LogEvent::Error(e) => {
+                a.log_phase = Phase::Error;
+                a.last_error = Some(e);
+            }
+            LogEvent::NeedsResync => a.log_phase = Phase::NeedsResync,
+            LogEvent::NeedsLogin => {
+                a.log_phase = Phase::Error;
+                a.last_error = Some("Microsoft needs you to sign in again".into());
+            }
+            LogEvent::File { kind, path } => {
+                a.recent.retain(|r| r.path != path);
+                a.recent.push_front(Activity { when, kind, path });
+                a.recent.truncate(RECENT_MAX);
+            }
+        }
+        true
+    })
+}
+
 /// Follows one unit's journal for as long as the tray runs.
 fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
+    // the status lines first, so "last synced" is right even when the recent log is busy
+    for line in core::journal_status_lines(&unit) {
+        if let Some((when, msg)) = core::split_journal_line(&line)
+            && let Some(ev) = core::parse_log(msg)
+        {
+            apply_event(&handle, &unit, when, ev);
+        }
+    }
     loop {
         let child = Command::new("journalctl")
-            .args(["--user", "-u", &unit, "-f", "-n", "400", "-o", "short-unix", "--no-pager", "-q"])
+            .args([
+                "--user",
+                "-u",
+                &unit,
+                "-f",
+                "-n",
+                "400",
+                "-o",
+                "short-unix",
+                "--no-pager",
+                "-q",
+            ])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn();
@@ -339,34 +511,13 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
         };
         let out = child.stdout.take().unwrap();
         for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let Some((when, msg)) = core::split_journal_line(&line) else { continue };
-            let Some(ev) = core::parse_log(msg) else { continue };
-            let alive = handle.update(|t: &mut Tray| {
-                let Some(a) = t.accs.iter_mut().find(|a| a.info.unit.as_deref() == Some(unit.as_str())) else { return false };
-                match ev {
-                    LogEvent::Syncing => a.log_phase = Phase::Syncing,
-                    LogEvent::Complete => {
-                        a.log_phase = Phase::UpToDate;
-                        a.last_complete = Some(when);
-                        a.last_error = None;
-                    }
-                    LogEvent::Error(e) => {
-                        a.log_phase = Phase::Error;
-                        a.last_error = Some(e);
-                    }
-                    LogEvent::NeedsResync => a.log_phase = Phase::NeedsResync,
-                    LogEvent::NeedsLogin => {
-                        a.log_phase = Phase::Error;
-                        a.last_error = Some("Microsoft needs you to sign in again".into());
-                    }
-                    LogEvent::File { kind, path } => {
-                        a.recent.retain(|r| r.path != path);
-                        a.recent.push_front(Activity { when, kind, path });
-                        a.recent.truncate(RECENT_MAX);
-                    }
-                }
-                true
-            });
+            let Some((when, msg)) = core::split_journal_line(&line) else {
+                continue;
+            };
+            let Some(ev) = core::parse_log(msg) else {
+                continue;
+            };
+            let alive = apply_event(&handle, &unit, when, ev);
             if alive != Some(true) {
                 let _ = child.kill();
                 let _ = child.wait();
@@ -422,11 +573,11 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         }
 
         for i in &infos {
-            if let Some(u) = &i.unit {
-                if following.insert(u.clone()) {
-                    let (h, u) = (handle.clone(), u.clone());
-                    thread::spawn(move || follow(h, u));
-                }
+            if let Some(u) = &i.unit
+                && following.insert(u.clone())
+            {
+                let (h, u) = (handle.clone(), u.clone());
+                thread::spawn(move || follow(h, u));
             }
         }
 
@@ -450,24 +601,38 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         });
         // tell the user when an account newly needs attention
         let phases: Vec<(String, String, Phase)> = handle
-            .update(|t: &mut Tray| t.accs.iter().map(|a| (a.info.key(), a.info.name.clone(), a.status().phase)).collect())
+            .update(|t: &mut Tray| {
+                t.accs
+                    .iter()
+                    .map(|a| (a.info.key(), a.info.name.clone(), a.status().phase))
+                    .collect()
+            })
             .unwrap_or_default();
         for (key, name, phase) in &phases {
             let before = last_phase.insert(key.clone(), *phase);
             let bad = |p: Phase| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut);
-            if let Some(before) = before {
-                if bad(*phase) && !bad(before) {
-                    let body = match phase {
-                        Phase::SignedOut => "Microsoft needs you to sign in again. Open the tray menu to fix it.",
-                        Phase::NeedsResync => "The sync engine needs a full resync. Open Settings to review and apply it.",
-                        _ => "Syncing hit an error. Open the tray menu for details.",
-                    };
-                    share::notify(&format!("OneDrive: {name}"), body);
-                }
+            if let Some(before) = before
+                && bad(*phase)
+                && !bad(before)
+            {
+                let body = match phase {
+                    Phase::SignedOut => {
+                        "Microsoft needs you to sign in again. Open the tray menu to fix it."
+                    }
+                    Phase::NeedsResync => {
+                        "The sync engine needs a full resync. Open Settings to review and apply it."
+                    }
+                    _ => "Syncing hit an error. Open the tray menu for details.",
+                };
+                share::notify(&format!("OneDrive: {name}"), body);
             }
         }
         // a unit that was removed stops its follower on its next log line; forget it so a re-add works
-        following.retain(|u| handle.update(|t: &mut Tray| t.accs.iter().any(|a| a.info.unit.as_deref() == Some(u))).unwrap_or(false));
+        following.retain(|u| {
+            handle
+                .update(|t: &mut Tray| t.accs.iter().any(|a| a.info.unit.as_deref() == Some(u)))
+                .unwrap_or(false)
+        });
         thread::sleep(Duration::from_secs(3));
     }
 }
@@ -494,13 +659,17 @@ pub fn already_running() -> bool {
     std::fs::read_dir("/proc")
         .map(|rd| {
             rd.flatten().any(|e| {
-                let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { return false };
+                let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else {
+                    return false;
+                };
                 if pid == me {
                     return false;
                 }
                 let cmd = std::fs::read(e.path().join("cmdline")).unwrap_or_default();
                 let args: Vec<&[u8]> = cmd.split(|b| *b == 0).collect();
-                let is_us = args.first().is_some_and(|a| String::from_utf8_lossy(a).contains(core::APP_ID));
+                let is_us = args
+                    .first()
+                    .is_some_and(|a| String::from_utf8_lossy(a).contains(core::APP_ID));
                 is_us && args.iter().any(|a| *a == b"--tray")
             })
         })

@@ -13,7 +13,7 @@
 
 use std::fs;
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -103,24 +103,49 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "r_visible" => ui.get_r_visible().to_string(),
             "accounts" => {
                 use slint::Model;
-                ui.get_accounts().iter().map(|a| format!("{} [{}]", a.name, a.status)).collect::<Vec<_>>().join(" | ")
+                ui.get_accounts()
+                    .iter()
+                    .map(|a| format!("{} [{}]", a.name, a.status))
+                    .collect::<Vec<_>>()
+                    .join(" | ")
             }
             "f_rows" => {
                 use slint::Model;
                 ui.get_f_rows()
                     .iter()
-                    .map(|r| format!("{}{}{}", "  ".repeat(r.depth as usize), if r.checked { "[x] " } else { "[ ] " }, r.name))
+                    .map(|r| {
+                        format!(
+                            "{}{}{}",
+                            "  ".repeat(r.depth as usize),
+                            if r.checked { "[x] " } else { "[ ] " },
+                            r.name
+                        )
+                    })
                     .collect::<Vec<_>>()
                     .join("\n")
             }
             "add_libraries" => {
                 use slint::Model;
-                ui.get_add_libraries().iter().map(|s| s.to_string()).collect::<Vec<_>>().join(" | ")
+                ui.get_add_libraries()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+                    .join(" | ")
             }
             "a_rows" => {
                 use slint::Model;
                 let rows = ui.get_a_rows();
-                format!("{} rows; first: {}", rows.row_count(), rows.row_data(0).map(|r| r.iter().map(|c| c.text.to_string()).collect::<Vec<_>>().join(" / ")).unwrap_or_default())
+                format!(
+                    "{} rows; first: {}",
+                    rows.row_count(),
+                    rows.row_data(0)
+                        .map(|r| r
+                            .iter()
+                            .map(|c| c.text.to_string())
+                            .collect::<Vec<_>>()
+                            .join(" / "))
+                        .unwrap_or_default()
+                )
             }
             _ => return None,
         })
@@ -193,7 +218,7 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
     true
 }
 
-fn shot(ui: &AppWindow, dir: &PathBuf, name: &str) {
+fn shot(ui: &AppWindow, dir: &Path, name: &str) {
     match ui.window().take_snapshot() {
         Ok(buf) => {
             let (w, h) = (buf.width(), buf.height());
@@ -216,76 +241,91 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
     let script = fs::read_to_string(std::env::var("LODG_TEST_SCRIPT").ok()?).ok()?;
     let out = PathBuf::from(std::env::var("LODG_TEST_OUT").unwrap_or_else(|_| ".".into()));
     let _ = fs::create_dir_all(&out);
-    let steps: Rc<std::cell::RefCell<std::collections::VecDeque<Step>>> = Rc::new(std::cell::RefCell::new(script.lines().filter_map(parse).collect()));
-    let next_at = Rc::new(std::cell::Cell::new(Instant::now() + Duration::from_millis(800)));
+    let steps: Rc<std::cell::RefCell<std::collections::VecDeque<Step>>> = Rc::new(
+        std::cell::RefCell::new(script.lines().filter_map(parse).collect()),
+    );
+    let next_at = Rc::new(std::cell::Cell::new(
+        Instant::now() + Duration::from_millis(800),
+    ));
     let until_deadline: Rc<std::cell::Cell<Option<Instant>>> = Rc::new(std::cell::Cell::new(None));
     let weak = ui.as_weak();
     let timer = slint::Timer::default();
-    timer.start(slint::TimerMode::Repeated, Duration::from_millis(100), move || {
-        let Some(ui) = weak.upgrade() else { return };
-        if Instant::now() < next_at.get() {
-            return;
-        }
-        let mut q = steps.borrow_mut();
-        let Some(step) = q.front() else { return };
-        let mut advance = true;
-        match step {
-            Step::Wait(s) => next_at.set(Instant::now() + Duration::from_secs_f64(*s)),
-            Step::Shot(n) => shot(&ui, &out, n),
-            Step::Call(name, n) => {
-                if call(&ui, name, *n) {
-                    println!("STEP call {name} {}", n.map(|n| n.to_string()).unwrap_or_default());
-                } else {
-                    println!("FAIL unknown callback {name}");
-                }
-                next_at.set(Instant::now() + Duration::from_millis(300));
+    timer.start(
+        slint::TimerMode::Repeated,
+        Duration::from_millis(100),
+        move || {
+            let Some(ui) = weak.upgrade() else { return };
+            if Instant::now() < next_at.get() {
+                return;
             }
-            Step::Set(k, v) => {
-                if !set(&ui, k, v) {
-                    println!("FAIL unknown property {k}");
-                }
-            }
-            Step::Until(k, text, secs) => {
-                let deadline = until_deadline.get().unwrap_or_else(|| {
-                    let d = Instant::now() + Duration::from_secs_f64(*secs);
-                    until_deadline.set(Some(d));
-                    d
-                });
-                let val = get_str(&ui, k).unwrap_or_default();
-                if val.contains(text.as_str()) {
-                    println!("STEP until {k} ~ {text:?} ok");
-                    until_deadline.set(None);
-                } else if Instant::now() > deadline {
-                    println!("FAIL until {k} ~ {text:?} timed out; value: {val:?}");
-                    until_deadline.set(None);
-                } else {
-                    advance = false;
-                }
-            }
-            Step::Dump(k) => match get_str(&ui, k) {
-                Some(v) => println!("DUMP {k} = {}", v.replace('\n', " ⏎ ")),
-                None => println!("FAIL unknown property {k}"),
-            },
-            Step::SelectName(n) => {
-                use slint::Model;
-                match ui.get_accounts().iter().position(|a| a.name.contains(n.as_str())) {
-                    Some(i) => {
-                        ui.invoke_select(i as i32);
-                        println!("STEP selectname {n} -> {i}");
+            let mut q = steps.borrow_mut();
+            let Some(step) = q.front() else { return };
+            let mut advance = true;
+            match step {
+                Step::Wait(s) => next_at.set(Instant::now() + Duration::from_secs_f64(*s)),
+                Step::Shot(n) => shot(&ui, &out, n),
+                Step::Call(name, n) => {
+                    if call(&ui, name, *n) {
+                        println!(
+                            "STEP call {name} {}",
+                            n.map(|n| n.to_string()).unwrap_or_default()
+                        );
+                    } else {
+                        println!("FAIL unknown callback {name}");
                     }
-                    None => println!("FAIL selectname {n}: no such account"),
+                    next_at.set(Instant::now() + Duration::from_millis(300));
                 }
-                next_at.set(Instant::now() + Duration::from_millis(300));
+                Step::Set(k, v) => {
+                    if !set(&ui, k, v) {
+                        println!("FAIL unknown property {k}");
+                    }
+                }
+                Step::Until(k, text, secs) => {
+                    let deadline = until_deadline.get().unwrap_or_else(|| {
+                        let d = Instant::now() + Duration::from_secs_f64(*secs);
+                        until_deadline.set(Some(d));
+                        d
+                    });
+                    let val = get_str(&ui, k).unwrap_or_default();
+                    if val.contains(text.as_str()) {
+                        println!("STEP until {k} ~ {text:?} ok");
+                        until_deadline.set(None);
+                    } else if Instant::now() > deadline {
+                        println!("FAIL until {k} ~ {text:?} timed out; value: {val:?}");
+                        until_deadline.set(None);
+                    } else {
+                        advance = false;
+                    }
+                }
+                Step::Dump(k) => match get_str(&ui, k) {
+                    Some(v) => println!("DUMP {k} = {}", v.replace('\n', " ⏎ ")),
+                    None => println!("FAIL unknown property {k}"),
+                },
+                Step::SelectName(n) => {
+                    use slint::Model;
+                    match ui
+                        .get_accounts()
+                        .iter()
+                        .position(|a| a.name.contains(n.as_str()))
+                    {
+                        Some(i) => {
+                            ui.invoke_select(i as i32);
+                            println!("STEP selectname {n} -> {i}");
+                        }
+                        None => println!("FAIL selectname {n}: no such account"),
+                    }
+                    next_at.set(Instant::now() + Duration::from_millis(300));
+                }
+                Step::Quit => {
+                    let _ = std::io::stdout().flush();
+                    let _ = slint::quit_event_loop();
+                }
             }
-            Step::Quit => {
-                let _ = std::io::stdout().flush();
-                let _ = slint::quit_event_loop();
+            if advance {
+                q.pop_front();
             }
-        }
-        if advance {
-            q.pop_front();
-        }
-        let _ = std::io::stdout().flush();
-    });
+            let _ = std::io::stdout().flush();
+        },
+    );
     Some(timer)
 }

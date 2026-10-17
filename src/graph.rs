@@ -29,21 +29,30 @@ fn agent() -> ureq::Agent {
 }
 
 fn endpoints(cfg: &ClientConfig) -> (String, String) {
-    let tenant = cfg.get("azure_tenant_id").filter(|s| !s.is_empty()).unwrap_or_else(|| "common".into());
+    let tenant = cfg
+        .get("azure_tenant_id")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "common".into());
     let host = match cfg.get("azure_ad_endpoint").unwrap_or_default().as_str() {
         "USL4" | "USL5" => "https://login.microsoftonline.us",
         "DE" => "https://login.microsoftonline.de",
         "CN" => "https://login.chinacloudapi.cn",
         _ => "https://login.microsoftonline.com",
     };
-    (format!("{host}/{tenant}/oauth2/v2.0/token"), format!("{host}/common/oauth2/nativeclient"))
+    (
+        format!("{host}/{tenant}/oauth2/v2.0/token"),
+        format!("{host}/common/oauth2/nativeclient"),
+    )
 }
 
 pub fn token(confdir: &Path) -> Result<Token, String> {
     let rt = std::fs::read_to_string(confdir.join("refresh_token"))
         .map_err(|_| "This account isn't signed in.".to_string())?;
     let cfg = ClientConfig::load(confdir);
-    let app = cfg.get("application_id").filter(|s| !s.is_empty()).unwrap_or_else(|| DEFAULT_APP_ID.into());
+    let app = cfg
+        .get("application_id")
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_APP_ID.into());
     let (url, redirect) = endpoints(&cfg);
     let mut resp = agent()
         .post(&url)
@@ -59,7 +68,8 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
     match v["access_token"].as_str() {
         Some(a) => Ok(Token {
             access: a.to_string(),
-            expires: Instant::now() + Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(120)),
+            expires: Instant::now()
+                + Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(120)),
         }),
         None => Err(format!(
             "Microsoft refused the saved sign-in ({}). Try signing in again.",
@@ -77,7 +87,10 @@ fn get(tok: &Token, url: &str) -> Result<Value, String> {
     let status = resp.status().as_u16();
     let v: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
     if status >= 400 {
-        return Err(v["error"]["message"].as_str().unwrap_or("request failed").to_string());
+        return Err(v["error"]["message"]
+            .as_str()
+            .unwrap_or("request failed")
+            .to_string());
     }
     Ok(v)
 }
@@ -122,13 +135,20 @@ pub struct Folder {
 }
 
 /// Lists the sub-folders of `path` ("/" for the top).
-pub fn list_folders(tok: &Token, drive_id: Option<&str>, path: &str) -> Result<Vec<Folder>, String> {
+pub fn list_folders(
+    tok: &Token,
+    drive_id: Option<&str>,
+    path: &str,
+) -> Result<Vec<Folder>, String> {
     let base = drive_base(drive_id);
     let p = path.trim_matches('/');
     let item = if p.is_empty() {
         format!("{base}/root")
     } else {
-        format!("{base}/root:/{}:", p.split('/').map(enc).collect::<Vec<_>>().join("/"))
+        format!(
+            "{base}/root:/{}:",
+            p.split('/').map(enc).collect::<Vec<_>>().join("/")
+        )
     };
     let items = get_all(tok, format!("{item}/children?$select=name,folder&$top=999"))?;
     let mut out: Vec<Folder> = items
@@ -150,20 +170,32 @@ pub struct Quota {
 }
 
 pub fn quota(tok: &Token, drive_id: Option<&str>) -> Result<Quota, String> {
-    let v = get(tok, &format!("{}?$select=quota,owner,driveType", drive_base(drive_id)))?;
+    let v = get(
+        tok,
+        &format!("{}?$select=quota,owner,driveType", drive_base(drive_id)),
+    )?;
     let owner = v["owner"]["user"]["email"]
         .as_str()
         .or(v["owner"]["user"]["displayName"].as_str())
         .or(v["owner"]["group"]["displayName"].as_str())
         .unwrap_or("")
         .to_string();
-    Ok(Quota { used: v["quota"]["used"].as_u64().unwrap_or(0), total: v["quota"]["total"].as_u64().unwrap_or(0), owner })
+    Ok(Quota {
+        used: v["quota"]["used"].as_u64().unwrap_or(0),
+        total: v["quota"]["total"].as_u64().unwrap_or(0),
+        owner,
+    })
 }
 
 /// The signed-in user's account type: "personal" or "business".
 pub fn account_kind(tok: &Token) -> Result<String, String> {
     let v = get(tok, &format!("{GRAPH}/me/drive?$select=driveType"))?;
-    Ok(if v["driveType"].as_str() == Some("personal") { "personal" } else { "business" }.into())
+    Ok(if v["driveType"].as_str() == Some("personal") {
+        "personal"
+    } else {
+        "business"
+    }
+    .into())
 }
 
 #[derive(Clone, Debug)]
@@ -175,13 +207,28 @@ pub struct Library {
 
 /// Finds document libraries on SharePoint sites matching `query` ("*" lists every site you can see).
 pub fn find_libraries(tok: &Token, query: &str) -> Result<Vec<Library>, String> {
-    let q = if query.trim().is_empty() { "*" } else { query.trim() };
-    let sites = get_all(tok, format!("{GRAPH}/sites?search={}&$select=id,displayName,webUrl&$top=50", enc(q)))?;
+    let q = if query.trim().is_empty() {
+        "*"
+    } else {
+        query.trim()
+    };
+    let sites = get_all(
+        tok,
+        format!(
+            "{GRAPH}/sites?search={}&$select=id,displayName,webUrl&$top=50",
+            enc(q)
+        ),
+    )?;
     let mut out = Vec::new();
     for s in sites.iter().take(30) {
         let Some(id) = s["id"].as_str() else { continue };
         let site = s["displayName"].as_str().unwrap_or("").to_string();
-        let Ok(drives) = get_all(tok, format!("{GRAPH}/sites/{}/drives?$select=id,name,webUrl", enc(id))) else { continue };
+        let Ok(drives) = get_all(
+            tok,
+            format!("{GRAPH}/sites/{}/drives?$select=id,name,webUrl", enc(id)),
+        ) else {
+            continue;
+        };
         for d in drives {
             out.push(Library {
                 site: site.clone(),
@@ -201,19 +248,33 @@ pub fn human_size(b: u64) -> String {
         v /= 1024.0;
         i += 1;
     }
-    if i == 0 { format!("{b} B") } else { format!("{v:.1} {}", units[i]) }
+    if i == 0 {
+        format!("{b} B")
+    } else {
+        format!("{v:.1} {}", units[i])
+    }
 }
 
 fn item_url(drive_id: Option<&str>, rel: &str) -> String {
     let p = rel.trim_matches('/');
     let base = drive_base(drive_id);
-    if p.is_empty() { format!("{base}/root") } else { format!("{base}/root:/{}:", p.split('/').map(enc).collect::<Vec<_>>().join("/")) }
+    if p.is_empty() {
+        format!("{base}/root")
+    } else {
+        format!(
+            "{base}/root:/{}:",
+            p.split('/').map(enc).collect::<Vec<_>>().join("/")
+        )
+    }
 }
 
 /// The OneDrive website address for a file or folder (`rel` relative to the account's folder).
 pub fn item_web_url(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<String, String> {
     let v = get(tok, &format!("{}?$select=webUrl", item_url(drive_id, rel)))?;
-    v["webUrl"].as_str().map(String::from).ok_or_else(|| "OneDrive didn't return a web address.".into())
+    v["webUrl"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| "OneDrive didn't return a web address.".into())
 }
 
 pub fn web_url(tok: &Token, drive_id: Option<&str>) -> Result<String, String> {
@@ -233,12 +294,15 @@ pub fn create_link(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<Str
             .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
         let status = resp.status().as_u16();
         let v: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
-        if status < 400 {
-            if let Some(u) = v["link"]["webUrl"].as_str() {
-                return Ok(u.to_string());
-            }
+        if status < 400
+            && let Some(u) = v["link"]["webUrl"].as_str()
+        {
+            return Ok(u.to_string());
         }
-        last = v["error"]["message"].as_str().unwrap_or("couldn't create a link").to_string();
+        last = v["error"]["message"]
+            .as_str()
+            .unwrap_or("couldn't create a link")
+            .to_string();
     }
     Err(last)
 }
