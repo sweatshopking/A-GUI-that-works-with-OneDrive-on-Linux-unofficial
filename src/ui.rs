@@ -2061,9 +2061,13 @@ pub fn run(account: Option<String>) {
         return;
     }
     core::repair_managed_units();
-    // matches the .desktop file name, so desktops show our icon and group the window correctly
-    let _ = slint::set_xdg_app_id(core::APP_ID);
     let ui = AppWindow::new().expect("couldn't create the window");
+    // Matches the .desktop file name, so desktops show our icon and group the window correctly.
+    // Slint only accepts this once its backend exists (after AppWindow::new) and before the
+    // window is first shown.
+    if let Err(e) = slint::set_xdg_app_id(core::APP_ID) {
+        eprintln!("couldn't set the application id: {e}");
+    }
     if let Some(dark) = crate::dbus::prefers_dark() {
         ui.set_dark(dark);
     }
