@@ -4,7 +4,9 @@
 
 A tray icon and settings window for the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive)
 by abraunegg, which does the actual syncing and comes bundled. Download one file, sign in, pick your
-folders, done.
+folders, done. Linux is needed now more than ever for digital sovereignty (I'm aware of the fact this
+is hosted on microsoft's servers) and a big barrier to mass use is still the over reliance on the CLI.
+With that in mind, here is a OneDrive GUI for Linux.
 
 ![Status page](docs/screenshots/status-light.png)
 
