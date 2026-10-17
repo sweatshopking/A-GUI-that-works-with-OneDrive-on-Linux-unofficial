@@ -281,12 +281,26 @@ pub fn web_url(tok: &Token, drive_id: Option<&str>) -> Result<String, String> {
     item_web_url(tok, drive_id, "")
 }
 
+/// Who a sharing link works for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum LinkScope {
+    Anyone,
+    Organization,
+}
+
 /// Creates a view-only sharing link. Tries "anyone with the link" first and falls back to
 /// "people in your organisation" where the tenant doesn't allow anonymous links.
-pub fn create_link(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<String, String> {
+pub fn create_link(
+    tok: &Token,
+    drive_id: Option<&str>,
+    rel: &str,
+) -> Result<(String, LinkScope), String> {
     let url = format!("{}/createLink", item_url(drive_id, rel));
     let mut last = String::new();
-    for scope in ["anonymous", "organization"] {
+    for (scope, kind) in [
+        ("anonymous", LinkScope::Anyone),
+        ("organization", LinkScope::Organization),
+    ] {
         let mut resp = agent()
             .post(&url)
             .header("Authorization", &format!("Bearer {}", tok.access))
@@ -297,7 +311,13 @@ pub fn create_link(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<Str
         if status < 400
             && let Some(u) = v["link"]["webUrl"].as_str()
         {
-            return Ok(u.to_string());
+            // the service may quietly downgrade the scope, so trust what it reports
+            let kind = match v["link"]["scope"].as_str() {
+                Some("anonymous") => LinkScope::Anyone,
+                Some(_) => LinkScope::Organization,
+                None => kind,
+            };
+            return Ok((u.to_string(), kind));
         }
         last = v["error"]["message"]
             .as_str()

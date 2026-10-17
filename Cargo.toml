@@ -14,6 +14,7 @@ serde_json = "1.0.154"
 slint = { version = "1.18.1", default-features = false, features = ["std", "backend-winit", "renderer-femtovg", "renderer-software", "accessibility", "compat-1-2"] }
 ureq = { version = "3.4.2", features = ["json"] }
 libc = "0.2"
+zbus = "5.19"
 
 [features]
 # scripted UI driver used by the automated tests (see src/testdrive.rs)

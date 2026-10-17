@@ -112,6 +112,8 @@ struct Ctx {
     signin: Option<SignIn>,
     preview: Option<Preview>,
     refreshing: bool,
+    /// The user closed the window while a dry run was still stopping; close once it has.
+    close_when_idle: bool,
     rows: Rc<VecModel<FolderRow>>,
 }
 
@@ -255,6 +257,11 @@ fn tone(p: Phase) -> i32 {
 }
 
 fn refresh(ctx: &Shared) {
+    // demo screenshots fill the window with made-up data that live refreshes would overwrite
+    #[cfg(feature = "test-driver")]
+    if std::env::var_os("LODG_DEMO").is_some() {
+        return;
+    }
     if std::mem::replace(&mut ctx.borrow_mut().refreshing, true) {
         return;
     }
@@ -1135,6 +1142,9 @@ fn finish_cancel(ctx: &Shared) {
         load_folders(ctx, &acc, true);
     }
     refresh(ctx);
+    if ctx.borrow().close_when_idle {
+        let _ = ctx.borrow().ui().hide();
+    }
 }
 
 fn preview_cancel(ctx: &Shared) {
@@ -1982,48 +1992,59 @@ fn add_to_menu(ctx: &Shared) {
     }));
 }
 
-// ---------------------------------------------------------------- color scheme
+// ---------------------------------------------------------------- wiring
 
-/// Reads the desktop's light/dark preference from the freedesktop settings portal.
-fn prefers_dark() -> Option<bool> {
-    let out = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.freedesktop.portal.Desktop",
-            "--object-path",
-            "/org/freedesktop/portal/desktop",
-            "--method",
-            "org.freedesktop.portal.Settings.Read",
-            "org.freedesktop.appearance",
-            "color-scheme",
-        ])
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    // "(<<uint32 1>>,)" — 1 means prefer dark, 2 prefer light, 0 no preference
-    let n: u32 = s
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .collect::<String>()
-        .chars()
-        .last()?
-        .to_digit(10)?;
-    match n {
-        1 => Some(true),
-        2 => Some(false),
-        _ => None,
+fn instance_socket() -> PathBuf {
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join(core::APP_ID).join("window.sock")
+}
+
+/// If a window is already open, asks it to show `account` and returns true.
+fn hand_off(account: Option<&str>) -> bool {
+    match std::os::unix::net::UnixStream::connect(instance_socket()) {
+        Ok(mut s) => s.write_all(account.unwrap_or("").as_bytes()).is_ok(),
+        Err(_) => false,
     }
 }
 
-// ---------------------------------------------------------------- wiring
+/// Lets later launches (e.g. "Settings…" in the tray) reuse this window instead of opening another.
+fn listen_for_hand_offs() {
+    let path = instance_socket();
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    let _ = fs::remove_file(&path); // a stale socket from a crashed instance
+    let Ok(listener) = std::os::unix::net::UnixListener::bind(&path) else {
+        return;
+    };
+    std::thread::spawn(move || {
+        for mut conn in listener.incoming().flatten() {
+            let mut key = String::new();
+            let _ = conn.read_to_string(&mut key);
+            let _ = slint::invoke_from_event_loop(move || {
+                with_ctx(|ctx| {
+                    let ui = ctx.borrow().ui();
+                    let _ = ui.show();
+                    ui.window().set_minimized(false);
+                    let idx = ctx.borrow().accounts.iter().position(|a| a.key() == key);
+                    if let Some(i) = idx {
+                        select(ctx, i as i32);
+                    }
+                })
+            });
+        }
+    });
+}
 
 pub fn run(account: Option<String>) {
+    if hand_off(account.as_deref()) {
+        return;
+    }
     core::repair_managed_units();
+    // matches the .desktop file name, so desktops show our icon and group the window correctly
+    let _ = slint::set_xdg_app_id(core::APP_ID);
     let ui = AppWindow::new().expect("couldn't create the window");
-    if let Some(dark) = prefers_dark() {
+    if let Some(dark) = crate::dbus::prefers_dark() {
         ui.set_dark(dark);
     }
     let rows = Rc::new(VecModel::<FolderRow>::default());
@@ -2041,9 +2062,11 @@ pub fn run(account: Option<String>) {
         signin: None,
         preview: None,
         refreshing: false,
+        close_when_idle: false,
         rows,
     }));
     CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
+    listen_for_hand_offs();
 
     // the first load is synchronous so the window opens fully populated, on the right page
     apply_snapshot(&ctx, take_snapshot());
@@ -2249,6 +2272,7 @@ pub fn run(account: Option<String>) {
                 preview_cancel(&w);
                 let still = w.borrow().preview.as_ref().is_some_and(|p| p.running);
                 if still {
+                    w.borrow_mut().close_when_idle = true;
                     return slint::CloseRequestResponse::KeepWindowShown;
                 }
             }
@@ -2289,6 +2313,7 @@ pub fn run(account: Option<String>) {
     #[cfg(feature = "test-driver")]
     let _driver = crate::testdrive::start(&ui);
     ui.run().expect("event loop failed");
+    let _ = fs::remove_file(instance_socket());
     CTX.with(|c| *c.borrow_mut() = None);
 }
 

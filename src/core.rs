@@ -1033,31 +1033,24 @@ pub fn open_path(p: &Path) {
     run_detached("xdg-open", &[&p.to_string_lossy()]);
 }
 
-/// Shows a file in the user's file manager (via the freedesktop FileManager1 interface),
-/// falling back to opening its folder.
-pub fn show_in_folder(p: &Path) {
-    if p.exists() {
-        let uri = format!("file://{}", p.to_string_lossy());
-        let ok = Command::new("gdbus")
-            .args([
-                "call",
-                "--session",
-                "--dest",
-                "org.freedesktop.FileManager1",
-                "--object-path",
-                "/org/freedesktop/FileManager1",
-                "--method",
-                "org.freedesktop.FileManager1.ShowItems",
-                &format!("['{}']", uri.replace('\'', "%27")),
-                "",
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .is_ok_and(|s| s.success());
-        if ok {
-            return;
+/// A `file://` URI for a path, percent-encoding everything but unreserved characters and `/`.
+pub fn file_uri(p: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for &b in p.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-_.~".contains(&b) {
+            uri.push(b as char);
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
         }
+    }
+    uri
+}
+
+/// Shows a file in the user's file manager with it selected, falling back to opening its folder.
+pub fn show_in_folder(p: &Path) {
+    if p.exists() && crate::dbus::show_items(&file_uri(p)) {
+        return;
     }
     if let Some(parent) = p.parent().and_then(|p| p.ancestors().find(|a| a.exists())) {
         open_path(parent);
@@ -1104,6 +1097,14 @@ mod tests {
         assert_eq!(sync_list_folder("/Documents/"), Some("/Documents".into()));
         assert_eq!(sync_list_folder("Pictures/*"), Some("/Pictures".into()));
         assert_eq!(sync_list_folder("!/Junk"), None);
+    }
+
+    #[test]
+    fn uris() {
+        assert_eq!(
+            file_uri(Path::new("/home/a b/Kate's #1.txt")),
+            "file:///home/a%20b/Kate%27s%20%231.txt"
+        );
     }
 
     #[test]

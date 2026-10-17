@@ -5,6 +5,7 @@
 //!   linux-onedrive-gui --client …   run the bundled onedrive client with the given arguments
 
 mod core;
+mod dbus;
 mod graph;
 mod share;
 #[cfg(feature = "test-driver")]

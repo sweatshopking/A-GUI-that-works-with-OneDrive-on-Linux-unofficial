@@ -8,6 +8,7 @@
 //!   until <property> <text> <secs> wait until a string property contains text (fails on timeout)
 //!   dump <property>                print a property's value
 //!   selectname <text>              open the first account whose name contains text
+//!   demo                           fill the window with made-up accounts (run with LODG_DEMO=1)
 //!   quit                           close the window
 //! Results go to stdout as `STEP …`, `DUMP …` and `FAIL …` lines.
 
@@ -29,6 +30,7 @@ enum Step {
     Until(String, String, f64),
     Dump(String),
     SelectName(String),
+    Demo,
     Quit,
 }
 
@@ -56,6 +58,7 @@ fn parse(line: &str) -> Option<Step> {
         }
         "dump" => Step::Dump(rest),
         "selectname" => Step::SelectName(rest),
+        "demo" => Step::Demo,
         "quit" => Step::Quit,
         _ => {
             println!("FAIL unknown step: {line}");
@@ -81,6 +84,7 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
     r.or_else(|| {
         Some(match k {
             "current" => ui.get_current().to_string(),
+            "dark" => ui.get_dark().to_string(),
             "f_dirty" => ui.get_f_dirty().to_string(),
             "f_loading" => ui.get_f_loading().to_string(),
             "f_sync_all" => ui.get_f_sync_all().to_string(),
@@ -316,6 +320,7 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                     }
                     next_at.set(Instant::now() + Duration::from_millis(300));
                 }
+                Step::Demo => fill_demo(&ui),
                 Step::Quit => {
                     let _ = std::io::stdout().flush();
                     let _ = slint::quit_event_loop();
@@ -328,4 +333,117 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
         },
     );
     Some(timer)
+}
+
+/// Made-up accounts and files for README screenshots, so nobody's real data gets published.
+fn fill_demo(ui: &AppWindow) {
+    use crate::ui::{AccountRow, FolderRow};
+    use slint::{ModelRc, StandardListViewItem, VecModel};
+    let row = |name: &str, kind: &str, status: &str, tone: i32| AccountRow {
+        name: name.into(),
+        kind: kind.into(),
+        status: status.into(),
+        tone,
+    };
+    ui.set_accounts(ModelRc::new(VecModel::from(vec![
+        row("Personal", "Personal", "Up to date (09:41)", 0),
+        row("Contoso", "Work or school", "Syncing…", 1),
+        row(
+            "Marketing team",
+            "SharePoint library",
+            "Up to date (09:38)",
+            0,
+        ),
+        row("Family photos", "Personal", "Paused until 18:00", 3),
+    ])));
+    ui.set_current(0);
+    ui.set_s_name("Personal".into());
+    ui.set_s_kind("Personal".into());
+    ui.set_s_owner("alex@outlook.com".into());
+    ui.set_s_folder("/home/alex/OneDrive".into());
+    ui.set_s_status("Up to date (09:41)".into());
+    ui.set_s_tone(0);
+    ui.set_s_last("09:41".into());
+    ui.set_s_error("".into());
+    ui.set_s_msg("".into());
+    ui.set_s_quota("312.4 GB of 1.0 TB used".into());
+    ui.set_s_quota_frac(0.305);
+    ui.set_s_signed_in(true);
+    ui.set_s_bg_enabled(true);
+    let folder =
+        |name: &str, depth: i32, expanded: bool, kids: bool, checked: bool, inherited: bool| {
+            FolderRow {
+                name: name.into(),
+                depth,
+                expanded,
+                has_children: kids,
+                loading: false,
+                checked,
+                inherited,
+            }
+        };
+    ui.set_f_rows(ModelRc::new(VecModel::from(vec![
+        folder("Desktop", 0, false, true, false, false),
+        folder("Documents", 0, true, true, true, false),
+        folder("Finances", 1, false, true, true, true),
+        folder("School", 1, false, true, true, true),
+        folder("Travel", 1, false, false, true, true),
+        folder("Music", 0, false, true, false, false),
+        folder("Pictures", 0, true, true, false, false),
+        folder("Camera Roll", 1, false, true, true, false),
+        folder("Screenshots", 1, false, false, false, false),
+        folder("Wallpapers", 1, false, false, true, false),
+        folder("Projects", 0, false, true, true, false),
+        folder("Videos", 0, false, true, false, false),
+    ])));
+    ui.set_f_sync_all(false);
+    ui.set_f_root_files(true);
+    ui.set_f_dirty(true);
+    ui.set_f_allowed(true);
+    ui.set_f_msg("".into());
+    let activity = [
+        (
+            "Oct 18  09:41",
+            "Uploaded",
+            "Documents/Finances/Budget 2027.ods",
+        ),
+        (
+            "Oct 18  09:40",
+            "Downloaded",
+            "Pictures/Camera Roll/IMG_2041.jpg",
+        ),
+        (
+            "Oct 18  09:40",
+            "Downloaded",
+            "Pictures/Camera Roll/IMG_2040.jpg",
+        ),
+        (
+            "Oct 18  09:12",
+            "Uploaded",
+            "Projects/garden-planner/notes.md",
+        ),
+        ("Oct 18  08:55", "Deleted", "Documents/old draft.docx"),
+        (
+            "Oct 17  22:03",
+            "Uploaded",
+            "Documents/School/Essay - final.odt",
+        ),
+        (
+            "Oct 17  21:47",
+            "Downloaded",
+            "Documents/Travel/Lisbon itinerary.pdf",
+        ),
+        ("Oct 17  19:30", "New folder", "Pictures/Wallpapers/Autumn"),
+    ];
+    let rows: Vec<ModelRc<StandardListViewItem>> = activity
+        .iter()
+        .map(|(t, w, p)| ModelRc::new(VecModel::from(vec![(*t).into(), (*w).into(), (*p).into()])))
+        .collect();
+    ui.set_a_rows(ModelRc::new(VecModel::from(rows)));
+    ui.set_p_title("Change synced folders".into());
+    ui.set_p_text("Dry run finished — nothing has changed yet. If you apply this, the sync engine will:\n  •  download 214 item(s) to this computer\n  •  upload 0 item(s) to OneDrive\n  •  delete 0 item(s) online\n  •  delete 0 item(s) on this computer\n\nFolders you stop syncing stay on this computer; they just stop being kept in sync.".into());
+    ui.set_p_warn("".into());
+    ui.set_p_busy(false);
+    ui.set_p_can_apply(true);
+    println!("STEP demo");
 }

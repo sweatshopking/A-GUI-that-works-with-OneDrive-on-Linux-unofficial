@@ -8,50 +8,14 @@ use std::process::{Command, Stdio};
 use crate::core::{self, AppSettings};
 use crate::graph;
 
-/// Sends a desktop notification through the freedesktop notification service.
+/// Sends a desktop notification.
 pub fn notify(summary: &str, body: &str) {
-    let _ = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.freedesktop.Notifications",
-            "--object-path",
-            "/org/freedesktop/Notifications",
-            "--method",
-            "org.freedesktop.Notifications.Notify",
-            core::APP_NAME,
-            "0",
-            core::APP_ID,
-            summary,
-            body,
-            "[]",
-            "{}",
-            "8000",
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    crate::dbus::notify(core::APP_NAME, core::APP_ID, summary, body);
 }
 
 /// Puts text on the clipboard: KDE's Klipper first, then the usual command-line tools.
 pub fn copy_to_clipboard(text: &str) -> bool {
-    let klipper = Command::new("gdbus")
-        .args([
-            "call",
-            "--session",
-            "--dest",
-            "org.kde.klipper",
-            "--object-path",
-            "/klipper",
-            "--method",
-            "org.kde.klipper.klipper.setClipboardContents",
-            text,
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
+    let klipper = crate::dbus::klipper_set(text);
     if klipper {
         return true;
     }
@@ -117,15 +81,17 @@ pub fn share_link(path: &Path) {
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_default();
     match result {
-        Ok(link) => {
-            if copy_to_clipboard(&link) {
-                notify(
-                    "Link copied",
-                    &format!("Anyone with the link can view \"{name}\".\n{link}"),
-                );
+        Ok((link, scope)) => {
+            let who = match scope {
+                graph::LinkScope::Anyone => "Anyone with the link",
+                graph::LinkScope::Organization => "People in your organization with the link",
+            };
+            let title = if copy_to_clipboard(&link) {
+                "Link copied"
             } else {
-                notify("Sharing link", &link);
-            }
+                "Sharing link"
+            };
+            notify(title, &format!("{who} can view \"{name}\".\n{link}"));
         }
         Err(e) => notify("Couldn't create a link", &format!("{name}: {e}")),
     }

@@ -11,6 +11,8 @@ set -euo pipefail
 
 ONEDRIVE_TAG="${ONEDRIVE_TAG:-v2.5.11}"
 LINUXDEPLOY_TAG="${LINUXDEPLOY_TAG:-1-alpha-20251107-1}"
+# the official LDC release ships a static D runtime on every distro (Fedora's package doesn't)
+LDC_VERSION="${LDC_VERSION:-1.43.0}"
 APP=linux-onedrive-gui
 APPSTREAM_ID=io.github.sweatshopking.LinuxOnedriveGui
 
@@ -30,7 +32,7 @@ install_deps_ubuntu() {
     apt-get update -qq
     apt-get install -y -qq --no-install-recommends \
         ca-certificates curl git make gcc g++ pkg-config file dpkg-dev \
-        ldc libcurl4-openssl-dev libsqlite3-dev libdbus-1-dev zlib1g-dev \
+        xz-utils libcurl4-openssl-dev libsqlite3-dev libdbus-1-dev zlib1g-dev \
         libfontconfig1-dev libfreetype-dev libxkbcommon-dev libwayland-dev \
         libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev libegl1-mesa-dev \
         desktop-file-utils appstream >/dev/null
@@ -40,7 +42,7 @@ install_deps_fedora() {
     log "Installing build dependencies (dnf)"
     dnf install -y -q \
         ca-certificates curl git make gcc gcc-c++ pkgconf-pkg-config file rpm-build \
-        ldc libcurl-devel sqlite-devel dbus-devel zlib-devel \
+        xz libcurl-devel sqlite-devel dbus-devel zlib-devel \
         fontconfig-devel freetype-devel libxkbcommon-devel wayland-devel \
         libX11-devel libXcursor-devel libXrandr-devel libXi-devel mesa-libGL-devel mesa-libEGL-devel \
         desktop-file-utils >/dev/null
@@ -55,17 +57,27 @@ install_rust() {
     source "${CARGO_HOME:-$HOME/.cargo}/env"
 }
 
+install_ldc() {
+    local dir="$WORK/ldc2-$LDC_VERSION-linux-x86_64"
+    if [ ! -x "$dir/bin/ldmd2" ]; then
+        log "Installing LDC $LDC_VERSION"
+        curl -fsSL "https://github.com/ldc-developers/ldc/releases/download/v$LDC_VERSION/ldc2-$LDC_VERSION-linux-x86_64.tar.xz" | tar -xJ -C "$WORK"
+    fi
+    export PATH="$dir/bin:$PATH"
+}
+
 build_client() {
+    install_ldc
     log "Building the OneDrive Client for Linux $ONEDRIVE_TAG"
     rm -rf "$WORK/onedrive"
     git clone -q -c advice.detachedHead=false --depth 1 --branch "$ONEDRIVE_TAG" https://github.com/abraunegg/onedrive "$WORK/onedrive"
     cd "$WORK/onedrive"
     ./configure DC=ldmd2 --with-systemdsystemunitdir=no --with-systemduserunitdir=no >/dev/null
     # link the D runtime statically so users don't need it installed
-    if ! make -j"$(nproc)" DC="ldmd2 -link-defaultlib-shared=false -L-lz" >"$WORK/onedrive-build.log" 2>&1; then
-        log "Static D runtime unavailable here; linking it dynamically"
-        make clean >/dev/null
-        make -j"$(nproc)" DC=ldmd2 >"$WORK/onedrive-build.log" 2>&1 || { tail -40 "$WORK/onedrive-build.log"; exit 1; }
+    make -j"$(nproc)" DC="ldmd2 -link-defaultlib-shared=false -L-lz" >"$WORK/onedrive-build.log" 2>&1 || { tail -40 "$WORK/onedrive-build.log"; exit 1; }
+    if ldd onedrive | grep -qE 'phobos|druntime'; then
+        echo "error: the client still links the D runtime dynamically" >&2
+        exit 1
     fi
     ./onedrive --version
     cd "$ROOT"
