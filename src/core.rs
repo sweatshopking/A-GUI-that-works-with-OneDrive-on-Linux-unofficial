@@ -40,7 +40,13 @@ pub fn self_command() -> PathBuf {
     if let Ok(a) = std::env::var("APPIMAGE") {
         return PathBuf::from(a);
     }
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_ID))
+    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(APP_ID));
+    // After a package upgrade replaces our file, Linux reports the running one as
+    // "<path> (deleted)"; the new version is at the original path.
+    match exe.to_str().and_then(|s| s.strip_suffix(" (deleted)")) {
+        Some(original) => PathBuf::from(original),
+        None => exe,
+    }
 }
 
 /// The onedrive client binary we drive: a bundled copy next to us if there is one,
