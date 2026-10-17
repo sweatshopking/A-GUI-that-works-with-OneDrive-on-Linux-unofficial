@@ -6,7 +6,9 @@ A tray icon and settings window for the excellent [OneDrive Client for Linux](ht
 by abraunegg, which does the actual syncing and comes bundled. Download one file, sign in, pick your
 folders, done. Linux is needed now more than ever for digital sovereignty (I'm aware of the fact this
 is hosted on microsoft's servers and is a GUI for a Microsoft Product) and a big barrier to mass use is still the over reliance on the CLI.
-With that in mind, here is a OneDrive GUI for Linux.
+With that in mind, here is a OneDrive GUI for Linux. I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION this code
+is safe, does what it says, or won't harm your PC in some way. It's vibe coded and you are welcome and encouraged to review the source code prior to installing. 
+If anyone has any suggestions or bugs, please let me know. 
 
 ![Status page](docs/screenshots/status-light.png)
 
