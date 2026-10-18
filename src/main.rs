@@ -32,10 +32,22 @@ fn main() {
                 1
             };
             let mut claim = dbus::Claim::TakenByAnother;
-            for _ in 0..tries {
+            let mut unavailable = 0;
+            for _ in 0..tries + 8 {
                 claim = dbus::claim_name(core::TRAY_BUS_NAME);
-                if !matches!(claim, dbus::Claim::TakenByAnother) {
-                    break;
+                match claim {
+                    dbus::Claim::Owned(_) => break,
+                    // the session bus can be slow to accept connections when many programs
+                    // start at once (login, or several windows): try again before running
+                    // without the one-tray guard
+                    dbus::Claim::Unavailable => {
+                        unavailable += 1;
+                        if unavailable > 8 {
+                            break;
+                        }
+                    }
+                    dbus::Claim::TakenByAnother if tries == 1 => break,
+                    dbus::Claim::TakenByAnother => {}
                 }
                 std::thread::sleep(std::time::Duration::from_millis(250));
             }

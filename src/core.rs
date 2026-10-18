@@ -353,12 +353,16 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(format!(".tmp-{}", std::process::id()));
     let tmp = path.with_file_name(name);
-    {
+    let written = (|| {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
+        fs::rename(&tmp, path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp); // e.g. the disk is full: don't leave a half-written copy
     }
-    fs::rename(tmp, path)
+    written
 }
 
 /// Creates a directory readable only by the user (config dirs hold sign-in tokens).
@@ -377,15 +381,45 @@ pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 pub struct ClientConfig {
     pub path: PathBuf,
     lines: Vec<String>,
+    /// False when the file exists but isn't UTF-8 text: we then show what we can but never
+    /// write it, since saving our partial view would throw the rest of it away.
+    writable: bool,
+}
+
+/// An error for a file the app can't safely rewrite because it isn't UTF-8 text.
+fn not_text_error(p: &Path) -> std::io::Error {
+    std::io::Error::other(format!(
+        "{} isn't plain UTF-8 text, so it wasn't changed. Edit it by hand, or save it as UTF-8 and try again.",
+        p.display()
+    ))
+}
+
+/// Whether a file exists but can't be read as UTF-8 text.
+fn is_non_text(p: &Path) -> bool {
+    matches!(fs::read_to_string(p), Err(e) if e.kind() == std::io::ErrorKind::InvalidData)
 }
 
 impl ClientConfig {
     pub fn load(confdir: &Path) -> Self {
         let path = confdir.join("config");
-        let lines = fs::read_to_string(&path)
-            .map(|s| s.lines().map(String::from).collect())
-            .unwrap_or_default();
-        ClientConfig { path, lines }
+        let (lines, writable) = match fs::read(&path) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => (s.lines().map(String::from).collect(), true),
+                Err(e) => (
+                    String::from_utf8_lossy(e.as_bytes())
+                        .lines()
+                        .map(String::from)
+                        .collect(),
+                    false,
+                ),
+            },
+            Err(_) => (Vec::new(), true),
+        };
+        ClientConfig {
+            path,
+            lines,
+            writable,
+        }
     }
 
     fn key_of(line: &str) -> Option<&str> {
@@ -427,6 +461,9 @@ impl ClientConfig {
     }
 
     pub fn save(&self) -> std::io::Result<()> {
+        if !self.writable {
+            return Err(not_text_error(&self.path));
+        }
         if let Some(d) = self.path.parent().filter(|d| !d.exists()) {
             create_private_dir(d)?;
         }
@@ -453,8 +490,8 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 
 /// The selective-sync list. Empty means "sync everything".
 pub fn read_sync_list(confdir: &Path) -> Vec<String> {
-    fs::read_to_string(confdir.join("sync_list"))
-        .unwrap_or_default()
+    let bytes = fs::read(confdir.join("sync_list")).unwrap_or_default();
+    String::from_utf8_lossy(&bytes)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
@@ -464,6 +501,9 @@ pub fn read_sync_list(confdir: &Path) -> Vec<String> {
 
 pub fn write_sync_list(confdir: &Path, entries: &[String]) -> std::io::Result<()> {
     let p = confdir.join("sync_list");
+    if is_non_text(&p) {
+        return Err(not_text_error(&p));
+    }
     if entries.is_empty() {
         if p.exists() {
             // keep any rules the user wrote by hand, which syncing everything can't honour
@@ -1368,6 +1408,43 @@ pub fn compose_phase(
     log_phase
 }
 
+/// Starts, restarts or stops a sync unit in the background. A unit that failed, or that systemd
+/// stopped for restarting too often (5 starts in 10 s, easy with a few quick "Sync now" clicks),
+/// refuses to start until its failure is cleared, so that is cleared first. Repeated restarts of
+/// one unit within a few seconds, from the tray or the window, are dropped: the first one
+/// already starts a fresh sync.
+pub fn unit_action(verb: &'static str, unit: &str) {
+    if verb == "restart" && restarted_recently(unit) {
+        return;
+    }
+    let unit = unit.to_string();
+    std::thread::spawn(move || {
+        if verb != "stop" {
+            let _ = systemctl(&["reset-failed", &unit]);
+        }
+        let _ = systemctl(&[verb, &unit]);
+    });
+}
+
+fn restarted_recently(unit: &str) -> bool {
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    let mark = base.join(APP_ID).join("restarted").join(slug(unit));
+    let recent = fs::metadata(&mark)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(5));
+    if !recent {
+        if let Some(dir) = mark.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(&mark, b"");
+    }
+    recent
+}
+
 pub fn run_detached(prog: &str, args: &[&str]) {
     if let Ok(mut c) = Command::new(prog)
         .args(args)
@@ -1529,6 +1606,28 @@ mod tests {
                 .unwrap()
                 .contains("!/Junk/*")
         );
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn files_that_are_not_utf8_are_never_rewritten() {
+        let dir = std::env::temp_dir().join(format!("lodg-nt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // "Bücher" in Latin-1, as an older editor might have saved it
+        let config = b"sync_dir = \"~/B\xfccher\"\nmonitor_interval = \"300\"\n".to_vec();
+        fs::write(dir.join("config"), &config).unwrap();
+        let mut c = ClientConfig::load(&dir);
+        assert_eq!(c.get("monitor_interval").as_deref(), Some("300"));
+        c.set("rate_limit", Some("1000"));
+        assert!(c.save().is_err());
+        assert_eq!(fs::read(dir.join("config")).unwrap(), config);
+        let list = b"/B\xfccher\n".to_vec();
+        fs::write(dir.join("sync_list"), &list).unwrap();
+        assert_eq!(read_sync_list(&dir).len(), 1);
+        assert!(write_sync_list(&dir, &["/Documents".into()]).is_err());
+        assert!(write_sync_list(&dir, &[]).is_err());
+        assert_eq!(fs::read(dir.join("sync_list")).unwrap(), list);
         fs::remove_dir_all(&dir).unwrap();
     }
 

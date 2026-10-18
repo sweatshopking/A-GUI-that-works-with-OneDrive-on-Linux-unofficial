@@ -598,7 +598,7 @@ fn restart_if_running(acc: &AccountInfo) {
     if let Some(u) = &acc.unit
         && core::unit_state(u).active
     {
-        core::run_detached("systemctl", &["--user", "restart", u]);
+        core::unit_action("restart", u);
     }
 }
 
@@ -1203,7 +1203,7 @@ fn finish_cancel(ctx: &Shared) {
     if p.was_active
         && let Some(u) = &p.unit
     {
-        core::run_detached("systemctl", &["--user", "start", u]);
+        core::unit_action("start", u);
     }
     let ui = ctx.borrow().ui();
     ui.set_p_visible(false);
@@ -2295,6 +2295,39 @@ fn hand_off(account: Option<&str>) -> bool {
     }
 }
 
+/// Decides whether this launch opens the window. Returns false when an open window took the
+/// request instead. Windows started at the same moment race here, so the one that holds
+/// `window.lock` (for as long as it runs) is the only one that may listen; the others keep
+/// trying to hand off to it while it starts up.
+fn claim_window(account: Option<&str>) -> bool {
+    static LOCK: std::sync::OnceLock<fs::File> = std::sync::OnceLock::new();
+    let path = instance_socket().with_file_name("window.lock");
+    let _ = fs::create_dir_all(path.parent().unwrap());
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if hand_off(account) {
+            return false;
+        }
+        let Ok(file) = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)
+        else {
+            return true; // no runtime dir to coordinate in: just open
+        };
+        if file.try_lock().is_ok() {
+            let _ = LOCK.set(file);
+            return true;
+        }
+        if std::time::Instant::now() > deadline {
+            // the other window never started listening; better a second window than none
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+    }
+}
+
 /// Lets later launches (e.g. "Settings…" in the tray) reuse this window instead of opening another.
 fn listen_for_hand_offs() {
     let path = instance_socket();
@@ -2353,7 +2386,7 @@ fn restart_into_new_version(account: &str) {
 }
 
 pub fn run(account: Option<String>) {
-    if hand_off(account.as_deref()) {
+    if !claim_window(account.as_deref()) {
         return;
     }
     recover_interrupted_preview();
@@ -2483,7 +2516,7 @@ pub fn run(account: Option<String>) {
                 } else {
                     "start"
                 };
-                core::run_detached("systemctl", &["--user", verb, &u]);
+                core::unit_action(verb, &u);
                 c.borrow().ui().set_s_msg(ss("Syncing now…"));
             }
             Err(e) => c.borrow().ui().set_s_msg(ss(e.to_string())),

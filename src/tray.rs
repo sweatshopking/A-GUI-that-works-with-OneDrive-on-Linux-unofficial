@@ -298,12 +298,12 @@ impl Tray {
             Some(u) => {
                 a.unit.starting = true;
                 a.unit.active = true;
-                core::run_detached("systemctl", &["--user", "restart", u]);
+                core::unit_action("restart", u);
             }
             None => {
                 if let Ok(u) = core::ensure_unit(&a.info) {
                     a.info.unit = Some(u.clone());
-                    core::run_detached("systemctl", &["--user", "start", &u]);
+                    core::unit_action("start", &u);
                 }
             }
         }
@@ -331,7 +331,7 @@ impl Tray {
         if let Some(u) = &a.info.unit {
             let verb = if until == 0 { "start" } else { "stop" };
             a.unit.active = until == 0;
-            core::run_detached("systemctl", &["--user", verb, u]);
+            core::unit_action(verb, u);
         }
     }
 
@@ -463,11 +463,11 @@ impl ksni::Tray for Tray {
 }
 
 /// Applies one log event to the account using `unit`. Returns Some(false) once that account is gone.
-fn apply_event(
+/// Applies log events to the account in one tray update (each update redraws the menu).
+fn apply_events(
     handle: &ksni::blocking::Handle<Tray>,
     unit: &str,
-    when: DateTime<Local>,
-    ev: LogEvent,
+    events: Vec<(DateTime<Local>, LogEvent)>,
 ) -> Option<bool> {
     handle.update(|t: &mut Tray| {
         let Some(a) = t
@@ -477,42 +477,49 @@ fn apply_event(
         else {
             return false;
         };
-        match ev {
-            LogEvent::Syncing => a.log_phase = Phase::Syncing,
-            LogEvent::Complete => {
-                a.log_phase = Phase::UpToDate;
-                a.last_complete = Some(when);
-                a.last_error = None;
-            }
-            LogEvent::Error(e) => {
-                a.log_phase = Phase::Error;
-                a.last_error = Some(e);
-            }
-            LogEvent::NeedsResync => a.log_phase = Phase::NeedsResync,
-            LogEvent::NeedsLogin => {
-                a.log_phase = Phase::SignedOut;
-                a.last_error = Some("Microsoft needs you to sign in again".into());
-            }
-            LogEvent::File { kind, path } => {
-                a.recent.retain(|r| r.path != path);
-                a.recent.push_front(Activity { when, kind, path });
-                a.recent.truncate(RECENT_MAX);
-            }
+        for (when, ev) in events {
+            apply_one(a, when, ev);
         }
         true
     })
 }
 
+fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
+    match ev {
+        LogEvent::Syncing => a.log_phase = Phase::Syncing,
+        LogEvent::Complete => {
+            a.log_phase = Phase::UpToDate;
+            a.last_complete = Some(when);
+            a.last_error = None;
+        }
+        LogEvent::Error(e) => {
+            a.log_phase = Phase::Error;
+            a.last_error = Some(e);
+        }
+        LogEvent::NeedsResync => a.log_phase = Phase::NeedsResync,
+        LogEvent::NeedsLogin => {
+            a.log_phase = Phase::SignedOut;
+            a.last_error = Some("Microsoft needs you to sign in again".into());
+        }
+        LogEvent::File { kind, path } => {
+            a.recent.retain(|r| r.path != path);
+            a.recent.push_front(Activity { when, kind, path });
+            a.recent.truncate(RECENT_MAX);
+        }
+    }
+}
+
 /// Follows one unit's journal for as long as the tray runs.
 fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
     // the status lines first, so "last synced" is right even when the recent log is busy
-    for line in core::journal_status_lines(&unit) {
-        if let Some((when, msg)) = core::split_journal_line(&line)
-            && let Some(ev) = core::parse_log(msg)
-        {
-            apply_event(&handle, &unit, when, ev);
-        }
-    }
+    let status: Vec<_> = core::journal_status_lines(&unit)
+        .iter()
+        .filter_map(|line| {
+            let (when, msg) = core::split_journal_line(line)?;
+            Some((when, core::parse_log(msg)?))
+        })
+        .collect();
+    apply_events(&handle, &unit, status);
     loop {
         let child = Command::new("journalctl")
             .args([
@@ -534,21 +541,34 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
             thread::sleep(Duration::from_secs(10));
             continue;
         };
-        let out = child.stdout.take().unwrap();
-        for line in BufReader::new(out).lines().map_while(Result::ok) {
-            let Some((when, msg)) = core::split_journal_line(&line) else {
+        let mut out = BufReader::new(child.stdout.take().unwrap());
+        let mut raw = Vec::new();
+        let mut batch = Vec::new();
+        // Lines are read as bytes: a file name that isn't valid UTF-8 must not end the follow.
+        // While more lines are already waiting (a busy sync), events are collected and applied
+        // together, so a flood of file lines doesn't redraw the menu for every one of them.
+        loop {
+            raw.clear();
+            match out.read_until(b'\n', &mut raw) {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&raw);
+            if let Some((when, msg)) = core::split_journal_line(line.trim_end())
+                && let Some(ev) = core::parse_log(msg)
+            {
+                batch.push((when, ev));
+            }
+            if batch.is_empty() || (!out.buffer().is_empty() && batch.len() < 500) {
                 continue;
-            };
-            let Some(ev) = core::parse_log(msg) else {
-                continue;
-            };
-            let alive = apply_event(&handle, &unit, when, ev);
-            if alive != Some(true) {
+            }
+            if apply_events(&handle, &unit, std::mem::take(&mut batch)) != Some(true) {
                 let _ = child.kill();
                 let _ = child.wait();
                 return; // account was removed
             }
         }
+        let _ = child.kill();
         let _ = child.wait();
         thread::sleep(Duration::from_secs(5));
     }
