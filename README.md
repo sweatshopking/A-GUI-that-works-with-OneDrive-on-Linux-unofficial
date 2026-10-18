@@ -1,4 +1,4 @@
-# Entirely Unofficial Linux OneDrive GUI - not endorsed by Microsoft at at
+# Entirely Unofficial Linux OneDrive GUI - not endorsed by Microsoft at all
 
 **Sync OneDrive and SharePoint on Linux, without the command line.**
 
@@ -8,7 +8,7 @@ folders, done. Linux is needed now more than ever for digital sovereignty (I'm a
 is hosted on microsoft's servers and is a GUI for a Microsoft Product) and a big barrier to mass use is still the over reliance on the CLI.
 With that in mind, here is a OneDrive GUI for Linux. I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code
 is safe, does what it says, or won't harm your PC in some way. It's vibe coded and you are welcome and encouraged to review the source code prior to installing. 
-If anyone has any suggestions or bugs, please let me know. 
+Again, to be clear, this app is not endorsed by Microsoft and I'm not affiliated with Microsoft in anyway. Since it's just a rust GUI for the existing onedrive sync client, syncing issues should go to the original app, which is linked above. 
 
 ![Status page](docs/screenshots/status-light.png)
 
