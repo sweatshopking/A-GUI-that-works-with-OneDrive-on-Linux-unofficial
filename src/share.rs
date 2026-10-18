@@ -119,14 +119,10 @@ pub fn view_online(path: &Path) {
 pub fn install_service_menu(data_dir: &Path) -> std::io::Result<PathBuf> {
     let dir = data_dir.join("kio/servicemenus");
     fs::create_dir_all(&dir)?;
-    let me = core::self_command().to_string_lossy().to_string();
-    let exec = if me.contains(' ') {
-        format!("\"{me}\"")
-    } else {
-        me
-    };
-    let body = include_str!("../packaging/linux-onedrive-gui-servicemenu.desktop")
-        .replace("Exec=linux-onedrive-gui", &format!("Exec={exec}"));
+    let body = include_str!("../packaging/linux-onedrive-gui-servicemenu.desktop").replace(
+        "Exec=linux-onedrive-gui",
+        &format!("Exec={}", core::desktop_exec()),
+    );
     let file = dir.join(format!("{}.desktop", core::APP_ID));
     fs::write(&file, body)?;
     // KDE only runs user service menus that are marked executable

@@ -710,6 +710,30 @@ pub fn start_idle_units(settings: &AppSettings) {
     }
 }
 
+/// This app's command for a .desktop file's Exec= line, quoted by the Desktop Entry rules:
+/// `"`, `` ` ``, `$` and `\` escaped inside the quotes, the file format's own backslash escaping on
+/// top of that, and `%` doubled so it isn't read as a field code.
+pub fn desktop_exec() -> String {
+    desktop_exec_arg(&self_command().to_string_lossy())
+}
+
+pub fn desktop_exec_arg(arg: &str) -> String {
+    let mut out = String::from("\"");
+    for c in arg.chars() {
+        match c {
+            '"' | '`' | '$' => {
+                out.push_str(r"\\");
+                out.push(c);
+            }
+            '\\' => out.push_str(r"\\\\"),
+            '%' => out.push_str("%%"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 /// Text that is safe in a unit file setting: one line, and `%` (systemd's specifier marker) escaped.
 pub fn unit_text(s: &str) -> String {
     s.chars()
@@ -1464,6 +1488,19 @@ mod tests {
         assert!(!bad(&home.join("Ünïcode & spaces #1")));
         assert!(!bad(Path::new("/run/media/me/USB/OneDrive")));
         assert!(!bad(Path::new("/mnt/data/OneDrive")));
+    }
+
+    #[test]
+    fn desktop_exec_quoting() {
+        assert_eq!(
+            desktop_exec_arg("/home/a/x.AppImage"),
+            r#""/home/a/x.AppImage""#
+        );
+        assert_eq!(
+            desktop_exec_arg("/home/a b/100% \"$x\".AppImage"),
+            r#""/home/a b/100%% \\"\\$x\\".AppImage""#
+        );
+        assert_eq!(desktop_exec_arg(r"/a\b"), r#""/a\\\\b""#);
     }
 
     #[test]

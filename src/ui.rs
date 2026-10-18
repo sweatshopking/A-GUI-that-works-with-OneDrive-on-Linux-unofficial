@@ -2073,15 +2073,6 @@ fn autostart_file() -> PathBuf {
         .join(format!("{}.desktop", core::APP_ID))
 }
 
-fn desktop_exec() -> String {
-    let me = core::self_command().to_string_lossy().to_string();
-    if me.contains(' ') {
-        format!("\"{me}\"")
-    } else {
-        me
-    }
-}
-
 fn set_autostart(on: bool) {
     let f = autostart_file();
     if on {
@@ -2089,7 +2080,7 @@ fn set_autostart(on: bool) {
         let body = format!(
             "[Desktop Entry]\nType=Application\nName={}\nComment=OneDrive sync status\nExec={} --tray\nIcon={}\nX-GNOME-Autostart-enabled=true\nNoDisplay=true\n",
             core::APP_NAME,
-            desktop_exec(),
+            core::desktop_exec(),
             core::APP_ID
         );
         let _ = core::atomic_write(&f, body.as_bytes());
@@ -2149,7 +2140,7 @@ fn add_to_menu(ctx: &Shared) {
         fs::create_dir_all(&apps)?;
         let desktop = include_str!("../packaging/linux-onedrive-gui.desktop").replace(
             "Exec=linux-onedrive-gui",
-            &format!("Exec={}", desktop_exec()),
+            &format!("Exec={}", core::desktop_exec()),
         );
         fs::write(apps.join(format!("{}.desktop", core::APP_ID)), desktop)?;
         crate::share::install_service_menu(&data)?;
@@ -2368,7 +2359,19 @@ pub fn run(account: Option<String>) {
     recover_interrupted_preview();
     core::repair_managed_units();
     core::start_idle_units(&AppSettings::load());
-    let ui = AppWindow::new().expect("couldn't create the window");
+    let ui = match AppWindow::new() {
+        Ok(ui) => ui,
+        Err(e) => {
+            // started from a menu, a message on the terminal alone would go unseen
+            eprintln!("The window couldn't open: {e}");
+            let first = e.to_string().lines().next().unwrap_or_default().to_string();
+            crate::share::notify(
+                "Couldn't open OneDrive settings",
+                &format!("The window couldn't open ({first})."),
+            );
+            std::process::exit(1);
+        }
+    };
     // Matches the .desktop file name, so desktops show our icon and group the window correctly.
     // Slint only accepts this once its backend exists (after AppWindow::new) and before the
     // window is first shown.
