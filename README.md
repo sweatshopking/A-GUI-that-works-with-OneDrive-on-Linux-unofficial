@@ -49,16 +49,17 @@ sync client, syncing issues should go to the original app, which is linked above
 
 ### 1. The OneDrive Client for Linux, version 2.5 or newer
 
-It does the syncing and is installed on its own, so it keeps getting updates from its author. If it's
-missing or too old, the app tells you and links to these instructions.
+It does the syncing and is installed on its own, so it keeps getting updates from its author. You
+usually don't need to do anything: if it's missing or too old, the app says so and its **Install it for
+me** button installs it after asking for your password.
 
-| Your system | How to install the client |
+| Your system | What *Install it for me* does |
 |---|---|
-| Fedora | `sudo dnf install onedrive` — or let the app do it: its .rpm pulls it in, and the app has an *Install it for me* button |
-| openSUSE Tumbleweed | `sudo zypper install onedrive` — or the app's *Install it for me* button |
-| Ubuntu, Linux Mint, Debian, Pop!_OS, Zorin, Raspberry Pi OS | **Don't** use the built-in `onedrive` package; it's too old. Follow the client's [Ubuntu / Debian installation guide](https://github.com/abraunegg/onedrive/blob/master/docs/ubuntu-package-install.md) to install it from the client's own package repository. |
-| Arch, Manjaro, EndeavourOS | `onedrive-abraunegg` from the AUR |
-| Anything else | The client's [installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) |
+| Fedora | `dnf install onedrive` (the app's .rpm already pulls it in) |
+| openSUSE | `zypper install onedrive` |
+| Ubuntu 22.04+, Linux Mint, Debian 11+, Pop!_OS, Zorin, Raspberry Pi OS | The built-in `onedrive` package is too old, so it adds the client's own package source, as in the client's [Ubuntu / Debian installation guide](https://github.com/abraunegg/onedrive/blob/master/docs/ubuntu-package-install.md), and installs from there. Normal system updates keep it current. |
+| Arch, Manjaro, EndeavourOS, CachyOS | Builds `onedrive-abraunegg` from the AUR (a few minutes). The AUR isn't covered by system updates, so the app tells you when a newer client is out and updates it for you. |
+| Fedora Silverblue/Kinoite, SteamOS, anything else | No button; the app links to the client's [installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) |
 
 ### 2. This app
 

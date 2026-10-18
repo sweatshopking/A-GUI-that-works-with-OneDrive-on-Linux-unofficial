@@ -81,7 +81,8 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
         "r_text" => get_r_text, "o_skip_files" => get_o_skip_files, "o_from" => get_o_from, "o_to" => get_o_to,
         "add_name" => get_add_name, "add_folder" => get_add_folder,
         "u_result" => get_u_result, "u_remove_app_label" => get_u_remove_app_label,
-        "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg
+        "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg,
+        "ci_text" => get_ci_text, "ci_title" => get_ci_title, "ci_action" => get_ci_action
     );
     r.or_else(|| {
         Some(match k {
@@ -110,6 +111,9 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "tab" => ui.get_tab().to_string(),
             "u_visible" => ui.get_u_visible().to_string(),
             "client_can_install" => ui.get_client_can_install().to_string(),
+            "client_update" => ui.get_client_update().to_string(),
+            "client_installing" => ui.get_client_installing().to_string(),
+            "ci_visible" => ui.get_ci_visible().to_string(),
             "u_busy" => ui.get_u_busy().to_string(),
             "a_current" => ui.get_a_current().to_string(),
             "app_autostart" => ui.get_app_autostart().to_string(),
@@ -245,6 +249,10 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "app_uninstall" => ui.invoke_app_uninstall(),
         "client_recheck" => ui.invoke_client_recheck(),
         "client_instructions" => ui.invoke_client_instructions(),
+        "client_install" => ui.invoke_client_install(),
+        "client_not_now" => ui.invoke_client_not_now(),
+        "ci_confirm" => ui.invoke_ci_confirm(),
+        "ci_cancel" => ui.invoke_ci_cancel(),
         "u_confirm" => ui.invoke_u_confirm(),
         "u_cancel" => ui.invoke_u_cancel(),
         _ => return false,

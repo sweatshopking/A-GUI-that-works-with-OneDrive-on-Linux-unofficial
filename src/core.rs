@@ -169,61 +169,6 @@ pub fn parse_client_version(text: &str) -> Option<((u32, u32, u32), String)> {
     })
 }
 
-/// The command that installs the client with the system's package manager, where the
-/// distribution's own package is current (Fedora, openSUSE). Run through pkexec for the password.
-pub fn client_install_command() -> Option<Vec<String>> {
-    let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let ids: Vec<String> = os
-        .lines()
-        .filter_map(|l| l.strip_prefix("ID=").or_else(|| l.strip_prefix("ID_LIKE=")))
-        .flat_map(|v| {
-            v.trim_matches('"')
-                .split_whitespace()
-                .map(str::to_lowercase)
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    which("pkexec")?;
-    let cmd: &[&str] = if ids.iter().any(|i| i == "fedora") && which("dnf").is_some() {
-        &["pkexec", "dnf", "install", "-y", "onedrive"]
-    } else if ids.iter().any(|i| i.contains("suse")) && which("zypper").is_some() {
-        &[
-            "pkexec",
-            "zypper",
-            "--non-interactive",
-            "install",
-            "onedrive",
-        ]
-    } else {
-        return None;
-    };
-    Some(cmd.iter().map(|s| s.to_string()).collect())
-}
-
-/// A short, distribution-specific pointer for installing or updating the client.
-pub fn client_install_hint() -> String {
-    let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
-    let field = |k: &str| {
-        os.lines()
-            .find_map(|l| l.strip_prefix(&format!("{k}=")))
-            .map(|v| v.trim_matches('"').to_lowercase())
-            .unwrap_or_default()
-    };
-    let ids = format!("{} {}", field("ID"), field("ID_LIKE"));
-    let has = |id: &str| ids.split_whitespace().any(|w| w == id);
-    if has("fedora") {
-        "On Fedora: open a terminal and run  sudo dnf install onedrive".into()
-    } else if has("opensuse") || has("suse") || ids.contains("opensuse") {
-        "On openSUSE: open a terminal and run  sudo zypper install onedrive".into()
-    } else if has("arch") {
-        "On Arch-based systems: install the \"onedrive-abraunegg\" package from the AUR.".into()
-    } else if has("debian") || has("ubuntu") {
-        "On Ubuntu, Linux Mint and Debian, the built-in \"onedrive\" package is too old. The instructions show how to add the client's own package repository instead.".into()
-    } else {
-        "The instructions cover every major distribution.".into()
-    }
-}
-
 // ---------------------------------------------------------------- app settings
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]

@@ -108,9 +108,12 @@ component ClientBanner inherits Rectangle {
     in property <bool> can-install;
     in property <bool> installing;
     in property <string> install-msg;
+    // offering a newer client (Arch) rather than reporting a missing one
+    in property <bool> update;
     callback instructions();
     callback recheck();
     callback install();
+    callback not-now();
     border-radius: 8px;
     border-width: 1px;
     border-color: #d99a00;
@@ -124,7 +127,7 @@ component ClientBanner inherits Rectangle {
             font-weight: 600;
             wrap: word-wrap;
         }
-        Text {
+        if !root.update: Text {
             text: "This app needs the OneDrive Client for Linux (version 2.5 or newer), which does the actual syncing. It's installed separately so it keeps getting updates from its author.";
             wrap: word-wrap;
             font-size: 12px;
@@ -136,24 +139,31 @@ component ClientBanner inherits Rectangle {
             alignment: start;
             spacing: 8px;
             if root.can-install: Button {
-                text: root.installing ? "Installing…" : "Install it for me";
+                text: root.installing ? (root.update ? "Updating…" : "Installing…") : (root.update ? "Update it for me" : "Install it for me");
                 primary: true;
                 enabled: !root.installing;
                 clicked => {
                     root.install();
                 }
             }
-            Button {
+            if !root.update: Button {
                 text: "Open installation instructions";
                 clicked => {
                     root.instructions();
                 }
             }
-            Button {
+            if !root.update: Button {
                 text: "Check again";
                 enabled: !root.installing;
                 clicked => {
                     root.recheck();
+                }
+            }
+            if root.update: Button {
+                text: "Not now";
+                enabled: !root.installing;
+                clicked => {
+                    root.not-now();
                 }
             }
         }
@@ -321,9 +331,19 @@ export component AppWindow inherits Window {
     in property <bool> client-can-install;
     in property <bool> client-installing;
     in property <string> client-install-msg;
+    in property <bool> client-update;
     callback client-instructions();
     callback client-recheck();
     callback client-install();
+    callback client-not-now();
+
+    // ---------------- "install the client" confirmation
+    in property <bool> ci-visible;
+    in property <string> ci-title;
+    in property <string> ci-text;
+    in property <string> ci-action;
+    callback ci-confirm();
+    callback ci-cancel();
     callback u-confirm();
     callback u-cancel();
 
@@ -420,6 +440,10 @@ export component AppWindow inherits Window {
                     can-install: root.client-can-install;
                     installing: root.client-installing;
                     install-msg: root.client-install-msg;
+                    update: root.client-update;
+                    not-now => {
+                        root.client-not-now();
+                    }
                     instructions => {
                         root.client-instructions();
                     }
@@ -1471,6 +1495,45 @@ export component AppWindow inherits Window {
                         primary: true;
                         clicked => {
                             root.r-confirm();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.ci-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(560px, root.width - 40px);
+            height: ci-layout.preferred-height;
+            background: Palette.background;
+            ci-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: root.ci-title;
+                    font-size: 16px;
+                }
+                Text {
+                    text: root.ci-text;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.ci-cancel();
+                        }
+                    }
+                    Button {
+                        text: root.ci-action;
+                        primary: true;
+                        clicked => {
+                            root.ci-confirm();
                         }
                     }
                 }

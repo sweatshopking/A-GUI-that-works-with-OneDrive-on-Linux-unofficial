@@ -5,6 +5,7 @@
 //!   linux-onedrive-gui --client …   run the installed onedrive client (kept for units written by
 //!                                   older versions, which ran the client through the app)
 
+mod clientinstall;
 mod core;
 mod dbus;
 mod graph;

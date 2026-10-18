@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use chrono::Local;
 use slint::{ComponentHandle, ModelRc, SharedString, StandardListViewItem, VecModel};
 
+use crate::clientinstall;
 use crate::core::{self, AccountInfo, AppSettings, ClientConfig, LogEvent, Phase, Status};
 use crate::graph;
 
@@ -113,6 +114,10 @@ struct Ctx {
     libraries: Vec<graph::Library>,
     signin: Option<SignIn>,
     preview: Option<Preview>,
+    /// What the client's installer has printed so far, while it runs.
+    install_out: Option<Arc<Mutex<String>>>,
+    /// "Not now" on the offer to update the client: don't offer again while the window is open.
+    update_dismissed: bool,
     refreshing: bool,
     /// The user closed the window while a dry run was still stopping; close once it has.
     close_when_idle: bool,
@@ -2158,7 +2163,8 @@ fn add_to_menu(ctx: &Shared) {
 /// Looks for the OneDrive Client for Linux and shows the banner while it's missing or too old.
 fn check_client() {
     bg(core::check_client, |ctx, check| {
-        let was_missing = !ctx.borrow().ui().get_client_problem().is_empty();
+        let ui = ctx.borrow().ui();
+        let was_missing = !ui.get_client_problem().is_empty() && !ui.get_client_update();
         show_client_check(ctx, &check);
         if was_missing && check.is_ok() {
             // installed by hand while the window was open ("Check again")
@@ -2178,9 +2184,35 @@ fn show_client_check(ctx: &Shared, check: &core::ClientCheck) {
             format!("Your OneDrive Client for Linux ({version}) is too old")
         }
     };
+    let plan = clientinstall::plan();
+    ui.set_client_update(false);
     ui.set_client_problem(ss(problem));
-    ui.set_client_hint(ss(core::client_install_hint()));
-    ui.set_client_can_install(core::client_install_command().is_some());
+    ui.set_client_hint(ss(clientinstall::hint(plan.as_ref())));
+    ui.set_client_can_install(plan.is_some());
+    if check.is_ok() && !ctx.borrow().update_dismissed {
+        check_client_update();
+    }
+}
+
+/// On Arch, offers to update a client the AUR has a newer version of (pacman doesn't).
+fn check_client_update() {
+    bg(clientinstall::aur_update, |ctx, newer| {
+        let ui = ctx.borrow().ui();
+        let Some((installed, newest)) = newer else {
+            return;
+        };
+        if !ui.get_client_problem().is_empty() || ui.get_client_installing() {
+            return;
+        }
+        ui.set_client_update(true);
+        ui.set_client_problem(ss(format!(
+            "A newer OneDrive Client for Linux is available ({newest}; you have {installed})"
+        )));
+        ui.set_client_hint(ss(
+            "On Arch-based systems it comes from the AUR, so your normal system updates don't update it.",
+        ));
+        ui.set_client_can_install(true);
+    });
 }
 
 /// The reason not to start something that needs the client, if there is one.
@@ -2197,49 +2229,104 @@ fn client_blocker() -> Option<String> {
     }
 }
 
+/// "Install it for me": asks first when it does more than install one of the system's own packages.
 fn install_client(ctx: &Shared) {
-    let Some(cmd) = core::client_install_command() else {
+    let Some(plan) = clientinstall::plan() else {
         return;
     };
     let ui = ctx.borrow().ui();
+    match plan.confirmation() {
+        Some(text) => {
+            let update = ui.get_client_update();
+            ui.set_ci_title(ss(if update {
+                "Update the OneDrive client"
+            } else {
+                "Install the OneDrive client"
+            }));
+            ui.set_ci_action(ss(if update { "Update" } else { "Install" }));
+            ui.set_ci_text(ss(text));
+            ui.set_ci_visible(true);
+        }
+        None => run_client_install(ctx, plan),
+    }
+}
+
+fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
+    let ui = ctx.borrow().ui();
+    ui.set_ci_visible(false);
     ui.set_client_installing(true);
     ui.set_client_install_msg(ss("Your computer will ask for your password…"));
+    let out = Arc::new(Mutex::new(String::new()));
+    ctx.borrow_mut().install_out = Some(out.clone());
+    let was_update = ui.get_client_update();
     bg(
         move || {
-            Command::new(&cmd[0])
-                .args(&cmd[1..])
-                .stdin(Stdio::null())
-                .output()
-                .map(|o| {
-                    (
-                        o.status.success(),
-                        String::from_utf8_lossy(&o.stderr).to_string(),
-                    )
-                })
+            let (mut child, _) = spawn_capture(plan.command(), out.clone(), false)?;
+            let status = child.wait()?;
+            let text = out.lock().unwrap().clone();
+            Ok::<_, std::io::Error>((status.code(), text))
         },
-        |ctx, r| {
+        move |ctx, r| {
+            ctx.borrow_mut().install_out = None;
             let ui = ctx.borrow().ui();
             ui.set_client_installing(false);
             let check = core::check_client();
-            ui.set_client_install_msg(ss(match (&r, check.is_ok()) {
-                (_, true) => String::new(),
-                (Ok((false, err)), false) if err.trim().is_empty() => {
-                    "It wasn't installed (the password prompt may have been cancelled).".into()
+            let last = |t: &str| {
+                t.lines()
+                    .rev()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("unknown error")
+                    .chars()
+                    .take(200)
+                    .collect::<String>()
+            };
+            let failed = match &r {
+                Ok((Some(0), _)) => None,
+                // pkexec: 126 = the password prompt was dismissed, 127 = not allowed
+                Ok((Some(126 | 127), _)) => {
+                    Some("Nothing was changed (the password prompt was cancelled).".to_string())
                 }
-                (Ok((_, err)), false) => format!(
-                    "It wasn't installed: {}",
-                    err.lines().last().unwrap_or("unknown error")
-                ),
-                (Err(e), false) => format!("Couldn't start the installer: {e}"),
-            }));
+                Ok((_, text)) => Some(format!("That didn't work: {}", last(text))),
+                Err(e) => Some(format!("Couldn't start the installer: {e}")),
+            };
             show_client_check(ctx, &check);
-            if check.is_ok() {
-                core::repair_managed_units();
-                core::start_idle_units(&AppSettings::load());
-                refresh(ctx);
+            match failed {
+                Some(msg) => {
+                    if was_update && check.is_ok() {
+                        // still offer the update again
+                        check_client_update();
+                    }
+                    ui.set_client_install_msg(ss(msg));
+                }
+                None => {
+                    ui.set_client_install_msg(ss(""));
+                    if check.is_ok() {
+                        core::repair_managed_units();
+                        core::start_idle_units(&AppSettings::load());
+                        refresh(ctx);
+                    } else {
+                        ui.set_client_install_msg(ss(
+                            "It finished, but the OneDrive client still isn't working. The instructions show how to install it by hand.",
+                        ));
+                    }
+                }
             }
         },
     );
+}
+
+/// Shows the installer's latest line while it runs (building on Arch takes minutes).
+fn update_install_live(ctx: &Shared) {
+    let c = ctx.borrow();
+    let Some(out) = c.install_out.as_ref() else {
+        return;
+    };
+    let out = out.lock().unwrap();
+    if let Some(last) = out.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
+        let last: String = last.chars().take(110).collect();
+        c.ui().set_client_install_msg(ss(last));
+    }
 }
 
 // ---------------------------------------------------------------- uninstall
@@ -2428,6 +2515,8 @@ pub fn run(account: Option<String>) {
         libraries: Vec::new(),
         signin: None,
         preview: None,
+        install_out: None,
+        update_dismissed: false,
         refreshing: false,
         close_when_idle: false,
         rows,
@@ -2626,9 +2715,22 @@ pub fn run(account: Option<String>) {
     on!(on_app_add_to_menu, |c| add_to_menu(c));
     on!(on_client_recheck, |_c| check_client());
     on!(on_client_install, |c| install_client(c));
+    on!(on_ci_confirm, |c| {
+        if let Some(plan) = clientinstall::plan() {
+            run_client_install(c, plan);
+        }
+    });
+    on!(on_ci_cancel, |c| c.borrow().ui().set_ci_visible(false));
+    on!(on_client_not_now, |c| {
+        c.borrow_mut().update_dismissed = true;
+        let ui = c.borrow().ui();
+        ui.set_client_update(false);
+        ui.set_client_problem(ss(""));
+        ui.set_client_install_msg(ss(""));
+    });
     on!(on_client_instructions, |_c| core::run_detached(
         "xdg-open",
-        &[core::CLIENT_INSTALL_URL]
+        &[clientinstall::instructions_url()]
     ));
     on!(on_app_uninstall, |c| {
         let ui = c.borrow().ui();
@@ -2699,6 +2801,7 @@ pub fn run(account: Option<String>) {
             move || {
                 poll_signin(&w);
                 update_preview_live(&w);
+                update_install_live(&w);
                 ticks += 1;
                 if ticks.is_multiple_of(8) {
                     refresh(&w);
