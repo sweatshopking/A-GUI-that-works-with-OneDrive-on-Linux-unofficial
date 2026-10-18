@@ -2,16 +2,9 @@
 
 ## OneDrive Client for Linux
 
-The sync engine bundled in these packages is the OneDrive Client for Linux by abraunegg,
-licensed under the GNU General Public License v3.0. Its license is installed next to this file
-as `onedrive-LICENSE`.
-
-- Project: https://github.com/abraunegg/onedrive
-- Source for the bundled version: https://github.com/abraunegg/onedrive/tree/v2.5.11
-  (the exact tag is set by `ONEDRIVE_TAG` in `packaging/build.sh`)
-- Each release on GitHub also has that source attached as `onedrive-<version>-source.tar.gz`.
-
-It is built unmodified from that tagged source by `packaging/build.sh`.
+The syncing is done by the OneDrive Client for Linux by abraunegg (GPL-3.0,
+https://github.com/abraunegg/onedrive). It is **not** included in these packages: the app uses the
+copy installed on your system, so it keeps getting updates from its own packages.
 
 ## Rust libraries
 
@@ -22,7 +15,7 @@ all compatible with the GPL-3.0. Slint is used under its GPL-3.0 option.
 ## System libraries in the AppImage
 
 So that one AppImage runs on many distributions, it also carries some unmodified libraries from
-Ubuntu 22.04 (for example libcurl, GnuTLS, Nettle, libgcrypt and SQLite), several under the LGPL.
+Ubuntu 22.04 (for example fontconfig, FreeType and D-Bus), some of them under the LGPL.
 Inside the AppImage, `usr/share/doc/<package>/copyright` holds each one's license, and
 `usr/share/licenses/linux-onedrive-gui/BUNDLED-LIBRARIES.txt` lists the exact source package and
 version of each. Their source is available from `https://launchpad.net/ubuntu/+source/<source>/<version>`

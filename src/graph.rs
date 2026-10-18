@@ -28,6 +28,36 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
+/// Test builds can send Microsoft's requests to a local stand-in server instead
+/// (`LODG_TEST_MICROSOFT=http://127.0.0.1:port`). Release builds always use the real addresses.
+fn at(url: &str) -> String {
+    #[cfg(feature = "test-driver")]
+    if let Ok(fake) = std::env::var("LODG_TEST_MICROSOFT") {
+        for real in [
+            "https://graph.microsoft.com",
+            "https://login.microsoftonline.com",
+        ] {
+            if let Some(rest) = url.strip_prefix(real) {
+                return format!("{fake}{rest}");
+            }
+        }
+    }
+    url.to_string()
+}
+
+/// Reads a JSON reply, explaining replies that aren't JSON (an outage page, an empty "too many
+/// requests" answer) instead of passing on a parser error.
+fn read_reply(resp: &mut ureq::http::Response<ureq::Body>) -> Result<Value, String> {
+    let status = resp.status();
+    resp.body_mut().read_json().map_err(|_| {
+        if status.as_u16() == 429 {
+            "Microsoft is busy right now (too many requests). Try again in a minute.".to_string()
+        } else {
+            format!("Microsoft sent an unexpected reply ({status}). Try again later.")
+        }
+    })
+}
+
 fn endpoints(cfg: &ClientConfig) -> (String, String) {
     let tenant = cfg
         .get("azure_tenant_id")
@@ -55,7 +85,7 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
         .unwrap_or_else(|| DEFAULT_APP_ID.into());
     let (url, redirect) = endpoints(&cfg);
     let mut resp = agent()
-        .post(&url)
+        .post(at(&url))
         .send_form([
             ("client_id", app.as_str()),
             ("grant_type", "refresh_token"),
@@ -64,7 +94,7 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
             ("scope", SCOPE),
         ])
         .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
-    let v: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
+    let v = read_reply(&mut resp)?;
     match v["access_token"].as_str() {
         Some(a) => Ok(Token {
             access: a.to_string(),
@@ -80,12 +110,12 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
 
 fn get(tok: &Token, url: &str) -> Result<Value, String> {
     let mut resp = agent()
-        .get(url)
+        .get(at(url))
         .header("Authorization", &format!("Bearer {}", tok.access))
         .call()
         .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
     let status = resp.status().as_u16();
-    let v: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
+    let v = read_reply(&mut resp)?;
     if status >= 400 {
         return Err(v["error"]["message"]
             .as_str()
@@ -422,12 +452,12 @@ pub fn create_link(
         ("organization", LinkScope::Organization),
     ] {
         let mut resp = agent()
-            .post(&url)
+            .post(at(&url))
             .header("Authorization", &format!("Bearer {}", tok.access))
             .send_json(serde_json::json!({ "type": "view", "scope": scope }))
             .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
         let status = resp.status().as_u16();
-        let v: Value = resp.body_mut().read_json().map_err(|e| e.to_string())?;
+        let v = read_reply(&mut resp)?;
         if status < 400
             && let Some(u) = v["link"]["webUrl"].as_str()
         {

@@ -2,7 +2,8 @@
 //!
 //!   linux-onedrive-gui              open the window (and start the tray icon if it isn't running)
 //!   linux-onedrive-gui --tray       tray icon only (used at login)
-//!   linux-onedrive-gui --client …   run the bundled onedrive client with the given arguments
+//!   linux-onedrive-gui --client …   run the installed onedrive client (kept for units written by
+//!                                   older versions, which ran the client through the app)
 
 mod core;
 mod dbus;
@@ -12,16 +13,34 @@ mod share;
 mod testdrive;
 mod tray;
 mod ui;
+mod uninstall;
 
 use std::os::unix::process::CommandExt;
 
 fn main() {
+    #[cfg(feature = "test-driver")]
+    testdrive::take_env();
     let args: Vec<String> = std::env::args().skip(1).collect();
+    core::note_program_file();
     match args.first().map(String::as_str) {
         Some("--client") => run_client(&args[1..]),
         Some("--tray") => {
+            // A tray restarting itself after an update waits for the old one to finish leaving.
+            let tries = if std::env::var_os(tray::RESTART_ENV).is_some() {
+                40
+            } else {
+                1
+            };
+            let mut claim = dbus::Claim::TakenByAnother;
+            for _ in 0..tries {
+                claim = dbus::claim_name(core::TRAY_BUS_NAME);
+                if !matches!(claim, dbus::Claim::TakenByAnother) {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(250));
+            }
             // held for the life of the process; a second tray finds the name taken and leaves
-            let _instance = match dbus::claim_name(core::TRAY_BUS_NAME) {
+            let _instance = match claim {
                 dbus::Claim::TakenByAnother => return,
                 dbus::Claim::Owned(c) => Some(c),
                 dbus::Claim::Unavailable => None,
@@ -39,9 +58,10 @@ fn main() {
         Some("--version") => println!("{} {}", core::APP_NAME, env!("CARGO_PKG_VERSION")),
         Some("--help") | Some("-h") => {
             println!(
-                "{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --client <onedrive arguments>",
+                "{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --share-link <file>\n  {} --view-online <file>",
                 core::APP_NAME,
                 env!("CARGO_PKG_VERSION"),
+                core::APP_ID,
                 core::APP_ID,
                 core::APP_ID,
                 core::APP_ID
@@ -61,8 +81,8 @@ fn main() {
 fn run_client(args: &[String]) {
     let Some(bin) = core::client_binary() else {
         eprintln!(
-            "The onedrive client wasn't found. Reinstall {} or install the 'onedrive' package.",
-            core::APP_NAME
+            "The OneDrive Client for Linux isn't installed. See {}",
+            core::CLIENT_INSTALL_URL
         );
         std::process::exit(127);
     };

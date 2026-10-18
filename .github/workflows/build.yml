@@ -101,19 +101,12 @@ jobs:
           pattern: packages-*
           path: dist
           merge-multiple: true
-      - name: Source of the bundled sync engine
-        # attached so its exact source stays available with the binaries, as the GPL asks,
-        # even if the upstream tag ever goes away
-        run: |
-          tag="$(sed -n 's/^ONEDRIVE_TAG="${ONEDRIVE_TAG:-\(.*\)}"/\1/p' packaging/build.sh)"
-          curl -fsSL -o "dist/onedrive-${tag}-source.tar.gz" "https://github.com/abraunegg/onedrive/archive/refs/tags/${tag}.tar.gz"
       - name: Checksums
         run: cd dist && sha256sum * > SHA256SUMS.txt
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="$(sed -n 's/^ONEDRIVE_TAG="${ONEDRIVE_TAG:-\(.*\)}"/\1/p' packaging/build.sh)"
           cat > notes.md <<EOF
           **Which file do I need?** Most PCs are x86_64 (amd64). Raspberry Pi and other ARM computers use aarch64 (arm64).
 
@@ -121,7 +114,7 @@ jobs:
           - Fedora, openSUSE: the \`.rpm\`
           - Anything else: the \`.AppImage\`
 
-          These packages include the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg (GPL-3.0), built unmodified from [its ${tag} source](https://github.com/abraunegg/onedrive/tree/${tag}) (a copy is attached below as \`onedrive-${tag}-source.tar.gz\`). Source for this app is the tagged code in this repository. See [THIRD-PARTY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/packaging/THIRD-PARTY.md) for everything else bundled.
+          **First install the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg, version 2.5 or newer** — it does the syncing and isn't included, so it keeps getting updates from its author. The [README](https://github.com/${GITHUB_REPOSITORY}#install) shows how for each distribution, and the app tells you if it's missing. See [THIRD-PARTY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/packaging/THIRD-PARTY.md) for what is included.
 
           Not made by or affiliated with Microsoft.
           EOF

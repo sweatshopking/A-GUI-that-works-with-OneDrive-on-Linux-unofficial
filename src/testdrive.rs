@@ -79,7 +79,9 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
         "si_text" => get_si_text, "f_msg" => get_f_msg, "o_msg" => get_o_msg, "p_text" => get_p_text, "p_warn" => get_p_warn,
         "p_live" => get_p_live, "p_title" => get_p_title, "add_msg" => get_add_msg, "app_client" => get_app_client, "app_msg" => get_app_msg,
         "r_text" => get_r_text, "o_skip_files" => get_o_skip_files, "o_from" => get_o_from, "o_to" => get_o_to,
-        "add_name" => get_add_name, "add_folder" => get_add_folder
+        "add_name" => get_add_name, "add_folder" => get_add_folder,
+        "u_result" => get_u_result, "u_remove_app_label" => get_u_remove_app_label,
+        "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg
     );
     r.or_else(|| {
         Some(match k {
@@ -105,6 +107,17 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "o_allow_resync" => ui.get_o_allow_resync().to_string(),
             "o_skip_hidden" => ui.get_o_skip_hidden().to_string(),
             "r_visible" => ui.get_r_visible().to_string(),
+            "tab" => ui.get_tab().to_string(),
+            "u_visible" => ui.get_u_visible().to_string(),
+            "client_can_install" => ui.get_client_can_install().to_string(),
+            "u_busy" => ui.get_u_busy().to_string(),
+            "a_current" => ui.get_a_current().to_string(),
+            "app_autostart" => ui.get_app_autostart().to_string(),
+            "app_version" => ui.get_app_version().to_string(),
+            "o_sched_on" => ui.get_o_sched_on().to_string(),
+            "o_recycle" => ui.get_o_recycle().to_string(),
+            "o_notify" => ui.get_o_notify().to_string(),
+            "s_tone" => ui.get_s_tone().to_string(),
             "accounts" => {
                 use slint::Model;
                 ui.get_accounts()
@@ -180,6 +193,8 @@ fn set(ui: &AppWindow, k: &str, v: &str) -> bool {
         "f_sync_all" => ui.set_f_sync_all(b),
         "f_root_files" => ui.set_f_root_files(b),
         "r_delete_config" => ui.set_r_delete_config(b),
+        "u_keep_setup" => ui.set_u_keep_setup(b),
+        "app_autostart" => ui.set_app_autostart(b),
         "dark" => ui.set_dark(b),
         "tab" => ui.set_tab(i),
         _ => return false,
@@ -192,6 +207,14 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
     match name {
         "select" => ui.invoke_select(n),
         "rename" => ui.invoke_rename(),
+        "open_folder" => ui.invoke_open_folder(),
+        "open_online" => ui.invoke_open_online(),
+        "si_open_url" => ui.invoke_si_open_url(),
+        "a_show" => ui.invoke_a_show(n),
+        "open_url_project" => ui.invoke_open_url(
+            "https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial"
+                .into(),
+        ),
         "sync_now" => ui.invoke_sync_now(),
         "set_background" => ui.invoke_set_background(n != 0),
         "sign_in" => ui.invoke_sign_in(),
@@ -219,6 +242,11 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "add_create" => ui.invoke_add_create(),
         "app_autostart_toggled" => ui.invoke_app_autostart_toggled(),
         "app_add_to_menu" => ui.invoke_app_add_to_menu(),
+        "app_uninstall" => ui.invoke_app_uninstall(),
+        "client_recheck" => ui.invoke_client_recheck(),
+        "client_instructions" => ui.invoke_client_instructions(),
+        "u_confirm" => ui.invoke_u_confirm(),
+        "u_cancel" => ui.invoke_u_cancel(),
         _ => return false,
     }
     true
@@ -242,10 +270,31 @@ fn shot(ui: &AppWindow, dir: &Path, name: &str) {
     }
 }
 
-/// Starts the script if `LODG_TEST_SCRIPT` is set. The returned timer must be kept alive.
+static SETTINGS: std::sync::OnceLock<(Option<String>, Option<String>)> = std::sync::OnceLock::new();
+
+/// Reads `LODG_TEST_SCRIPT`/`LODG_TEST_OUT` and removes them from the environment, so the
+/// processes the app starts (the tray, a window the tray opens) don't run the script again.
+/// Call first thing in main, while the program is still single-threaded.
+pub fn take_env() {
+    SETTINGS.get_or_init(|| {
+        let v = (
+            std::env::var("LODG_TEST_SCRIPT").ok(),
+            std::env::var("LODG_TEST_OUT").ok(),
+        );
+        // SAFETY: called at the top of main, before any other thread exists
+        unsafe {
+            std::env::remove_var("LODG_TEST_SCRIPT");
+            std::env::remove_var("LODG_TEST_OUT");
+        }
+        v
+    });
+}
+
+/// Starts the script if `LODG_TEST_SCRIPT` was set. The returned timer must be kept alive.
 pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
-    let script = fs::read_to_string(std::env::var("LODG_TEST_SCRIPT").ok()?).ok()?;
-    let out = PathBuf::from(std::env::var("LODG_TEST_OUT").unwrap_or_else(|_| ".".into()));
+    let (script, out) = SETTINGS.get()?;
+    let script = fs::read_to_string(script.as_ref()?).ok()?;
+    let out = PathBuf::from(out.clone().unwrap_or_else(|| ".".into()));
     let _ = fs::create_dir_all(&out);
     let steps: Rc<std::cell::RefCell<std::collections::VecDeque<Step>>> = Rc::new(
         std::cell::RefCell::new(script.lines().filter_map(parse).collect()),
@@ -325,6 +374,9 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                 Step::Demo => fill_demo(&ui),
                 Step::Quit => {
                     let _ = std::io::stdout().flush();
+                    // close the window the way a user does, so its close handling runs
+                    ui.window()
+                        .dispatch_event(slint::platform::WindowEvent::CloseRequested);
                     let _ = slint::quit_event_loop();
                 }
             }

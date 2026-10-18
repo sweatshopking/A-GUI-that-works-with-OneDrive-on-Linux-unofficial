@@ -213,7 +213,7 @@ fn log_state(unit: Option<&str>) -> (Phase, Option<chrono::DateTime<Local>>, Opt
             }
             Some(LogEvent::NeedsResync) => phase = Phase::NeedsResync,
             Some(LogEvent::NeedsLogin) => {
-                phase = Phase::Error;
+                phase = Phase::SignedOut;
                 err = Some("Microsoft needs you to sign in again.".into());
             }
             _ => {}
@@ -321,10 +321,11 @@ fn show_status(c: &Ctx, i: usize) {
     let err = match s.phase {
         Phase::Error => s.last_error.clone().unwrap_or_else(|| "The sync service stopped with an error. Try \"Sync now\".".into()),
         Phase::NeedsResync => "The sync engine needs a full resync before it can continue. Open the Folders tab and press \"Apply changes…\", or turn on \"Allow full resyncs\" in Options and save.".into(),
+        Phase::SignedOut if a.signed_in => "Microsoft no longer accepts the saved sign-in (this happens after a password change, or when access is revoked). Sign in again to continue.".into(),
         _ => String::new(),
     };
     ui.set_s_error(ss(err));
-    ui.set_s_signed_in(a.signed_in);
+    ui.set_s_signed_in(a.signed_in && s.phase != Phase::SignedOut);
     ui.set_s_bg_enabled(s.unit.enabled);
 }
 
@@ -945,6 +946,9 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
         running: true,
         folders_changed: change.sync_list.is_some(),
     });
+    if let Some(p) = ctx.borrow().preview.as_ref() {
+        save_pending_preview(p);
+    }
     bg(
         move || -> Result<bool, String> {
             if let Some(u) = &unit {
@@ -1111,7 +1115,12 @@ fn summarize(output: &str, ok: bool, folders_changed: bool) -> Summary {
 }
 
 fn restore_snapshot(p: &Preview) {
-    for (path, data) in &p.snapshot {
+    restore_files(&p.snapshot);
+    clear_pending_preview();
+}
+
+fn restore_files(files: &[(PathBuf, Option<Vec<u8>>)]) {
+    for (path, data) in files {
         match data {
             Some(d) => {
                 let _ = core::atomic_write(path, d);
@@ -1120,6 +1129,60 @@ fn restore_snapshot(p: &Preview) {
                 let _ = fs::remove_file(path);
             }
         }
+    }
+}
+
+/// A preview's trial settings, written down until it's applied or cancelled, so a crash or a
+/// logout in the middle doesn't leave them in place (the client would then demand a resync).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PendingPreview {
+    window_pid: u32,
+    files: Vec<(PathBuf, Option<Vec<u8>>)>,
+    unit: Option<String>,
+    was_active: bool,
+}
+
+fn pending_preview_file() -> PathBuf {
+    core::app_dir().join("preview-in-progress.json")
+}
+
+fn save_pending_preview(p: &Preview) {
+    let pending = PendingPreview {
+        window_pid: std::process::id(),
+        files: p.snapshot.clone(),
+        unit: p.unit.clone(),
+        was_active: p.was_active,
+    };
+    if let Ok(json) = serde_json::to_vec(&pending) {
+        let _ = core::create_private_dir(&core::app_dir());
+        let _ = core::atomic_write(&pending_preview_file(), &json);
+    }
+}
+
+fn clear_pending_preview() {
+    let _ = fs::remove_file(pending_preview_file());
+}
+
+/// Puts back the settings of a preview whose window went away without applying or cancelling
+/// it. Does nothing while that window is still running.
+pub fn recover_interrupted_preview() {
+    let Ok(data) = fs::read(pending_preview_file()) else {
+        return;
+    };
+    let Ok(p) = serde_json::from_slice::<PendingPreview>(&data) else {
+        clear_pending_preview();
+        return;
+    };
+    if p.window_pid != std::process::id() && Path::new(&format!("/proc/{}", p.window_pid)).exists()
+    {
+        return;
+    }
+    restore_files(&p.files);
+    clear_pending_preview();
+    if p.was_active
+        && let Some(u) = &p.unit
+    {
+        core::systemctl(&["start", u]);
     }
 }
 
@@ -1175,10 +1238,10 @@ fn preview_apply(ctx: &Shared) {
         return;
     };
     let job = core::resync_unit(&acc.confdir);
-    let me = core::self_command().to_string_lossy().to_string();
+    let client = core::client_binary().unwrap_or_else(|| PathBuf::from("onedrive"));
     let mut script = format!(
-        "{} --client --confdir {} --sync --resync --resync-auth",
-        sh_quote(&me),
+        "{} --confdir {} --sync --resync --resync-auth",
+        sh_quote(&client.to_string_lossy()),
         sh_quote(&acc.confdir.to_string_lossy())
     );
     if let (true, Some(u)) = (
@@ -1207,6 +1270,7 @@ fn preview_apply(ctx: &Shared) {
     ui.set_p_visible(false);
     match r {
         Ok(o) if o.status.success() => {
+            clear_pending_preview(); // the new settings are now meant to stay
             ui.set_s_msg(ss(format!(
                 "{}: full resync started. The status shows when it's done.",
                 p.title
@@ -1304,12 +1368,22 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
     if ctx.borrow().signin.is_some() {
         return;
     }
+    if let Some(why) = client_blocker() {
+        ctx.borrow().ui().set_s_msg(ss(why));
+        check_client();
+        return;
+    }
     if let Some(u) = &acc.unit {
         core::systemctl(&["stop", u]);
     }
     let out = Arc::new(Mutex::new(String::new()));
     let mut cmd = core::client_command();
     cmd.arg("--confdir").arg(&acc.confdir);
+    // a saved sign-in Microsoft no longer accepts (password changed, revoked) must be replaced,
+    // not retried
+    if acc.confdir.join("refresh_token").exists() {
+        cmd.arg("--reauth");
+    }
     let url_file = browser_shim(&mut cmd);
     let ui = ctx.borrow().ui();
     let (child, stdin) = match spawn_capture(cmd, out.clone(), true) {
@@ -1374,14 +1448,11 @@ fn poll_signin(ctx: &Shared) {
     let acc = c.account(&key).cloned();
     let Some(acc) = acc else { return };
     if acc.confdir.join("refresh_token").exists() {
-        ui.set_si_text(ss(format!(
-            "Signed in. {}",
-            if enable_after {
-                "Your files will start syncing in a moment."
-            } else {
-                ""
-            }
-        )));
+        ui.set_si_text(ss(if enable_after {
+            "Signed in. Your files will start syncing in a moment."
+        } else {
+            "Signed in."
+        }));
         ui.set_si_done(true);
         ui.set_si_need_paste(false);
         c.tokens.remove(&key);
@@ -1625,6 +1696,22 @@ fn prepare_add_page(ctx: &Shared) {
     ui.set_add_from(ModelRc::new(VecModel::from(business)));
 }
 
+/// Whether another account (other than `except`) already goes by `name`. Names are how people
+/// tell accounts apart in the window and the tray, so they have to be unique.
+fn name_taken(c: &Ctx, name: &str, except: Option<&str>) -> bool {
+    c.accounts
+        .iter()
+        .any(|a| Some(a.key().as_str()) != except && a.name.eq_ignore_ascii_case(name.trim()))
+}
+
+/// `base`, or "base 2", "base 3"… if that's taken.
+fn unique_name(c: &Ctx, base: &str) -> String {
+    std::iter::once(base.to_string())
+        .chain((2..).map(|n| format!("{base} {n}")))
+        .find(|n| !name_taken(c, n, None))
+        .unwrap()
+}
+
 fn business_accounts(c: &Ctx) -> Vec<AccountInfo> {
     c.accounts
         .iter()
@@ -1659,7 +1746,8 @@ fn add_choose(ctx: &Shared, mode: i32) {
     match mode {
         1 => {
             let first = ctx.borrow().accounts.is_empty();
-            let name = if first { "OneDrive" } else { "Work" };
+            let name = unique_name(&ctx.borrow(), if first { "OneDrive" } else { "Work" });
+            let name = name.as_str();
             ui.set_add_name(ss(name));
             ui.set_add_folder(ss(
                 default_folder(&core::home(), name, false).to_string_lossy()
@@ -1799,11 +1887,14 @@ fn add_lib_picked(ctx: &Shared, i: usize) {
     let ui = c.ui();
     ui.set_add_lib_index(i as i32);
     if let Some(l) = c.libraries.get(i) {
-        let name = if l.name == "Documents" || l.name == "Shared Documents" {
-            l.site.clone()
-        } else {
-            format!("{} - {}", l.site, l.name)
-        };
+        let name = unique_name(
+            &c,
+            &if l.name == "Documents" || l.name == "Shared Documents" {
+                l.site.clone()
+            } else {
+                format!("{} - {}", l.site, l.name)
+            },
+        );
         ui.set_add_name(ss(&name));
         ui.set_add_folder(ss(
             default_folder(&core::home(), &name, true).to_string_lossy()
@@ -1834,8 +1925,19 @@ fn add_create(ctx: &Shared) {
     let mode = ui.get_add_mode();
     let name = ui.get_add_name().trim().to_string();
     let folder = ui.get_add_folder().trim().to_string();
+    if let Some(why) = client_blocker() {
+        ui.set_add_msg(ss(why));
+        check_client();
+        return;
+    }
     if name.is_empty() || folder.is_empty() {
         ui.set_add_msg(ss("Give the account a name and pick a local folder."));
+        return;
+    }
+    if name_taken(&ctx.borrow(), &name, None) {
+        ui.set_add_msg(ss(format!(
+            "You already have an account called \"{name}\". Pick a different name."
+        )));
         return;
     }
     let folder = core::expand_tilde(&folder);
@@ -1925,12 +2027,25 @@ fn add_create(ctx: &Shared) {
         ));
         return;
     };
-    {
+    let index = {
         let mut c = ctx.borrow_mut();
-        c.current = Some(acc.key());
         c.accounts.push(acc.clone());
+        // a placeholder until the next refresh reads its real status
+        c.statuses.push(Status {
+            phase: if acc.signed_in {
+                Phase::Unknown
+            } else {
+                Phase::SignedOut
+            },
+            last_complete: None,
+            last_error: None,
+            unit: Default::default(),
+        });
         c.settings = s;
-    }
+        c.accounts.len() - 1
+    };
+    // through select(), so nothing from the previously shown account lingers on the page
+    select(ctx, index as i32);
     if library.is_some() {
         after_sign_in(acc, true);
     } else {
@@ -1993,13 +2108,18 @@ fn prepare_app_page(ctx: &Shared) {
     ui.set_app_version(ss(env!("CARGO_PKG_VERSION")));
     ui.set_app_is_appimage(std::env::var("APPIMAGE").is_ok());
     ui.set_app_msg(ss(""));
-    let client = match (core::client_binary(), core::client_version()) {
-        (Some(p), Some(v)) => format!(
-            "Sync engine: OneDrive Client for Linux {v} ({})",
-            p.display()
+    let client = match core::check_client() {
+        core::ClientCheck::Ok { path, version } => format!(
+            "Sync engine: OneDrive Client for Linux {version} ({})",
+            path.display()
         ),
-        (Some(p), None) => format!("Sync engine: {}", p.display()),
-        _ => "Sync engine not found — reinstall this app or install the 'onedrive' package.".into(),
+        core::ClientCheck::TooOld { path, version } => format!(
+            "Sync engine: OneDrive Client for Linux {version} ({}) — too old, please update it.",
+            path.display()
+        ),
+        core::ClientCheck::Missing => {
+            "Sync engine: the OneDrive Client for Linux isn't installed.".into()
+        }
     };
     ui.set_app_client(ss(client));
 }
@@ -2007,9 +2127,7 @@ fn prepare_app_page(ctx: &Shared) {
 /// For AppImages: add a menu entry, icon and Dolphin actions for the current user.
 fn add_to_menu(ctx: &Shared) {
     let r = (|| -> std::io::Result<()> {
-        let data = std::env::var("XDG_DATA_HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| core::home().join(".local/share"));
+        let data = core::data_home();
         let icon_dir = data.join("icons/hicolor/scalable/apps");
         fs::create_dir_all(&icon_dir)?;
         fs::write(
@@ -2031,6 +2149,123 @@ fn add_to_menu(ctx: &Shared) {
         Ok(()) => "Added. Look for \"A GUI that works with OneDrive on Linux (unofficial)\" in your applications menu. Right-clicking a file in Dolphin now also shows a OneDrive menu with \"Copy sharing link\" and \"View on the OneDrive website\".".to_string(),
         Err(e) => format!("Couldn't add it: {e}"),
     }));
+}
+
+// ---------------------------------------------------------------- sync client check
+
+/// Looks for the OneDrive Client for Linux and shows the banner while it's missing or too old.
+fn check_client() {
+    bg(core::check_client, |ctx, check| {
+        show_client_check(ctx, &check)
+    });
+}
+
+fn show_client_check(ctx: &Shared, check: &core::ClientCheck) {
+    let ui = ctx.borrow().ui();
+    let problem = match check {
+        core::ClientCheck::Ok { .. } => String::new(),
+        core::ClientCheck::Missing => "The OneDrive Client for Linux isn't installed".into(),
+        core::ClientCheck::TooOld { version, .. } => {
+            format!("Your OneDrive Client for Linux ({version}) is too old")
+        }
+    };
+    ui.set_client_problem(ss(problem));
+    ui.set_client_hint(ss(core::client_install_hint()));
+    ui.set_client_can_install(core::client_install_command().is_some());
+}
+
+/// The reason not to start something that needs the client, if there is one.
+fn client_blocker() -> Option<String> {
+    match core::check_client() {
+        core::ClientCheck::Ok { .. } => None,
+        core::ClientCheck::Missing => Some(
+            "Install the OneDrive Client for Linux first — see the note at the top of the window."
+                .into(),
+        ),
+        core::ClientCheck::TooOld { version, .. } => Some(format!(
+            "Your OneDrive Client for Linux ({version}) is too old — update it first, see the note at the top of the window."
+        )),
+    }
+}
+
+fn install_client(ctx: &Shared) {
+    let Some(cmd) = core::client_install_command() else {
+        return;
+    };
+    let ui = ctx.borrow().ui();
+    ui.set_client_installing(true);
+    ui.set_client_install_msg(ss("Your computer will ask for your password…"));
+    bg(
+        move || {
+            Command::new(&cmd[0])
+                .args(&cmd[1..])
+                .stdin(Stdio::null())
+                .output()
+                .map(|o| {
+                    (
+                        o.status.success(),
+                        String::from_utf8_lossy(&o.stderr).to_string(),
+                    )
+                })
+        },
+        |ctx, r| {
+            let ui = ctx.borrow().ui();
+            ui.set_client_installing(false);
+            let check = core::check_client();
+            ui.set_client_install_msg(ss(match (&r, check.is_ok()) {
+                (_, true) => String::new(),
+                (Ok((false, err)), false) if err.trim().is_empty() => {
+                    "It wasn't installed (the password prompt may have been cancelled).".into()
+                }
+                (Ok((_, err)), false) => format!(
+                    "It wasn't installed: {}",
+                    err.lines().last().unwrap_or("unknown error")
+                ),
+                (Err(e), false) => format!("Couldn't start the installer: {e}"),
+            }));
+            show_client_check(ctx, &check);
+            if check.is_ok() {
+                core::repair_managed_units();
+                refresh(ctx);
+            }
+        },
+    );
+}
+
+// ---------------------------------------------------------------- uninstall
+
+fn uninstall(ctx: &Shared) {
+    let ui = ctx.borrow().ui();
+    let keep_setup = ui.get_u_keep_setup();
+    ui.set_u_busy(true);
+    bg(
+        move || {
+            let how = crate::uninstall::installed();
+            let notes = crate::uninstall::remove_user_files(keep_setup);
+            let program = crate::uninstall::remove_program(&how);
+            (notes, program, how)
+        },
+        |ctx, (notes, program, how)| {
+            let ui = ctx.borrow().ui();
+            ui.set_u_busy(false);
+            let mut text = match (&program, how) {
+                (Ok(()), crate::uninstall::Installed::BuildDirectory) => {
+                    "This app's settings have been removed.".to_string()
+                }
+                (Ok(()), _) => "The app has been uninstalled.".to_string(),
+                (Err(_), _) => "Your settings have been cleaned up.".to_string(),
+            };
+            for n in notes {
+                text.push_str("\n\n• ");
+                text.push_str(&n);
+            }
+            if let Err(e) = program {
+                text.push_str("\n\n");
+                text.push_str(&e);
+            }
+            ui.set_u_result(ss(text));
+        },
+    );
 }
 
 // ---------------------------------------------------------------- wiring
@@ -2064,6 +2299,16 @@ fn listen_for_hand_offs() {
             let _ = conn.read_to_string(&mut key);
             let _ = slint::invoke_from_event_loop(move || {
                 with_ctx(|ctx| {
+                    let busy = {
+                        let c = ctx.borrow();
+                        c.preview.is_some() || c.signin.is_some()
+                    };
+                    // an update replaced us: reopen as the new version, unless that would
+                    // interrupt a preview or a sign-in
+                    if !busy && core::program_file_replaced() {
+                        restart_into_new_version(&key);
+                        return;
+                    }
                     let ui = ctx.borrow().ui();
                     let _ = ui.show();
                     ui.window().set_minimized(false);
@@ -2077,10 +2322,31 @@ fn listen_for_hand_offs() {
     });
 }
 
+/// An update replaced our program while this window was open: open the new version in its
+/// place (on the account that was asked for) and close this one.
+fn restart_into_new_version(account: &str) {
+    let _ = fs::remove_file(instance_socket()); // so the new window doesn't hand back to us
+    let mut c = Command::new(core::self_command());
+    if !account.is_empty() {
+        c.args(["--account", account]);
+    }
+    if c.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .is_ok()
+    {
+        let _ = slint::invoke_from_event_loop(|| {
+            let _ = slint::quit_event_loop();
+        });
+    }
+}
+
 pub fn run(account: Option<String>) {
     if hand_off(account.as_deref()) {
         return;
     }
+    recover_interrupted_preview();
     core::repair_managed_units();
     let ui = AppWindow::new().expect("couldn't create the window");
     // Matches the .desktop file name, so desktops show our icon and group the window correctly.
@@ -2115,6 +2381,7 @@ pub fn run(account: Option<String>) {
 
     // the first load is synchronous so the window opens fully populated, on the right page
     apply_snapshot(&ctx, take_snapshot());
+    show_client_check(&ctx, &core::check_client());
     let start = account
         .and_then(|k| {
             ctx.borrow()
@@ -2147,6 +2414,12 @@ pub fn run(account: Option<String>) {
         let Some(acc) = current(c) else { return };
         let name = c.borrow().ui().get_s_name().trim().to_string();
         if name.is_empty() {
+            return;
+        }
+        if name_taken(&c.borrow(), &name, Some(&acc.key())) {
+            c.borrow().ui().set_s_msg(ss(format!(
+                "You already have an account called \"{name}\". Pick a different name."
+            )));
             return;
         }
         let mut s = AppSettings::load();
@@ -2290,6 +2563,31 @@ pub fn run(account: Option<String>) {
         }
     });
     on!(on_app_add_to_menu, |c| add_to_menu(c));
+    on!(on_client_recheck, |_c| check_client());
+    on!(on_client_install, |c| install_client(c));
+    on!(on_client_instructions, |_c| core::run_detached(
+        "xdg-open",
+        &[core::CLIENT_INSTALL_URL]
+    ));
+    on!(on_app_uninstall, |c| {
+        let ui = c.borrow().ui();
+        ui.set_u_remove_app_label(ss(crate::uninstall::removal_summary(
+            &crate::uninstall::installed(),
+        )));
+        ui.set_u_keep_setup(true);
+        ui.set_u_result(ss(""));
+        ui.set_u_visible(true);
+    });
+    on!(on_u_confirm, |c| uninstall(c));
+    on!(on_u_cancel, |c| {
+        let ui = c.borrow().ui();
+        if ui.get_u_result().is_empty() {
+            ui.set_u_visible(false);
+        } else {
+            // everything is gone; nothing left for this window to show
+            let _ = slint::quit_event_loop();
+        }
+    });
     on!(on_open_url, |_c, u: SharedString| core::run_detached(
         "xdg-open",
         &[u.as_str()]

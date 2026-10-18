@@ -28,14 +28,15 @@ case "$kind" in
         apt-get install -y -qq "$DIST"/linux-onedrive-gui_*_"$DEB_ARCH".deb >/dev/null
         apt-get install -y -qq --no-install-recommends xvfb imagemagick >/dev/null
         app=(linux-onedrive-gui)
-        client=(/usr/lib/linux-onedrive-gui/onedrive)
         ;;
     rpm)
         log "Installing the .rpm with dnf"
         dnf install -y -q "$DIST"/linux-onedrive-gui-*."$ARCH".rpm >/dev/null
         dnf install -y -q xorg-x11-server-Xvfb ImageMagick >/dev/null
         app=(linux-onedrive-gui)
-        client=(/usr/lib/linux-onedrive-gui/onedrive)
+        # the package recommends the OneDrive Client for Linux, which Fedora carries; dnf
+        # installs recommendations, so it should be here and new enough
+        onedrive --version
         ;;
     appimage)
         export DEBIAN_FRONTEND=noninteractive
@@ -52,7 +53,6 @@ case "$kind" in
         # containers have no FUSE; on a desktop the AppImage mounts itself instead
         export APPIMAGE_EXTRACT_AND_RUN=1
         app=("${image[0]}")
-        client=("${image[0]}" --client)
         ;;
     *)
         echo "usage: $0 deb|rpm|appimage" >&2
@@ -62,7 +62,6 @@ esac
 
 log "Versions"
 "${app[@]}" --version
-"${client[@]}" --version
 
 log "Opening the window"
 export XDG_RUNTIME_DIR=/tmp/smoke-runtime HOME=/tmp/smoke-home

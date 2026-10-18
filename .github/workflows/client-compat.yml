@@ -1,0 +1,42 @@
+name: Client compatibility
+
+# Every week, checks the newest release of the OneDrive Client for Linux still has everything
+# this app relies on, and opens an issue if not, so a change there is noticed before users hit it.
+on:
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check the newest OneDrive Client for Linux release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(gh api repos/abraunegg/onedrive/releases/latest --jq .tag_name)"
+          mkdir client && curl -fsSL "https://github.com/abraunegg/onedrive/archive/refs/tags/${tag}.tar.gz" | tar xz -C client --strip-components=1
+          if packaging/check-client-compat.sh client > report.txt; then
+            echo "${tag}: $(cat report.txt)"
+            exit 0
+          fi
+          cat report.txt
+          title="OneDrive Client for Linux ${tag} may not work with this app"
+          open="$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --search "\"${title}\" in:title" --json number --jq 'length')"
+          if [ "$open" = 0 ]; then
+            {
+              echo "The weekly check found that [${tag}](https://github.com/abraunegg/onedrive/releases/tag/${tag}) of the OneDrive Client for Linux no longer has some things this app relies on:"
+              echo
+              tail -n +2 report.txt
+              echo
+              echo "Update the app to match, and \`packaging/check-client-compat.sh\` with it."
+            } > body.md
+            gh issue create --repo "$GITHUB_REPOSITORY" --title "$title" --body-file body.md
+          fi
+          exit 1

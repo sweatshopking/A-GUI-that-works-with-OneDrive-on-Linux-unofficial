@@ -66,6 +66,8 @@ impl Acc {
 
 pub struct Tray {
     accs: Vec<Acc>,
+    /// Set while the OneDrive Client for Linux is missing or too old
+    client_problem: Option<String>,
 }
 
 fn open_settings(account: Option<&str>) {
@@ -85,9 +87,10 @@ fn open_settings(account: Option<&str>) {
 impl Tray {
     fn overall(&self) -> Phase {
         let ps: Vec<Phase> = self.accs.iter().map(|a| a.status().phase).collect();
-        if ps
-            .iter()
-            .any(|p| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut))
+        if self.client_problem.is_some()
+            || ps
+                .iter()
+                .any(|p| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut))
         {
             Phase::Error
         } else if ps
@@ -390,7 +393,9 @@ impl ksni::Tray for Tray {
             .iter()
             .map(|a| format!("{}: {}", a.info.name, a.status().text(&a.prefs)))
             .collect();
-        let description = if lines.is_empty() {
+        let description = if let Some(p) = &self.client_problem {
+            format!("{p}. Open Settings to fix it.")
+        } else if lines.is_empty() {
             "No accounts yet — open Settings to add one".into()
         } else {
             lines.join("\n")
@@ -402,8 +407,28 @@ impl ksni::Tray for Tray {
         }
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
-        let mut m: Vec<MenuItem<Self>> =
-            (0..self.accs.len()).map(|i| self.account_menu(i)).collect();
+        let mut m: Vec<MenuItem<Self>> = Vec::new();
+        if let Some(p) = &self.client_problem {
+            m.push(
+                StandardItem {
+                    label: p.clone(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+            m.push(
+                StandardItem {
+                    label: "How to fix this…".into(),
+                    icon_name: "dialog-warning".into(),
+                    activate: Box::new(|_: &mut Self| open_settings(None)),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            m.push(MenuItem::Separator);
+        }
+        m.extend((0..self.accs.len()).map(|i| self.account_menu(i)));
         if m.is_empty() {
             m.push(
                 StandardItem {
@@ -465,7 +490,7 @@ fn apply_event(
             }
             LogEvent::NeedsResync => a.log_phase = Phase::NeedsResync,
             LogEvent::NeedsLogin => {
-                a.log_phase = Phase::Error;
+                a.log_phase = Phase::SignedOut;
                 a.last_error = Some("Microsoft needs you to sign in again".into());
             }
             LogEvent::File { kind, path } => {
@@ -533,7 +558,32 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
 fn poll(handle: ksni::blocking::Handle<Tray>) {
     let mut following: HashSet<String> = HashSet::new();
     let mut last_phase: HashMap<String, Phase> = HashMap::new();
+    let mut replaced_seen = false;
+    let mut round = 0u32;
     loop {
+        if round.is_multiple_of(20) {
+            let problem = match core::check_client() {
+                core::ClientCheck::Ok { .. } => None,
+                core::ClientCheck::Missing => {
+                    Some("The OneDrive Client for Linux isn't installed".to_string())
+                }
+                core::ClientCheck::TooOld { version, .. } => Some(format!(
+                    "The OneDrive Client for Linux ({version}) is too old"
+                )),
+            };
+            let fixed = handle
+                .update(|t: &mut Tray| {
+                    let was = t.client_problem.take();
+                    t.client_problem = problem;
+                    was.is_some() && t.client_problem.is_none()
+                })
+                .unwrap_or(false);
+            if fixed {
+                // the client was just installed: point the units at it
+                core::repair_managed_units();
+            }
+        }
+        round = round.wrapping_add(1);
         let settings = AppSettings::load();
         let infos = core::discover(&settings);
         let states: Vec<(UnitState, bool)> = infos
@@ -633,16 +683,52 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
                 .update(|t: &mut Tray| t.accs.iter().any(|a| a.info.unit.as_deref() == Some(u)))
                 .unwrap_or(false)
         });
+        // after an update, hand over to the new version (once the new file has stayed put for a
+        // whole round, so we don't catch an install half-way)
+        if core::program_file_replaced() {
+            if replaced_seen {
+                restart_into_new_version();
+            }
+            replaced_seen = true;
+        } else {
+            replaced_seen = false;
+        }
         thread::sleep(Duration::from_secs(3));
     }
 }
 
+/// Set on the tray we start after an update, so it waits for this one to leave.
+pub const RESTART_ENV: &str = "LINUX_ONEDRIVE_GUI_TRAY_RESTART";
+
+fn restart_into_new_version() {
+    let started = Command::new(core::self_command())
+        .arg("--tray")
+        .env(RESTART_ENV, "1")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn();
+    if started.is_ok() {
+        std::process::exit(0);
+    }
+}
+
 pub fn run() {
+    crate::ui::recover_interrupted_preview();
     core::repair_managed_units();
-    let handle = match (Tray { accs: Vec::new() }).spawn() {
+    // At login we can start before the panel is ready, and on GNOME there may be no tray at
+    // all. Keep running either way: the icon appears whenever a tray shows up, and schedules
+    // and pauses are enforced meanwhile.
+    let handle = match (Tray {
+        accs: Vec::new(),
+        client_problem: None,
+    })
+    .assume_sni_available(true)
+    .spawn()
+    {
         Ok(h) => h,
         Err(e) => {
-            eprintln!("Couldn't create the tray icon ({e}). Is a system tray available?");
+            eprintln!("Couldn't start the tray icon service ({e}).");
             std::process::exit(1);
         }
     };

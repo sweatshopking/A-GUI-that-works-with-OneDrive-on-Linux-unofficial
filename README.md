@@ -5,8 +5,8 @@
 **Sync OneDrive and SharePoint on Linux, without the command line.**
 
 A tray icon and settings window for the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive)
-by abraunegg, which does the actual syncing and comes bundled. Download one file, sign in, pick your
-folders, done. I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code
+by abraunegg, which does the actual syncing and is installed separately so it keeps getting updates
+from its author. Install both, sign in, pick your folders, done. I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code
 is safe, does what it says, or won't harm your PC in some way. It's vibe coded and you are welcome and encouraged to review the source code prior to installing. 
 Again, to be clear, this app is not endorsed by Microsoft and I'm not affiliated with Microsoft in anyway. Since it's just a rust GUI for the existing onedrive sync client, syncing issues should go to the original app, which is linked above. 
 
@@ -42,6 +42,22 @@ Again, to be clear, this app is not endorsed by Microsoft and I'm not affiliated
 
 ## Install
 
+### 1. The OneDrive Client for Linux (version 2.5 or newer)
+
+This does the syncing. If it isn't installed, or is too old, the app tells you and links here.
+
+| Your system | How to install it |
+|---|---|
+| Fedora | `sudo dnf install onedrive` (the app's .rpm also pulls it in automatically) |
+| openSUSE | `sudo zypper install onedrive` (the app's .rpm also pulls it in automatically) |
+| Ubuntu, Linux Mint, Debian, Pop!_OS, Zorin | The built-in `onedrive` package is too old. Follow the [official instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) to add the client's own package repository, then install `onedrive` from it. |
+| Arch, Manjaro, EndeavourOS | Install `onedrive-abraunegg` from the AUR. |
+| Anything else | See the [official installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md). |
+
+On Fedora and openSUSE the app can also install it for you with one click.
+
+### 2. This app
+
 Download from the [latest release](https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/releases/latest):
 
 | Your system | Download | How to install |
@@ -53,17 +69,16 @@ Download from the [latest release](https://github.com/sweatshopking/A-GUI-that-w
 Those are for ordinary PCs. For ARM computers (Raspberry Pi 4/5, ARM laptops) pick the same kind of file
 ending in `arm64` / `aarch64` instead.
 
-Installing the .deb or .rpm fetches everything else it needs automatically, and the AppImage has it built
-in, so there's nothing else to install.
+Installing the .deb or .rpm fetches everything else the app needs automatically, and the AppImage has it
+built in.
 
 Then open **A GUI that works with OneDrive on Linux (unofficial)** from your applications menu and follow the steps.
 
-You don't need to install the `onedrive` package yourself — a tested copy is included.
-(Ubuntu's own `onedrive` package is very old and not supported by its author; this app doesn't use it.)
 
 ### Requirements
 
 - 64-bit Linux with systemd (almost every desktop distribution)
+- The [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) 2.5 or newer (see step 1)
 - A system tray for the tray icon: built into KDE Plasma, Cinnamon, XFCE, MATE and Budgie.
   On GNOME, install the *AppIndicator and KStatusNotifierItem Support* extension (Ubuntu has it already).
 
@@ -115,8 +130,9 @@ The window can also be driven by a script for end-to-end testing — see `src/te
 
 GPL-3.0-or-later — see [LICENSE](LICENSE).
 
-- Syncing is done by the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg,
-  GPL-3.0, bundled unmodified. See [packaging/THIRD-PARTY.md](packaging/THIRD-PARTY.md).
+- Syncing is done by the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg
+  (GPL-3.0), which you install separately. This app only runs it. See
+  [packaging/THIRD-PARTY.md](packaging/THIRD-PARTY.md).
 - The interface uses [Slint](https://slint.dev) (under its GPL-3.0 license) and
   [ksni](https://github.com/iovxw/ksni) for the tray icon.
 

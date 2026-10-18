@@ -28,6 +28,12 @@ pub fn config_home() -> PathBuf {
         .unwrap_or_else(|_| home().join(".config"))
 }
 
+pub fn data_home() -> PathBuf {
+    std::env::var("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join(".local/share"))
+}
+
 pub fn app_dir() -> PathBuf {
     config_home().join(APP_ID)
 }
@@ -51,30 +57,43 @@ pub fn self_command() -> PathBuf {
     }
 }
 
-/// The onedrive client binary we drive: a bundled copy next to us if there is one,
-/// otherwise whatever `onedrive` is on PATH.
+/// Which file `self_command()` is right now: (device, inode, modification time).
+fn program_file_identity() -> Option<(u64, u64, i64)> {
+    use std::os::unix::fs::MetadataExt;
+    let m = fs::metadata(self_command()).ok()?;
+    Some((m.dev(), m.ino(), m.mtime()))
+}
+
+static STARTED_FROM: std::sync::OnceLock<Option<(u64, u64, i64)>> = std::sync::OnceLock::new();
+
+/// Remembers which program file we were started from; call once at startup.
+pub fn note_program_file() {
+    STARTED_FROM.get_or_init(program_file_identity);
+}
+
+/// True once an update has put a different program file where we were started from (a
+/// package upgrade, or a new AppImage saved over the old one). A missing file (moved, or
+/// mid-install) doesn't count.
+pub fn program_file_replaced() -> bool {
+    match (STARTED_FROM.get(), program_file_identity()) {
+        (Some(Some(then)), Some(now)) => now != *then,
+        _ => false,
+    }
+}
+
+/// The oldest OneDrive Client for Linux release this app works with. (Ubuntu's and Debian's own
+/// `onedrive` packages are older than this and no longer supported by the client's author.)
+pub const MIN_CLIENT_VERSION: (u32, u32, u32) = (2, 5, 0);
+/// The client author's installation instructions, which cover every distribution.
+pub const CLIENT_INSTALL_URL: &str =
+    "https://github.com/abraunegg/onedrive/blob/master/docs/install.md";
+
+/// The OneDrive Client for Linux installed on this computer (`onedrive` on PATH). The app never
+/// ships its own copy, so the client keeps getting updates from its own packages.
 pub fn client_binary() -> Option<PathBuf> {
-    if let Ok(p) = std::env::var("LINUX_ONEDRIVE_GUI_CLIENT") {
+    // lets the automated tests use a stand-in client
+    if let Some(p) = std::env::var_os("LINUX_ONEDRIVE_GUI_CLIENT") {
         return Some(PathBuf::from(p));
-    }
-    let mut cands = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        cands.push(dir.join("../lib").join(APP_ID).join("onedrive"));
-        cands.push(dir.join("onedrive"));
-    }
-    if let Ok(appdir) = std::env::var("APPDIR") {
-        cands.push(
-            PathBuf::from(&appdir)
-                .join("usr/lib")
-                .join(APP_ID)
-                .join("onedrive"),
-        );
-        cands.push(PathBuf::from(&appdir).join("usr/bin/onedrive"));
-    }
-    if let Some(p) = cands.into_iter().find(|p| p.is_file()) {
-        return Some(p.canonicalize().unwrap_or(p));
     }
     which("onedrive")
 }
@@ -87,21 +106,122 @@ pub fn which(prog: &str) -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
-/// Builds a Command that runs the onedrive client with our launcher, so units and one-off
-/// jobs work the same whether we were installed as a package or run as an AppImage.
+/// A Command that runs the installed client (the bare name if it's missing, which then fails
+/// with a clear "not found" that callers report).
 pub fn client_command() -> Command {
-    let mut c = Command::new(self_command());
-    c.arg("--client");
-    c
+    Command::new(client_binary().unwrap_or_else(|| PathBuf::from("onedrive")))
 }
 
-pub fn client_version() -> Option<String> {
-    let bin = client_binary()?;
-    let out = Command::new(bin).arg("--version").output().ok()?;
-    let s = String::from_utf8_lossy(&out.stdout);
-    s.split_whitespace()
-        .last()
-        .map(|v| v.trim_start_matches('v').to_string())
+/// What we found when looking for the client.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientCheck {
+    Missing,
+    TooOld { path: PathBuf, version: String },
+    Ok { path: PathBuf, version: String },
+}
+
+impl ClientCheck {
+    pub fn is_ok(&self) -> bool {
+        matches!(self, ClientCheck::Ok { .. })
+    }
+}
+
+/// Looks for the client and checks its version (`onedrive --version`).
+pub fn check_client() -> ClientCheck {
+    let Some(path) = client_binary() else {
+        return ClientCheck::Missing;
+    };
+    let out = Command::new(&path)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output();
+    let text = out
+        .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+        .unwrap_or_default();
+    match parse_client_version(&text) {
+        Some((v, label)) if v >= MIN_CLIENT_VERSION => ClientCheck::Ok {
+            path,
+            version: label,
+        },
+        Some((_, label)) => ClientCheck::TooOld {
+            path,
+            version: label,
+        },
+        // it runs but doesn't say which version it is: too old or not the right program
+        None => ClientCheck::TooOld {
+            path,
+            version: "unknown".into(),
+        },
+    }
+}
+
+/// Reads "onedrive v2.5.11" (or "v2.5.11-3-gabc123", "2.4.25+np1") into (2, 5, 11) and the text.
+pub fn parse_client_version(text: &str) -> Option<((u32, u32, u32), String)> {
+    text.split_whitespace().find_map(|w| {
+        let w = w.trim_start_matches('v');
+        let mut nums = w
+            .split(|c: char| !c.is_ascii_digit())
+            .map(|n| n.parse::<u32>().ok());
+        let (a, b) = (nums.next()??, nums.next()??);
+        let c = nums.next().flatten().unwrap_or(0);
+        w.contains('.').then(|| ((a, b, c), w.to_string()))
+    })
+}
+
+/// The command that installs the client with the system's package manager, where the
+/// distribution's own package is current (Fedora, openSUSE). Run through pkexec for the password.
+pub fn client_install_command() -> Option<Vec<String>> {
+    let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let ids: Vec<String> = os
+        .lines()
+        .filter_map(|l| l.strip_prefix("ID=").or_else(|| l.strip_prefix("ID_LIKE=")))
+        .flat_map(|v| {
+            v.trim_matches('"')
+                .split_whitespace()
+                .map(str::to_lowercase)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    which("pkexec")?;
+    let cmd: &[&str] = if ids.iter().any(|i| i == "fedora") && which("dnf").is_some() {
+        &["pkexec", "dnf", "install", "-y", "onedrive"]
+    } else if ids.iter().any(|i| i.contains("suse")) && which("zypper").is_some() {
+        &[
+            "pkexec",
+            "zypper",
+            "--non-interactive",
+            "install",
+            "onedrive",
+        ]
+    } else {
+        return None;
+    };
+    Some(cmd.iter().map(|s| s.to_string()).collect())
+}
+
+/// A short, distribution-specific pointer for installing or updating the client.
+pub fn client_install_hint() -> String {
+    let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let field = |k: &str| {
+        os.lines()
+            .find_map(|l| l.strip_prefix(&format!("{k}=")))
+            .map(|v| v.trim_matches('"').to_lowercase())
+            .unwrap_or_default()
+    };
+    let ids = format!("{} {}", field("ID"), field("ID_LIKE"));
+    let has = |id: &str| ids.split_whitespace().any(|w| w == id);
+    if has("fedora") {
+        "On Fedora: open a terminal and run  sudo dnf install onedrive".into()
+    } else if has("opensuse") || has("suse") || ids.contains("opensuse") {
+        "On openSUSE: open a terminal and run  sudo zypper install onedrive".into()
+    } else if has("arch") {
+        "On Arch-based systems: install the \"onedrive-abraunegg\" package from the AUR.".into()
+    } else if has("debian") || has("ubuntu") {
+        "On Ubuntu, Linux Mint and Debian, the built-in \"onedrive\" package is too old. The instructions show how to add the client's own package repository instead.".into()
+    } else {
+        "The instructions cover every major distribution.".into()
+    }
 }
 
 // ---------------------------------------------------------------- app settings
@@ -414,6 +534,8 @@ pub struct UnitState {
     pub exists: bool,
     pub active: bool,
     pub starting: bool,
+    /// Failed and waiting to try again (systemd's Restart=on-failure)
+    pub retrying: bool,
     pub failed: bool,
     pub enabled: bool,
     pub exit_status: Option<i32>,
@@ -425,11 +547,13 @@ pub fn unit_state(unit: &str) -> UnitState {
         "LoadState,ActiveState,SubState,UnitFileState,ExecMainStatus",
     );
     let active = p.get("ActiveState").map(String::as_str).unwrap_or("");
+    let sub = p.get("SubState").map(String::as_str).unwrap_or("");
+    let retrying = active == "activating" && sub == "auto-restart";
     UnitState {
         exists: p.get("LoadState").map(String::as_str) == Some("loaded"),
         active: matches!(active, "active" | "activating" | "reloading"),
-        starting: active == "activating"
-            || p.get("SubState").map(String::as_str) == Some("start-pre"),
+        starting: (active == "activating" && !retrying) || sub == "start-pre",
+        retrying,
         failed: active == "failed",
         enabled: p.get("UnitFileState").map(String::as_str) == Some("enabled"),
         exit_status: p
@@ -464,7 +588,7 @@ pub fn slug(s: &str) -> String {
     }
 }
 
-fn systemd_quote(s: &str) -> String {
+pub fn systemd_quote(s: &str) -> String {
     format!(
         "\"{}\"",
         s.replace('\\', "\\\\")
@@ -475,6 +599,12 @@ fn systemd_quote(s: &str) -> String {
 
 /// Writes (or rewrites) the user unit we manage for an account.
 pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Result<()> {
+    let client = client_binary().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "the OneDrive Client for Linux isn't installed",
+        )
+    })?;
     fs::create_dir_all(user_unit_dir())?;
     let body = format!(
         "[Unit]\n\
@@ -482,10 +612,11 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
          Documentation=https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
+         {}\n\
          {MANAGED_MARK}\n\
          \n\
          [Service]\n\
-         ExecStart={} --client --monitor --confdir {}\n\
+         ExecStart={} --monitor --confdir {}\n\
          Restart=on-failure\n\
          RestartSec=10\n\
          RestartPreventExitStatus=126 78\n\
@@ -493,7 +624,8 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
          \n\
          [Install]\n\
          WantedBy=default.target\n",
-        systemd_quote(&self_command().to_string_lossy()),
+        condition_line(&client),
+        systemd_quote(&client.to_string_lossy()),
         systemd_quote(&confdir.to_string_lossy()),
     );
     atomic_write(&user_unit_dir().join(unit), body.as_bytes())?;
@@ -501,13 +633,24 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
     Ok(())
 }
 
-/// Keeps our managed units pointing at wherever this app now lives (AppImages get moved).
+/// Makes a unit skip quietly, instead of failing every few seconds, if the client is uninstalled.
+fn condition_line(program: &Path) -> String {
+    format!(
+        "ConditionPathExists={}",
+        program.to_string_lossy().replace('%', "%%")
+    )
+}
+
+/// Keeps our managed units running the installed client: follows it if it moves (e.g. from
+/// /usr/local/bin to /usr/bin), and converts units from versions that ran it through this app.
 pub fn repair_managed_units() {
-    let me = self_command().to_string_lossy().to_string();
+    let Some(client) = client_binary() else {
+        return; // nothing to point them at; they skip quietly until the client is installed
+    };
     let Ok(rd) = fs::read_dir(user_unit_dir()) else {
         return;
     };
-    let mut changed = false;
+    let mut changed = Vec::new();
     for e in rd.flatten() {
         let p = e.path();
         let Ok(text) = fs::read_to_string(&p) else {
@@ -516,27 +659,43 @@ pub fn repair_managed_units() {
         if !text.contains(MANAGED_MARK) {
             continue;
         }
-        let new: Vec<String> = text
-            .lines()
-            .map(|l| {
-                if let Some(rest) = l.strip_prefix("ExecStart=")
-                    && let Some(idx) = rest.find(" --client")
-                {
-                    let cur = rest[..idx].trim_matches('"').replace("%%", "%");
-                    if cur != me {
-                        return format!("ExecStart={}{}", systemd_quote(&me), &rest[idx..]);
-                    }
-                }
+        let Some(confdir) = confdir_from_exec(&text) else {
+            continue;
+        };
+        let exec = format!(
+            "ExecStart={} --monitor --confdir {}",
+            systemd_quote(&client.to_string_lossy()),
+            systemd_quote(&confdir.to_string_lossy())
+        );
+        let mut new = Vec::new();
+        for l in text.lines() {
+            if l.starts_with("ConditionPathExists=") {
+                continue; // rewritten below
+            }
+            if l == MANAGED_MARK {
+                new.push(condition_line(&client));
+            }
+            new.push(if l.starts_with("ExecStart=") {
+                exec.clone()
+            } else {
                 l.to_string()
-            })
-            .collect();
+            });
+        }
         let new = new.join("\n") + "\n";
         if new != text && atomic_write(&p, new.as_bytes()).is_ok() {
-            changed = true;
+            changed.push(e.file_name().to_string_lossy().to_string());
         }
     }
-    if changed {
-        systemctl(&["daemon-reload"]);
+    if changed.is_empty() {
+        return;
+    }
+    systemctl(&["daemon-reload"]);
+    for u in changed {
+        let st = unit_state(&u);
+        if st.enabled {
+            // pick up the new command (a running unit keeps the old one until restarted)
+            systemctl(&["try-restart", &u]);
+        }
     }
 }
 
@@ -798,6 +957,8 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
     if msg.contains("requires authentication")
         || msg.contains("Please authorise this application")
         || msg.contains("re-authenticate")
+        || msg.contains("re-authorise")
+        || msg.contains("--reauth")
         || msg.contains("invalid_grant")
     {
         return Some(LogEvent::NeedsLogin);
@@ -815,6 +976,8 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
             "✕",
             false,
         ),
+        ("Created local directory: ", "+", false),
+        // older clients said "Creating"
         ("Creating local directory: ", "+", false),
     ] {
         if let Some(rest) = msg.strip_prefix(prefix) {
@@ -863,7 +1026,7 @@ pub fn icon_theme_path() -> Option<PathBuf> {
 /// Only the log lines that matter for status, however busy the log is, oldest first.
 /// Falls back to a plain tail on systems whose journalctl lacks --grep.
 pub fn journal_status_lines(unit: &str) -> Vec<String> {
-    let pattern = "Starting a sync|Sync with Microsoft OneDrive is complete|ERROR|Unable to |--resync|requires authentication|re-authenticate|invalid_grant";
+    let pattern = "Starting a sync|Sync with Microsoft OneDrive is complete|ERROR|Unable to |--resync|--reauth|requires authentication|re-authenticate|re-authorise|invalid_grant";
     let out = Command::new("journalctl")
         .args([
             "--user",
@@ -875,6 +1038,8 @@ pub fn journal_status_lines(unit: &str) -> Vec<String> {
             "short-unix",
             "--no-pager",
             "-q",
+            // newest first, the one order every systemd version agrees on with --grep and -n
+            "--reverse",
             "--grep",
             pattern,
         ])
@@ -882,7 +1047,7 @@ pub fn journal_status_lines(unit: &str) -> Vec<String> {
     match out {
         // exit status 1 with nothing on stderr just means "no matching lines"
         Ok(o) if o.status.success() || (o.status.code() == Some(1) && o.stderr.is_empty()) => {
-            chronological(
+            oldest_first(
                 String::from_utf8_lossy(&o.stdout)
                     .lines()
                     .map(String::from)
@@ -895,14 +1060,12 @@ pub fn journal_status_lines(unit: &str) -> Vec<String> {
 
 /// Sorts `short-unix` journal lines by their timestamp. journalctl --grep together with -n
 /// returns the newest match first, unlike a plain tail.
-fn chronological(mut lines: Vec<String>) -> Vec<String> {
-    let stamp = |l: &String| {
-        l.split_once(' ')
-            .and_then(|(t, _)| t.parse::<f64>().ok())
-            .unwrap_or(0.0)
-    };
-    lines.sort_by(|a, b| stamp(a).total_cmp(&stamp(b)));
-    lines
+/// Turns `journalctl --reverse` output around. The journal's own order is kept rather than
+/// sorting by time: lines the client wrote together share a timestamp, and sorting can't tell
+/// "sync started" from "sync complete" then.
+fn oldest_first(mut newest_first: Vec<String>) -> Vec<String> {
+    newest_first.reverse();
+    newest_first
 }
 
 pub fn journal_tail(unit: &str, lines: usize) -> Vec<String> {
@@ -1016,12 +1179,20 @@ pub fn compose_phase(
     if unit.starting {
         return Phase::Syncing;
     }
+    let problem = matches!(
+        log_phase,
+        Phase::Error | Phase::NeedsResync | Phase::SignedOut
+    );
+    if unit.retrying {
+        // it failed and systemd will try again; say what went wrong rather than "Starting…"
+        return if problem { log_phase } else { Phase::Error };
+    }
     if !unit.active {
         if unit.failed && matches!(unit.exit_status, Some(126) | Some(78)) {
             return Phase::NeedsResync;
         }
-        if log_phase == Phase::NeedsResync {
-            return Phase::NeedsResync;
+        if matches!(log_phase, Phase::NeedsResync | Phase::SignedOut) {
+            return log_phase;
         }
         if unit.enabled && !prefs.sync_allowed() {
             return Phase::Paused;
@@ -1134,6 +1305,20 @@ mod tests {
     }
 
     #[test]
+    fn client_versions() {
+        let v = |t: &str| parse_client_version(t).map(|(n, _)| n);
+        assert_eq!(v("onedrive v2.5.11"), Some((2, 5, 11)));
+        assert_eq!(v("onedrive v2.5.11-12-g1a2b3c4"), Some((2, 5, 11)));
+        assert_eq!(v("onedrive v2.4.25+np1"), Some((2, 4, 25)));
+        assert_eq!(v("onedrive 2.6"), Some((2, 6, 0)));
+        assert_eq!(v("onedrive"), None);
+        assert_eq!(v(""), None);
+        assert!(v("onedrive v2.4.25").unwrap() < MIN_CLIENT_VERSION);
+        assert!(v("onedrive v2.5.0").unwrap() >= MIN_CLIENT_VERSION);
+        assert!(v("onedrive v3.0.0").unwrap() >= MIN_CLIENT_VERSION);
+    }
+
+    #[test]
     fn exec_parsing() {
         let u = "ExecStart=\"/home/a b/x.AppImage\" --client --monitor --confdir \"/home/x/.config/onedrive-work\"\n";
         assert_eq!(
@@ -1153,14 +1338,18 @@ mod tests {
 
     #[test]
     fn journal_order() {
-        let lines = vec![
-            "20.5 h onedrive[1]: b".to_string(),
-            "10.0 h onedrive[1]: a".to_string(),
-        ];
-        assert_eq!(
-            chronological(lines),
-            vec!["10.0 h onedrive[1]: a", "20.5 h onedrive[1]: b"]
-        );
+        // as `journalctl --reverse` prints them: newest first, the last two written together
+        let lines: Vec<String> = [
+            "20.5 h onedrive[1]: Sync with Microsoft OneDrive is complete",
+            "20.5 h onedrive[1]: Starting a sync with Microsoft OneDrive",
+            "10.0 h onedrive[1]: a",
+        ]
+        .map(String::from)
+        .into();
+        let ordered = oldest_first(lines);
+        assert_eq!(ordered[0], "10.0 h onedrive[1]: a");
+        let last = split_journal_line(ordered.last().unwrap()).unwrap().1;
+        assert!(matches!(parse_log(last), Some(LogEvent::Complete)));
     }
 
     #[test]
@@ -1188,11 +1377,27 @@ mod tests {
         ));
         assert!(parse_log("Uploading new file: a/b.txt ... failed").is_none());
         assert!(
+            matches!(parse_log("Created local directory: ./Pictures/2026"), Some(LogEvent::File { kind: "+", path }) if path == "Pictures/2026")
+        );
+        assert!(
             matches!(parse_log("Downloading file: ./x/y.pdf ... done"), Some(LogEvent::File { path, .. }) if path == "x/y.pdf")
         );
         assert!(matches!(
             parse_log("Sync with Microsoft OneDrive is complete"),
             Some(LogEvent::Complete)
+        ));
+        // what the client prints when Microsoft no longer accepts the saved sign-in
+        for revoked in [
+            "ERROR: Check your configuration as your refresh_token may be empty or invalid. You may need to issue a --reauth and re-authorise this client.",
+            "ERROR: You will need to issue a --reauth and re-authorise this client to obtain a fresh auth token.",
+        ] {
+            assert!(matches!(parse_log(revoked), Some(LogEvent::NeedsLogin)));
+        }
+        assert!(matches!(
+            parse_log(
+                "An application configuration change has been detected where a --resync is required"
+            ),
+            Some(LogEvent::NeedsResync)
         ));
     }
 }

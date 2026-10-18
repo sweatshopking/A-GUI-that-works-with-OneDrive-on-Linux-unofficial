@@ -49,6 +49,120 @@ component Card inherits Rectangle {
     border-color: Palette.border;
 }
 
+// One of the choices in the uninstall dialog; works like a radio button.
+component UninstallChoice inherits Rectangle {
+    in property <string> title;
+    in property <string> detail;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+    border-radius: 8px;
+    border-width: selected ? 2px : 1px;
+    border-color: selected ? Palette.accent-background : Palette.border;
+    background: area.has-hover && enabled ? Palette.foreground.with-alpha(0.05) : transparent;
+    height: choice-layout.preferred-height;
+    area := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            root.clicked();
+        }
+    }
+    choice-layout := HorizontalLayout {
+        padding: 12px;
+        spacing: 10px;
+        VerticalLayout {
+            alignment: start;
+            padding-top: 1px;
+            Rectangle {
+                width: 16px;
+                height: 16px;
+                border-radius: 8px;
+                border-width: 2px;
+                border-color: root.selected ? Palette.accent-background : Palette.foreground.with-alpha(0.5);
+                Rectangle {
+                    width: 8px;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: Palette.accent-background;
+                    visible: root.selected;
+                }
+            }
+        }
+        VerticalLayout {
+            spacing: 4px;
+            Text {
+                text: root.title;
+                font-weight: 600;
+            }
+            Hint {
+                text: root.detail;
+            }
+        }
+    }
+}
+
+// Shown above every page while the OneDrive Client for Linux is missing or too old.
+component ClientBanner inherits Rectangle {
+    in property <string> problem;
+    in property <string> hint;
+    in property <bool> can-install;
+    in property <bool> installing;
+    in property <string> install-msg;
+    callback instructions();
+    callback recheck();
+    callback install();
+    border-radius: 8px;
+    border-width: 1px;
+    border-color: #d99a00;
+    background: #d99a0026;
+    height: banner-layout.preferred-height;
+    banner-layout := VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        Text {
+            text: root.problem;
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        Text {
+            text: "This app needs the OneDrive Client for Linux (version 2.5 or newer), which does the actual syncing. It's installed separately so it keeps getting updates from its author.";
+            wrap: word-wrap;
+            font-size: 12px;
+        }
+        Hint {
+            text: root.hint;
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            if root.can-install: Button {
+                text: root.installing ? "Installing…" : "Install it for me";
+                primary: true;
+                enabled: !root.installing;
+                clicked => {
+                    root.install();
+                }
+            }
+            Button {
+                text: "Open installation instructions";
+                clicked => {
+                    root.instructions();
+                }
+            }
+            Button {
+                text: "Check again";
+                enabled: !root.installing;
+                clicked => {
+                    root.recheck();
+                }
+            }
+        }
+        if root.install-msg != "": Hint {
+            text: root.install-msg;
+        }
+    }
+}
+
 component Overlay inherits Rectangle {
     background: #00000088;
     TouchArea { }  // swallow clicks behind the dialog
@@ -193,6 +307,26 @@ export component AppWindow inherits Window {
     callback app-add-to-menu();
     callback open-url(string);
 
+    // ---------------- uninstall dialog
+    in property <bool> u-visible;
+    in-out property <bool> u-keep-setup: true;
+    in property <bool> u-busy;
+    in property <string> u-result; // set when done
+    in property <string> u-remove-app-label;
+    callback app-uninstall();
+
+    // ---------------- sync client check
+    in property <string> client-problem; // empty when the client is fine
+    in property <string> client-hint;
+    in property <bool> client-can-install;
+    in property <bool> client-installing;
+    in property <string> client-install-msg;
+    callback client-instructions();
+    callback client-recheck();
+    callback client-install();
+    callback u-confirm();
+    callback u-cancel();
+
     HorizontalLayout {
         width: root.width;
         height: root.height;
@@ -266,8 +400,30 @@ export component AppWindow inherits Window {
         }
 
         // ======== main area
-        Rectangle {
+        VerticalLayout {
             horizontal-stretch: 1;
+            if root.client-problem != "": VerticalLayout {
+                padding: 12px;
+                padding-bottom: 0px;
+                ClientBanner {
+                    problem: root.client-problem;
+                    hint: root.client-hint;
+                    can-install: root.client-can-install;
+                    installing: root.client-installing;
+                    install-msg: root.client-install-msg;
+                    instructions => {
+                        root.client-instructions();
+                    }
+                    recheck => {
+                        root.client-recheck();
+                    }
+                    install => {
+                        root.client-install();
+                    }
+                }
+            }
+            Rectangle {
+            vertical-stretch: 1;
 
             // ---- account view
             if root.current >= 0: VerticalLayout {
@@ -1037,8 +1193,30 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
+                    Card {
+                        VerticalLayout {
+                            padding: 14px;
+                            spacing: 6px;
+                            Heading {
+                                text: "Uninstall";
+                            }
+                            Hint {
+                                text: "Remove this app, and choose whether to keep your OneDrive setup for the command-line client or remove that too. Your synced files always stay on this computer.";
+                            }
+                            HorizontalLayout {
+                                alignment: start;
+                                Button {
+                                    text: "Uninstall…";
+                                    clicked => {
+                                        root.app-uninstall();
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
+        }
         }
     }
 
@@ -1154,6 +1332,93 @@ export component AppWindow inherits Window {
                         enabled: root.p-can-apply && !root.p-busy;
                         clicked => {
                             root.p-apply();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.u-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(600px, root.width - 40px);
+            height: u-layout.preferred-height;
+            background: Palette.background;
+            u-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: "Uninstall";
+                    font-size: 16px;
+                }
+                if root.u-result == "": VerticalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: "What should happen to your OneDrive setup (sign-ins, chosen folders and options)? Your synced files stay on this computer either way.";
+                        wrap: word-wrap;
+                    }
+                    UninstallChoice {
+                        title: "Keep my OneDrive setup";
+                        detail: "Only this app is removed. Your accounts keep syncing in the background with the OneDrive Client for Linux, which you can keep using from the command line.";
+                        selected: root.u-keep-setup;
+                        enabled: !root.u-busy;
+                        clicked => {
+                            root.u-keep-setup = true;
+                        }
+                    }
+                    UninstallChoice {
+                        title: "Remove everything";
+                        detail: "Also stop all background syncing, sign out, and delete every OneDrive sync configuration on this computer, including ones made with the command-line client.";
+                        selected: !root.u-keep-setup;
+                        enabled: !root.u-busy;
+                        clicked => {
+                            root.u-keep-setup = false;
+                        }
+                    }
+                    Hint {
+                        text: root.u-remove-app-label;
+                    }
+                    HorizontalLayout {
+                        spacing: 8px;
+                        alignment: end;
+                        if root.u-busy: Spinner {
+                            indeterminate: true;
+                            width: 22px;
+                            height: 22px;
+                        }
+                        Button {
+                            text: "Cancel";
+                            enabled: !root.u-busy;
+                            clicked => {
+                                root.u-cancel();
+                            }
+                        }
+                        Button {
+                            text: "Uninstall";
+                            primary: true;
+                            enabled: !root.u-busy;
+                            clicked => {
+                                root.u-confirm();
+                            }
+                        }
+                    }
+                }
+                if root.u-result != "": VerticalLayout {
+                    spacing: 10px;
+                    Text {
+                        text: root.u-result;
+                        wrap: word-wrap;
+                    }
+                    HorizontalLayout {
+                        alignment: end;
+                        Button {
+                            text: "Close";
+                            primary: true;
+                            clicked => {
+                                root.u-cancel();
+                            }
                         }
                     }
                 }

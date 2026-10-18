@@ -163,6 +163,21 @@ pub fn choose_folder(title: &str, start: &std::path::Path) -> Option<Option<std:
     Some(uris.first().and_then(|u| crate::core::path_from_uri(u)))
 }
 
+/// The process id of whoever owns a well-known bus name, if anyone does.
+pub fn name_owner_pid(name: &str) -> Option<u32> {
+    let c = session()?;
+    let reply = c
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "GetConnectionUnixProcessID",
+            &(name,),
+        )
+        .ok()?;
+    reply.body().deserialize::<u32>().ok()
+}
+
 /// Result of [`claim_name`].
 pub enum Claim {
     Owned(Connection),

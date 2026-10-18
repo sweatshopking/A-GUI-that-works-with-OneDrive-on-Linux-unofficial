@@ -12,6 +12,8 @@ Requires:       libwayland-client.so.0()(64bit)
 Requires:       libwayland-egl.so.1()(64bit)
 Requires:       systemd
 Requires:       xdg-utils
+# the sync engine, installed separately so it keeps getting its own updates
+Recommends:     onedrive >= 2.5.0
 Recommends:     (kdialog or zenity)
 
 %global debug_package %{nil}
@@ -19,18 +21,17 @@ Recommends:     (kdialog or zenity)
 
 %description
 A friendly front end for the OneDrive Client for Linux (abraunegg/onedrive),
-which is bundled. Sign in, choose folders, set sync times, pause, see what
-synced and share links, without using the command line.
+which does the syncing and is installed separately. Sign in, choose folders,
+set sync times, pause, see what synced and share links, without using the
+command line.
 
 %install
 cp -a %{stage}/. %{buildroot}/
 
 %files
 %license /usr/share/licenses/linux-onedrive-gui/LICENSE
-%license /usr/share/licenses/linux-onedrive-gui/onedrive-LICENSE
 %doc /usr/share/doc/linux-onedrive-gui/THIRD-PARTY.md
 /usr/bin/linux-onedrive-gui
-/usr/lib/linux-onedrive-gui/
 /usr/share/applications/linux-onedrive-gui.desktop
 /usr/share/metainfo/io.github.sweatshopking.LinuxOnedriveGui.metainfo.xml
 /usr/share/icons/hicolor/scalable/apps/linux-onedrive-gui.svg
