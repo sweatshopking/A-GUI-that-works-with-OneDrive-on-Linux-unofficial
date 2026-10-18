@@ -1,4 +1,4 @@
-# Linux OneDrive GUI
+# Entirely Unofficial Linux OneDrive GUI - not endorsed by Microsoft at at
 
 **Sync OneDrive and SharePoint on Linux, without the command line.**
 
