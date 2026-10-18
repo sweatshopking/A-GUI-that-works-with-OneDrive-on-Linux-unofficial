@@ -88,14 +88,24 @@ pub const MIN_CLIENT_VERSION: (u32, u32, u32) = (2, 5, 0);
 pub const CLIENT_INSTALL_URL: &str =
     "https://github.com/abraunegg/onedrive/blob/master/docs/install.md";
 
-/// The OneDrive Client for Linux installed on this computer (`onedrive` on PATH). The app never
+/// The OneDrive Client for Linux installed on this computer: `onedrive` on PATH, or where a
+/// build from source puts it (a desktop session's PATH often lacks ~/.local/bin). The app never
 /// ships its own copy, so the client keeps getting updates from its own packages.
 pub fn client_binary() -> Option<PathBuf> {
     // lets the automated tests use a stand-in client
     if let Some(p) = std::env::var_os("LINUX_ONEDRIVE_GUI_CLIENT") {
         return Some(PathBuf::from(p));
     }
-    which("onedrive")
+    which("onedrive").or_else(|| {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        [
+            home.map(|h| h.join(".local/bin/onedrive")),
+            Some(PathBuf::from("/usr/local/bin/onedrive")),
+        ]
+        .into_iter()
+        .flatten()
+        .find(|p| p.is_file())
+    })
 }
 
 pub fn which(prog: &str) -> Option<PathBuf> {
@@ -1390,8 +1400,26 @@ fn restarted_recently(unit: &str) -> bool {
     recent
 }
 
+/// The desktop's permission for the next program the window starts to come to the front
+/// (xdg-activation on Wayland, startup notification on X11). Without it GNOME opens a browser
+/// behind the window. The window asks for a fresh one on every click and key press.
+static ACTIVATION_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_activation_token(token: String) {
+    *ACTIVATION_TOKEN.lock().unwrap() = Some(token);
+}
+
+/// Lets a program started from the window (a browser, a file manager) show up in front of it.
+pub fn activate(cmd: &mut Command) -> &mut Command {
+    if let Some(t) = ACTIVATION_TOKEN.lock().unwrap().as_deref() {
+        cmd.env("XDG_ACTIVATION_TOKEN", t)
+            .env("DESKTOP_STARTUP_ID", t);
+    }
+    cmd
+}
+
 pub fn run_detached(prog: &str, args: &[&str]) {
-    if let Ok(mut c) = Command::new(prog)
+    if let Ok(mut c) = activate(&mut Command::new(prog))
         .args(args)
         .stdout(Stdio::null())
         .stderr(Stdio::null())

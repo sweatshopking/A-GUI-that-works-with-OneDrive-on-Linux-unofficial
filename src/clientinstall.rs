@@ -8,8 +8,8 @@
 //!   Arch and its derivatives the AUR recipe, built on this computer and installed with pacman; the
 //!                            app checks the AUR for newer versions, since pacman doesn't
 //!
-//! Everything that needs root runs as one small shell script through pkexec, so there is one
-//! password prompt and nothing is written to disk for root to run.
+//! Everything that needs root runs as one small shell script (packaging/install-client) through
+//! pkexec, so there is one password prompt.
 
 use std::collections::HashMap;
 use std::fs;
@@ -156,68 +156,10 @@ pub fn plan() -> Option<Plan> {
     )
 }
 
-// Runs as root (through pkexec). $1: the release's folder in the client's package source.
-const APT_SCRIPT: &str = r#"set -eu
-export DEBIAN_FRONTEND=noninteractive
-repo="https://download.opensuse.org/repositories/home:/npreining:/debian-ubuntu-onedrive/$1/"
-wait="-o DPkg::Lock::Timeout=300"
-# Someone who followed the guide by hand already has the source; a second copy would break apt.
-if grep -rqsF "npreining:/debian-ubuntu-onedrive/$1" /etc/apt/sources.list /etc/apt/sources.list.d \
-        --exclude=onedrive.list; then
-    echo "The client's package source is already set up."
-else
-    echo "Adding the OneDrive client's package source…"
-    tmp="$(mktemp)"
-    trap 'rm -f "$tmp"' EXIT
-    if [ -x /usr/lib/apt/apt-helper ]; then
-        /usr/lib/apt/apt-helper download-file "${repo}Release.key" "$tmp"
-    elif command -v curl >/dev/null; then
-        curl -fsSL "${repo}Release.key" -o "$tmp"
-    else
-        wget -qO "$tmp" "${repo}Release.key"
-    fi
-    grep -q "BEGIN PGP PUBLIC KEY BLOCK" "$tmp" || { echo "The package source's signing key didn't download correctly." >&2; exit 1; }
-    # apt reads a key in text form only from a .asc file; gpg turns it into the guide's .gpg file
-    if command -v gpg >/dev/null; then
-        key=/usr/share/keyrings/obs-onedrive.gpg
-        gpg --dearmor --yes -o "$key" "$tmp"
-    else
-        key=/usr/share/keyrings/obs-onedrive.asc
-        cp "$tmp" "$key"
-    fi
-    chmod 644 "$key"
-    echo "deb [arch=$(dpkg --print-architecture) signed-by=$key] $repo ./" > /etc/apt/sources.list.d/onedrive.list
-fi
-# Left behind by Ubuntu's and Debian's old onedrive package: it would sync the default account
-# for every user at login, outside this app.
-rm -f /etc/systemd/user/default.target.wants/onedrive.service
-echo "Checking for packages…"
-apt-get $wait update
-echo "Installing the OneDrive client…"
-apt-get $wait install -y --no-install-recommends --no-install-suggests onedrive
-"#;
-
-// Runs as root (through pkexec), which sets PKEXEC_UID. makepkg refuses to run as root, so the
-// recipe is downloaded and built as the person who asked, in a temporary folder.
-const AUR_SCRIPT: &str = r#"set -eu
-user="$(getent passwd "${PKEXEC_UID:?}" | cut -d: -f1)"
-home="$(getent passwd "$PKEXEC_UID" | cut -d: -f6)"
-as_user() { runuser -u "$user" -- env HOME="$home" "$@"; }
-echo "Installing the tools needed to build the client…"
-if ! pacman -S --needed --noconfirm base-devel ldc libnotify sqlite dbus curl; then
-    echo "Couldn't install the build tools. Update your system (pacman -Syu, or your update app) and try again." >&2
-    exit 1
-fi
-dir="$(as_user mktemp -d)"
-trap 'rm -rf "$dir"' EXIT
-echo "Downloading the recipe from the AUR…"
-as_user curl -fsSL -o "$dir/recipe.tar.gz" "https://aur.archlinux.org/cgit/aur.git/snapshot/onedrive-abraunegg.tar.gz"
-as_user tar -xzf "$dir/recipe.tar.gz" -C "$dir"
-echo "Building the client (this takes a few minutes)…"
-as_user sh -c 'cd "$1/onedrive-abraunegg" && makepkg --noconfirm --cleanbuild' sh "$dir"
-echo "Installing the OneDrive client…"
-pacman -U --noconfirm "$dir"/onedrive-abraunegg/onedrive-abraunegg-*.pkg.tar.*
-"#;
+/// The installer that runs as root. The .deb and .rpm also install it as `HELPER`, together with a
+/// polkit action that words the password prompt; the AppImage hands it to /bin/sh instead.
+const SCRIPT: &str = include_str!("../packaging/install-client");
+const HELPER: &str = "/usr/libexec/linux-onedrive-gui/install-client";
 
 /// pkexec, unless the automated tests replace it.
 fn elevate() -> String {
@@ -228,42 +170,45 @@ impl Plan {
     /// The command that installs (or updates) the client. Asks for the password itself.
     pub fn command(&self) -> Command {
         let mut c = Command::new(elevate());
+        if std::path::Path::new(HELPER).is_file() {
+            c.arg(HELPER);
+        } else {
+            c.args(["/bin/sh", "-c", SCRIPT, "install-client"]);
+        }
         match self {
             Plan::Package {
                 manager: Manager::Dnf,
-            } => c.args(["dnf", "install", "-y", "onedrive"]),
+            } => c.arg("dnf"),
             Plan::Package {
                 manager: Manager::Zypper,
-            } => c.args(["zypper", "--non-interactive", "install", "onedrive"]),
-            Plan::AptSource { dir, .. } => c.args(["/bin/sh", "-c", APT_SCRIPT, "sh", dir]),
-            Plan::Aur => c.args(["/bin/sh", "-c", AUR_SCRIPT]),
+            } => c.arg("zypper"),
+            Plan::AptSource { dir, .. } => c.args(["apt", dir]),
+            Plan::Aur => c.arg("aur"),
         };
         c.stdin(Stdio::null());
         c
     }
 
-    /// What to show before starting, when it does more than install a package from the
-    /// distribution's own repositories. None: no need to ask.
-    pub fn confirmation(&self) -> Option<String> {
-        match self {
-            Plan::Package { .. } => None,
-            Plan::AptSource { release, .. } => Some(format!(
+    /// What the confirmation says before the password prompt.
+    pub fn confirmation(&self) -> String {
+        let what = match self {
+            Plan::Package { .. } => "This installs the \"onedrive\" package from your system's own software, \
+                 so your normal system updates keep it up to date."
+                .to_string(),
+            Plan::AptSource { release, .. } => format!(
                 "The OneDrive client in {release}'s own software is too old, so this adds the client's \
                  own package source — the one its author recommends — and installs it from there. \
-                 After that your normal system updates keep it up to date.\n\n\
-                 Your computer will ask for your password."
-            )),
-            Plan::Aur => Some(
-                "The OneDrive client isn't in Arch's own software, so this builds it on your computer \
+                 After that your normal system updates keep it up to date."
+            ),
+            Plan::Aur => "The OneDrive client isn't in Arch's own software, so this builds it on your computer \
                  from its recipe in the AUR (the Arch User Repository, where Arch keeps community \
                  packages) and installs it as a normal package. Any build tools you don't have yet \
                  are installed first. It takes a few minutes.\n\n\
                  Your normal system updates won't update it, so this app checks for new versions \
-                 and offers to update it for you.\n\n\
-                 Your computer will ask for your password."
-                    .into(),
-            ),
-        }
+                 and offers to update it for you."
+                .to_string(),
+        };
+        format!("{what}\n\nYour computer will ask for your password.")
     }
 }
 
@@ -437,17 +382,18 @@ mod tests {
 
     #[test]
     fn scripts_get_their_arguments() {
-        let c = Plan::AptSource {
+        let args = |p: Plan| -> Vec<String> {
+            p.command()
+                .get_args()
+                .map(|a| a.to_string_lossy().to_string())
+                .collect()
+        };
+        let apt = args(Plan::AptSource {
             dir: "xUbuntu_24.04".into(),
             release: "Ubuntu 24.04".into(),
-        }
-        .command();
-        let args: Vec<_> = c
-            .get_args()
-            .map(|a| a.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(args[0], "/bin/sh");
-        assert_eq!(args.last().unwrap(), "xUbuntu_24.04");
-        assert!(AUR_SCRIPT.contains(AUR_PACKAGE));
+        });
+        assert_eq!(apt[apt.len() - 2..], ["apt", "xUbuntu_24.04"]);
+        assert_eq!(args(Plan::Aur).last().unwrap(), "aur");
+        assert!(SCRIPT.contains(AUR_PACKAGE));
     }
 }

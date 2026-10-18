@@ -82,7 +82,8 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
         "add_name" => get_add_name, "add_folder" => get_add_folder,
         "u_result" => get_u_result, "u_remove_app_label" => get_u_remove_app_label,
         "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg,
-        "ci_text" => get_ci_text, "ci_title" => get_ci_title, "ci_action" => get_ci_action
+        "ci_text" => get_ci_text, "ci_title" => get_ci_title, "ci_action" => get_ci_action,
+        "client_done" => get_client_done
     );
     r.or_else(|| {
         Some(match k {
@@ -253,6 +254,8 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "client_not_now" => ui.invoke_client_not_now(),
         "ci_confirm" => ui.invoke_ci_confirm(),
         "ci_cancel" => ui.invoke_ci_cancel(),
+        "ci_myself" => ui.invoke_ci_myself(),
+        "client_done_ok" => ui.invoke_client_done_ok(),
         "u_confirm" => ui.invoke_u_confirm(),
         "u_cancel" => ui.invoke_u_cancel(),
         _ => return false,

@@ -32,6 +32,8 @@ cp -a %{stage}/. %{buildroot}/
 %license /usr/share/licenses/linux-onedrive-gui/LICENSE
 %doc /usr/share/doc/linux-onedrive-gui/THIRD-PARTY.md
 /usr/bin/linux-onedrive-gui
+/usr/libexec/linux-onedrive-gui/install-client
+/usr/share/polkit-1/actions/io.github.sweatshopking.LinuxOnedriveGui.policy
 /usr/share/applications/linux-onedrive-gui.desktop
 /usr/share/metainfo/io.github.sweatshopking.LinuxOnedriveGui.metainfo.xml
 /usr/share/icons/hicolor/scalable/apps/linux-onedrive-gui.svg

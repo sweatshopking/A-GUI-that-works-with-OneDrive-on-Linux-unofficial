@@ -332,6 +332,9 @@ export component AppWindow inherits Window {
     in property <bool> client-installing;
     in property <string> client-install-msg;
     in property <bool> client-update;
+    // "it's installed" note shown for a while after the banner goes away
+    in property <string> client-done;
+    callback client-done-ok();
     callback client-instructions();
     callback client-recheck();
     callback client-install();
@@ -344,6 +347,7 @@ export component AppWindow inherits Window {
     in property <string> ci-action;
     callback ci-confirm();
     callback ci-cancel();
+    callback ci-myself();
     callback u-confirm();
     callback u-cancel();
 
@@ -431,6 +435,34 @@ export component AppWindow inherits Window {
         // ======== main area
         VerticalLayout {
             horizontal-stretch: 1;
+            if root.client-problem == "" && root.client-done != "": VerticalLayout {
+                padding: 12px;
+                padding-bottom: 0px;
+                Rectangle {
+                    border-radius: 8px;
+                    border-width: 1px;
+                    border-color: #2e9e4f;
+                    background: #2e9e4f26;
+                    height: done-layout.preferred-height;
+                    done-layout := HorizontalLayout {
+                        padding: 12px;
+                        spacing: 8px;
+                        Text {
+                            text: "✓  " + root.client-done;
+                            font-weight: 600;
+                            wrap: word-wrap;
+                            vertical-alignment: center;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "OK";
+                            clicked => {
+                                root.client-done-ok();
+                            }
+                        }
+                    }
+                }
+            }
             if root.client-problem != "": VerticalLayout {
                 padding: 12px;
                 padding-bottom: 0px;
@@ -1522,7 +1554,16 @@ export component AppWindow inherits Window {
                 }
                 HorizontalLayout {
                     spacing: 8px;
-                    alignment: end;
+                    // installing by hand instead; the window notices the client by itself
+                    if !root.client-update: Button {
+                        text: "I'll install it myself";
+                        clicked => {
+                            root.ci-myself();
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                    }
                     Button {
                         text: "Cancel";
                         clicked => {

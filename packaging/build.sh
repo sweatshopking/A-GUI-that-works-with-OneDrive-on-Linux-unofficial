@@ -72,6 +72,9 @@ stage_tree() {
     local dest="$1"
     rm -rf "$dest"
     install -Dm755 "$BIN" "$dest/usr/bin/$APP"
+    # "Install it for me": the installer, and a polkit action that words its password prompt
+    install -Dm755 "$ROOT/packaging/install-client" "$dest/usr/libexec/$APP/install-client"
+    install -Dm644 "$ROOT/packaging/$APPSTREAM_ID.policy" "$dest/usr/share/polkit-1/actions/$APPSTREAM_ID.policy"
     install -Dm644 "$ROOT/packaging/$APP.desktop" "$dest/usr/share/applications/$APP.desktop"
     install -Dm644 "$ROOT/packaging/$APPSTREAM_ID.metainfo.xml" "$dest/usr/share/metainfo/$APPSTREAM_ID.metainfo.xml"
     install -Dm644 "$ROOT/assets/$APP.svg" "$dest/usr/share/icons/hicolor/scalable/apps/$APP.svg"

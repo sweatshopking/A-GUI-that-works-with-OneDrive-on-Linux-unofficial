@@ -1402,6 +1402,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
         cmd.arg("--reauth");
     }
     let url_file = browser_shim(&mut cmd);
+    core::activate(&mut cmd);
     let ui = ctx.borrow().ui();
     let (child, stdin) = match spawn_capture(cmd, out.clone(), true) {
         Ok(c) => c,
@@ -1940,6 +1941,7 @@ fn new_confdir(name: &str, accounts: &[AccountInfo]) -> PathBuf {
 
 fn add_create(ctx: &Shared) {
     let ui = ctx.borrow().ui();
+    ui.set_client_done(ss(""));
     let mode = ui.get_add_mode();
     let name = ui.get_add_name().trim().to_string();
     let folder = ui.get_add_folder().trim().to_string();
@@ -2166,8 +2168,12 @@ fn check_client() {
         let ui = ctx.borrow().ui();
         let was_missing = !ui.get_client_problem().is_empty() && !ui.get_client_update();
         show_client_check(ctx, &check);
-        if was_missing && check.is_ok() {
-            // installed by hand while the window was open ("Check again")
+        if was_missing && let core::ClientCheck::Ok { version, .. } = &check {
+            // installed by hand while the window was open
+            show_client_done(
+                ctx,
+                format!("Found the OneDrive client ({version}). You're ready to sync."),
+            );
             core::repair_managed_units();
             core::start_idle_units(&AppSettings::load());
             refresh(ctx);
@@ -2229,27 +2235,25 @@ fn client_blocker() -> Option<String> {
     }
 }
 
-/// "Install it for me": asks first when it does more than install one of the system's own packages.
+/// "Install it for me": says what will happen, and offers doing it by hand, before the password.
 fn install_client(ctx: &Shared) {
     let Some(plan) = clientinstall::plan() else {
         return;
     };
     let ui = ctx.borrow().ui();
-    match plan.confirmation() {
-        Some(text) => {
-            let update = ui.get_client_update();
-            ui.set_ci_title(ss(if update {
-                "Update the OneDrive client"
-            } else {
-                "Install the OneDrive client"
-            }));
-            ui.set_ci_action(ss(if update { "Update" } else { "Install" }));
-            ui.set_ci_text(ss(text));
-            ui.set_ci_visible(true);
-        }
-        None => run_client_install(ctx, plan),
-    }
+    let update = ui.get_client_update();
+    ui.set_ci_title(ss(if update {
+        "Update the OneDrive client"
+    } else {
+        "Install the OneDrive client"
+    }));
+    ui.set_ci_action(ss(if update { "Update" } else { "Install" }));
+    ui.set_ci_text(ss(plan.confirmation()));
+    ui.set_ci_visible(true);
 }
+
+/// Progress lines the installer marks for people; the rest (apt, makepkg…) is only for errors.
+const STEP: &str = "STEP ";
 
 fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
     let ui = ctx.borrow().ui();
@@ -2275,7 +2279,7 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
                 t.lines()
                     .rev()
                     .map(str::trim)
-                    .find(|l| !l.is_empty())
+                    .find(|l| !l.is_empty() && !l.starts_with(STEP))
                     .unwrap_or("unknown error")
                     .chars()
                     .take(200)
@@ -2301,7 +2305,15 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
                 }
                 None => {
                     ui.set_client_install_msg(ss(""));
-                    if check.is_ok() {
+                    if let core::ClientCheck::Ok { version, .. } = &check {
+                        show_client_done(
+                            ctx,
+                            if was_update {
+                                format!("The OneDrive client is updated to {version}.")
+                            } else {
+                                "The OneDrive client is installed. You're ready to sync.".into()
+                            },
+                        );
                         core::repair_managed_units();
                         core::start_idle_units(&AppSettings::load());
                         refresh(ctx);
@@ -2316,17 +2328,24 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
     );
 }
 
-/// Shows the installer's latest line while it runs (building on Arch takes minutes).
+/// Shows the installer's latest step while it runs (building on Arch takes minutes).
 fn update_install_live(ctx: &Shared) {
     let c = ctx.borrow();
     let Some(out) = c.install_out.as_ref() else {
         return;
     };
     let out = out.lock().unwrap();
-    if let Some(last) = out.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
-        let last: String = last.chars().take(110).collect();
-        c.ui().set_client_install_msg(ss(last));
+    if let Some(step) = out.lines().rev().find_map(|l| l.strip_prefix(STEP)) {
+        c.ui().set_client_install_msg(ss(step.trim()));
     }
+}
+
+/// A short "it worked" note where the banner was. It stays until OK or adding an account: going
+/// away by itself would move the page under the pointer.
+fn show_client_done(ctx: &Shared, msg: String) {
+    let ui = ctx.borrow().ui();
+    ui.set_client_install_msg(ss(""));
+    ui.set_client_done(ss(msg));
 }
 
 // ---------------------------------------------------------------- uninstall
@@ -2721,6 +2740,17 @@ pub fn run(account: Option<String>) {
         }
     });
     on!(on_ci_cancel, |c| c.borrow().ui().set_ci_visible(false));
+    // the banner notices the client by itself once it's installed (see the timer below)
+    on!(on_ci_myself, |c| {
+        let ui = c.borrow().ui();
+        ui.set_ci_visible(false);
+        ui.set_client_install_msg(ss("Once it's installed, this note goes away by itself."));
+        core::run_detached("xdg-open", &[clientinstall::instructions_url()]);
+    });
+    on!(on_client_done_ok, |c| c
+        .borrow()
+        .ui()
+        .set_client_done(ss("")));
     on!(on_client_not_now, |c| {
         c.borrow_mut().update_dismissed = true;
         let ui = c.borrow().ui();
@@ -2791,6 +2821,32 @@ pub fn run(account: Option<String>) {
         });
     }
 
+    // asks the desktop, on every click and key press, for permission to bring the next program
+    // the window starts to the front (see core::activate)
+    {
+        use slint::winit_030::winit::event::{ElementState, WindowEvent};
+        use slint::winit_030::winit::platform::startup_notify::WindowExtStartupNotify;
+        use slint::winit_030::{EventResult, WinitWindowAccessor};
+        ui.window().on_winit_window_event(|w, ev| {
+            match ev {
+                WindowEvent::MouseInput {
+                    state: ElementState::Pressed,
+                    ..
+                } => {
+                    w.with_winit_window(|ww| ww.request_activation_token());
+                }
+                WindowEvent::KeyboardInput { event, .. } if event.state.is_pressed() => {
+                    w.with_winit_window(|ww| ww.request_activation_token());
+                }
+                WindowEvent::ActivationTokenDone { token, .. } => {
+                    core::set_activation_token(token.clone().into_raw());
+                }
+                _ => {}
+            }
+            EventResult::Propagate
+        });
+    }
+
     let timer = slint::Timer::default();
     {
         let w = ctx.clone();
@@ -2805,6 +2861,14 @@ pub fn run(account: Option<String>) {
                 ticks += 1;
                 if ticks.is_multiple_of(8) {
                     refresh(&w);
+                    // installed some other way while the window is open
+                    let ui = w.borrow().ui();
+                    if !ui.get_client_problem().is_empty()
+                        && !ui.get_client_update()
+                        && !ui.get_client_installing()
+                    {
+                        check_client();
+                    }
                 }
                 // a cancelled preview whose dry run has now stopped can close the window
                 if w.borrow()

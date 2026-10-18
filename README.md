@@ -51,7 +51,9 @@ sync client, syncing issues should go to the original app, which is linked above
 
 It does the syncing and is installed on its own, so it keeps getting updates from its author. You
 usually don't need to do anything: if it's missing or too old, the app says so and its **Install it for
-me** button installs it after asking for your password.
+me** button installs it after asking for your password. If you'd rather install it yourself, choose
+*I'll install it myself*. The app notices the client within a few seconds of it being installed,
+wherever it came from.
 
 | Your system | What *Install it for me* does |
 |---|---|
