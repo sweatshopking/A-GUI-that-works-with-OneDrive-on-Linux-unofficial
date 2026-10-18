@@ -479,7 +479,7 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
     let body = format!(
         "[Unit]\n\
          Description=OneDrive sync ({name})\n\
-         Documentation=https://github.com/sweatshopking/Linux-Onedrive-GUI\n\
+         Documentation=https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          {MANAGED_MARK}\n\

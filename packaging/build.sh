@@ -136,7 +136,7 @@ Architecture: $DEB_ARCH
 Maintainer: sweatshopking <336541686+sweatshopking@users.noreply.github.com>
 Depends: $linked, $runtime
 Recommends: kdialog | zenity
-Homepage: https://github.com/sweatshopking/Linux-Onedrive-GUI
+Homepage: https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial
 Description: OneDrive and SharePoint sync with a tray icon and settings window
  A friendly front end for the OneDrive Client for Linux (abraunegg/onedrive),
  which is bundled. Sign in, choose folders, set sync times, pause, see what
@@ -183,14 +183,14 @@ build_appimage() {
     export APPIMAGE_EXTRACT_AND_RUN=1
     (
         cd "$WORK"
-        LDAI_OUTPUT="$DIST/Linux_OneDrive_GUI-${VERSION}-${ARCH}.AppImage" \
+        LDAI_OUTPUT="$DIST/A_GUI_that_works_with_OneDrive_on_Linux-unofficial-${VERSION}-${ARCH}.AppImage" \
             "$ld" --appdir "$appdir" \
             --executable "$BIN" \
             --executable "$WORK/onedrive/onedrive" \
             --desktop-file "$ROOT/packaging/$APP.desktop" \
             --icon-file "$ROOT/assets/$APP.svg" >"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
         bundled_sources "$appdir" >"$appdir/usr/share/licenses/$APP/BUNDLED-LIBRARIES.txt"
-        LDAI_OUTPUT="$DIST/Linux_OneDrive_GUI-${VERSION}-${ARCH}.AppImage" \
+        LDAI_OUTPUT="$DIST/A_GUI_that_works_with_OneDrive_on_Linux-unofficial-${VERSION}-${ARCH}.AppImage" \
             "$ld" --appdir "$appdir" --output appimage >>"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
     )
     ls -la "$DIST"/*-"$ARCH".AppImage

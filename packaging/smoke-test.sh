@@ -47,7 +47,7 @@ case "$kind" in
             libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon0 libxkbcommon-x11-0 \
             libwayland-client0 libwayland-cursor0 libwayland-egl1 libegl1 \
             xvfb imagemagick >/dev/null
-        image=("$DIST"/Linux_OneDrive_GUI-*-"$ARCH".AppImage)
+        image=("$DIST"/A_GUI_that_works_with_OneDrive_on_Linux-unofficial-*-"$ARCH".AppImage)
         chmod +x "${image[0]}"
         # containers have no FUSE; on a desktop the AppImage mounts itself instead
         export APPIMAGE_EXTRACT_AND_RUN=1

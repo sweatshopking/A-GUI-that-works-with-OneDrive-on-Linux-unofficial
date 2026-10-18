@@ -20,18 +20,18 @@
     <p>Not made by or affiliated with Microsoft. OneDrive is a trademark of Microsoft.</p>
   </description>
   <launchable type="desktop-id">linux-onedrive-gui.desktop</launchable>
-  <url type="homepage">https://github.com/sweatshopking/Linux-Onedrive-GUI</url>
-  <url type="bugtracker">https://github.com/sweatshopking/Linux-Onedrive-GUI/issues</url>
+  <url type="homepage">https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial</url>
+  <url type="bugtracker">https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/issues</url>
   <developer id="io.github.sweatshopking">
     <name>sweatshopking</name>
   </developer>
   <screenshots>
     <screenshot type="default">
-      <image>https://raw.githubusercontent.com/sweatshopking/Linux-Onedrive-GUI/main/docs/screenshots/status-light.png</image>
+      <image>https://raw.githubusercontent.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/main/docs/screenshots/status-light.png</image>
       <caption>Account status</caption>
     </screenshot>
     <screenshot>
-      <image>https://raw.githubusercontent.com/sweatshopking/Linux-Onedrive-GUI/main/docs/screenshots/folders-dark.png</image>
+      <image>https://raw.githubusercontent.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/main/docs/screenshots/folders-dark.png</image>
       <caption>Choosing which folders to sync</caption>
     </screenshot>
   </screenshots>

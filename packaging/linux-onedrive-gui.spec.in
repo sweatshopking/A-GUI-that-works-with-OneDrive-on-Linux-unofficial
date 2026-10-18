@@ -4,7 +4,7 @@ Version:        @VERSION@
 Release:        1
 Summary:        OneDrive and SharePoint sync with a tray icon and settings window
 License:        GPL-3.0-or-later
-URL:            https://github.com/sweatshopking/Linux-Onedrive-GUI
+URL:            https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial
 # libraries the window opens at runtime (dlopen), which automatic dependency detection can't see
 Requires:       libxkbcommon.so.0()(64bit)
 Requires:       libEGL.so.1()(64bit)
