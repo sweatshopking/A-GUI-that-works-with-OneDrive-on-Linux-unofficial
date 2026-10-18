@@ -344,38 +344,47 @@ export component AppWindow inherits Window {
                     font-weight: 600;
                     color: Palette.foreground.with-alpha(0.7);
                 }
-                for acc[i] in root.accounts: Rectangle {
-                    height: 54px;
-                    border-radius: 6px;
-                    background: root.current == i ? Palette.selection-background.with-alpha(0.35) : ta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
-                    ta := TouchArea {
-                        clicked => {
-                            root.select(i);
-                        }
-                    }
-                    HorizontalLayout {
-                        padding-left: 10px;
-                        padding-right: 8px;
-                        spacing: 10px;
-                        alignment: start;
-                        ToneDot {
-                            tone: acc.tone;
-                            y: (parent.height - self.height) / 2;
-                        }
-                        VerticalLayout {
-                            alignment: center;
-                            Text {
-                                text: acc.name;
-                                font-weight: 600;
-                                overflow: elide;
-                                width: 180px;
+                // the list scrolls on its own, so the buttons below always stay in view
+                ScrollView {
+                    vertical-stretch: 0;
+                    min-height: min(account-list.preferred-height, 120px);
+                    preferred-height: account-list.preferred-height;
+                    account-list := VerticalLayout {
+                        spacing: 6px;
+                        for acc[i] in root.accounts: Rectangle {
+                            height: 54px;
+                            border-radius: 6px;
+                            background: root.current == i ? Palette.selection-background.with-alpha(0.35) : ta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+                            ta := TouchArea {
+                                clicked => {
+                                    root.select(i);
+                                }
                             }
-                            Text {
-                                text: acc.status;
-                                font-size: 11px;
-                                overflow: elide;
-                                width: 180px;
-                                color: Palette.foreground.with-alpha(0.65);
+                            HorizontalLayout {
+                                padding-left: 10px;
+                                padding-right: 8px;
+                                spacing: 10px;
+                                alignment: start;
+                                ToneDot {
+                                    tone: acc.tone;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    Text {
+                                        text: acc.name;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                        width: 180px;
+                                    }
+                                    Text {
+                                        text: acc.status;
+                                        font-size: 11px;
+                                        overflow: elide;
+                                        width: 180px;
+                                        color: Palette.foreground.with-alpha(0.65);
+                                    }
+                                }
                             }
                         }
                     }

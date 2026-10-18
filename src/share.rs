@@ -73,6 +73,13 @@ fn locate(path: &Path) -> Result<(core::AccountInfo, String), String> {
 
 pub fn share_link(path: &Path) {
     let result = locate(path).and_then(|(acc, rel)| {
+        // a link to the top of an account would expose everything in it
+        if rel.is_empty() {
+            return Err(format!(
+                "That's the whole of \"{}\". Share a file or folder inside it instead.",
+                acc.name
+            ));
+        }
         let t = graph::token(&acc.confdir)?;
         graph::create_link(&t, acc.drive_id.as_deref(), &rel)
     });

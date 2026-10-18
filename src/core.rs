@@ -655,11 +655,53 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
     Ok(())
 }
 
+/// Marks an account as in use by the settings window (a preview's dry run, a sign-in), which runs
+/// the client itself with the account's unit stopped. While the marker exists and its window is
+/// alive, nothing else may start that unit: two clients on one account can damage its database.
+pub struct BusyMarker(PathBuf);
+
+fn busy_path(confdir: &Path) -> PathBuf {
+    let base = std::env::var("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| std::env::temp_dir());
+    base.join(APP_ID)
+        .join("busy")
+        .join(slug(&confdir.to_string_lossy()))
+}
+
+impl BusyMarker {
+    pub fn new(confdir: &Path) -> Self {
+        let p = busy_path(confdir);
+        if let Some(dir) = p.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        let _ = fs::write(&p, std::process::id().to_string());
+        BusyMarker(p)
+    }
+}
+
+impl Drop for BusyMarker {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.0);
+    }
+}
+
+/// Whether the settings window is using this account right now.
+pub fn account_busy(confdir: &Path) -> bool {
+    fs::read_to_string(busy_path(confdir))
+        .ok()
+        .and_then(|pid| pid.trim().parse::<u32>().ok())
+        .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+}
+
 /// Starts the enabled sync units that aren't running, e.g. ones skipped while the client was
 /// missing. Pauses and schedules are applied by the tray right after, as usual.
 pub fn start_idle_units(settings: &AppSettings) {
     for acc in discover(settings) {
         let Some(u) = &acc.unit else { continue };
+        if account_busy(&acc.confdir) {
+            continue;
+        }
         let st = unit_state(u);
         if st.enabled && !st.active && acc.signed_in && settings.prefs(&acc.confdir).sync_allowed()
         {

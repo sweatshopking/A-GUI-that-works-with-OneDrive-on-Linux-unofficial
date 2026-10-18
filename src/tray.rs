@@ -601,7 +601,12 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
             let prefs = settings.prefs(&info.confdir);
             let Some(unit) = &info.unit else { continue };
             let managed_by_time = prefs.schedule.enabled || prefs.pause_until > 0;
-            if !managed_by_time || !st.enabled || *resyncing || !info.signed_in {
+            if !managed_by_time
+                || !st.enabled
+                || *resyncing
+                || !info.signed_in
+                || core::account_busy(&info.confdir)
+            {
                 continue;
             }
             let allowed = prefs.sync_allowed();

@@ -72,6 +72,7 @@ struct SignIn {
     url_file: Option<PathBuf>,
     enable_after: bool,
     finished: bool,
+    _busy: core::BusyMarker,
 }
 
 struct Preview {
@@ -85,6 +86,7 @@ struct Preview {
     cancelled: Arc<AtomicBool>,
     running: bool,
     folders_changed: bool,
+    _busy: core::BusyMarker,
 }
 
 struct Snapshot {
@@ -951,6 +953,7 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
         cancelled: cancelled.clone(),
         running: true,
         folders_changed: change.sync_list.is_some(),
+        _busy: core::BusyMarker::new(&acc.confdir),
     });
     if let Some(p) = ctx.borrow().preview.as_ref() {
         save_pending_preview(p);
@@ -1417,6 +1420,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
         url_file,
         enable_after,
         finished: false,
+        _busy: core::BusyMarker::new(&acc.confdir),
     });
 }
 
