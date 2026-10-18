@@ -1069,6 +1069,36 @@ pub fn file_uri(p: &Path) -> String {
     uri
 }
 
+/// Decodes `%XX` escapes; anything that isn't a valid escape is kept as it is.
+pub fn percent_decode(s: &str) -> Vec<u8> {
+    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && let (Some(&h), Some(&l)) = (b.get(i + 1), b.get(i + 2))
+            && let (Some(h), Some(l)) = (hex(h), hex(l))
+        {
+            out.push(h << 4 | l);
+            i += 3;
+            continue;
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    out
+}
+
+/// The local path of a `file://` URI (the inverse of [`file_uri`]).
+pub fn path_from_uri(uri: &str) -> Option<PathBuf> {
+    use std::os::unix::ffi::OsStringExt;
+    let rest = uri.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    rest.starts_with('/')
+        .then(|| PathBuf::from(std::ffi::OsString::from_vec(percent_decode(rest))))
+}
+
 /// Shows a file in the user's file manager with it selected, falling back to opening its folder.
 pub fn show_in_folder(p: &Path) {
     if p.exists() && crate::dbus::show_items(&file_uri(p)) {
@@ -1139,6 +1169,15 @@ mod tests {
             file_uri(Path::new("/home/a b/Kate's #1.txt")),
             "file:///home/a%20b/Kate%27s%20%231.txt"
         );
+        for p in ["/home/a b/Kate's #1.txt", "/tmp/café/100%", "/"] {
+            assert_eq!(path_from_uri(&file_uri(Path::new(p))), Some(p.into()));
+        }
+        assert_eq!(
+            path_from_uri("file://localhost/srv/x"),
+            Some("/srv/x".into())
+        );
+        assert_eq!(path_from_uri("https://example.com/x"), None);
+        assert_eq!(path_from_uri("file://server/share"), None);
     }
 
     #[test]

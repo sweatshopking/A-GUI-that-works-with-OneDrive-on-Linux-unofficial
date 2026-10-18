@@ -213,6 +213,7 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "p_apply" => ui.invoke_p_apply(),
         "p_cancel" => ui.invoke_p_cancel(),
         "add_choose" => ui.invoke_add_choose(n),
+        "add_browse" => ui.invoke_add_browse(),
         "add_search" => ui.invoke_add_search(),
         "add_lib_picked" => ui.invoke_add_lib_picked(n),
         "add_create" => ui.invoke_add_create(),

@@ -309,23 +309,7 @@ fn url_within(url: &str, base: &str) -> bool {
 }
 
 fn percent_decode(s: &str) -> String {
-    let hex = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
-    let b = s.as_bytes();
-    let mut out = Vec::with_capacity(b.len());
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%'
-            && let (Some(&h), Some(&l)) = (b.get(i + 1), b.get(i + 2))
-            && let (Some(h), Some(l)) = (hex(h), hex(l))
-        {
-            out.push(h << 4 | l);
-            i += 3;
-            continue;
-        }
-        out.push(b[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
+    String::from_utf8_lossy(&crate::core::percent_decode(s)).into_owned()
 }
 
 #[cfg(test)]

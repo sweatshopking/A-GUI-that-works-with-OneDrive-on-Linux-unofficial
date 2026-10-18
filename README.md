@@ -44,9 +44,15 @@ Download from the [latest release](https://github.com/sweatshopking/Linux-Onedri
 
 | Your system | Download | How to install |
 |---|---|---|
-| Ubuntu 22.04+, Linux Mint 21+, Debian 12+, Pop!_OS, Zorin | `linux-onedrive-gui_…_amd64.deb` | Double-click it, or `sudo apt install ./linux-onedrive-gui_*_amd64.deb` |
-| Fedora 41+, openSUSE Tumbleweed / Leap 16 | `linux-onedrive-gui-….x86_64.rpm` | Double-click it, or `sudo dnf install ./linux-onedrive-gui-*.rpm` |
+| Ubuntu 22.04+, Linux Mint 21+, Debian 12+, Pop!_OS, Zorin | `linux-onedrive-gui_…_amd64.deb` | Double-click it, or `sudo apt install ./linux-onedrive-gui_*.deb` |
+| Fedora 41+, openSUSE Tumbleweed / Leap 16 | `linux-onedrive-gui-….x86_64.rpm` | Double-click it, or `sudo dnf install ./linux-onedrive-gui-*.rpm` (openSUSE: `sudo zypper install ./linux-onedrive-gui-*.rpm`) |
 | Anything else (Arch, Manjaro, older distros, no admin rights) | `Linux_OneDrive_GUI-…-x86_64.AppImage` | Right-click → Properties → allow executing, then double-click. In the app, *App settings → Add to my applications menu*. |
+
+Those are for ordinary PCs. For ARM computers (Raspberry Pi 4/5, ARM laptops) pick the same kind of file
+ending in `arm64` / `aarch64` instead.
+
+Installing the .deb or .rpm fetches everything else it needs automatically, and the AppImage has it built
+in, so there's nothing else to install.
 
 Then open **Linux OneDrive GUI** from your applications menu and follow the steps.
 

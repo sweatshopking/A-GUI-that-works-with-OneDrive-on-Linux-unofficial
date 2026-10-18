@@ -4,6 +4,8 @@
 #   packaging/build.sh deb-appimage   on Ubuntu 22.04  -> dist/*.deb, dist/*.AppImage
 #   packaging/build.sh rpm            on Fedora 41     -> dist/*.rpm
 #
+# Packages are built for the machine it runs on: x86_64 (amd64) or aarch64 (arm64).
+#
 # packaging/build-in-containers.sh runs both with podman or docker; the GitHub workflow uses
 # the same targets. Every package bundles its own copy of the OneDrive Client for Linux
 # (abraunegg/onedrive, GPL-3.0), built from the tagged release source below.
@@ -22,6 +24,12 @@ DIST="$ROOT/dist"
 VERSION="$(sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/Cargo.toml" | head -1)"
 TARGET="${CARGO_TARGET_DIR:-$ROOT/target}"
 BIN="$TARGET/release/$APP"
+ARCH="$(uname -m)" # x86_64 or aarch64: the names LDC, linuxdeploy, AppImage and rpm use
+case "$ARCH" in
+    x86_64) DEB_ARCH=amd64 ;;
+    aarch64) DEB_ARCH=arm64 ;;
+    *) echo "error: unsupported architecture $ARCH" >&2; exit 1 ;;
+esac
 mkdir -p "$WORK" "$DIST"
 
 log() { printf '\n==> %s\n' "$*"; }
@@ -58,10 +66,10 @@ install_rust() {
 }
 
 install_ldc() {
-    local dir="$WORK/ldc2-$LDC_VERSION-linux-x86_64"
+    local dir="$WORK/ldc2-$LDC_VERSION-linux-$ARCH"
     if [ ! -x "$dir/bin/ldmd2" ]; then
         log "Installing LDC $LDC_VERSION"
-        curl -fsSL "https://github.com/ldc-developers/ldc/releases/download/v$LDC_VERSION/ldc2-$LDC_VERSION-linux-x86_64.tar.xz" | tar -xJ -C "$WORK"
+        curl -fsSL "https://github.com/ldc-developers/ldc/releases/download/v$LDC_VERSION/ldc2-$LDC_VERSION-linux-$ARCH.tar.xz" | tar -xJ -C "$WORK"
     fi
     export PATH="$dir/bin:$PATH"
 }
@@ -114,7 +122,7 @@ build_deb() {
     stage_tree "$stage"
     mkdir -p "$stage/DEBIAN" "$WORK/debian"
     # dpkg-shlibdeps needs a debian/control to exist; it only reads the package name from it
-    printf 'Source: %s\n\nPackage: %s\nArchitecture: amd64\n' "$APP" "$APP" >"$WORK/debian/control"
+    printf 'Source: %s\n\nPackage: %s\nArchitecture: %s\n' "$APP" "$APP" "$DEB_ARCH" >"$WORK/debian/control"
     local linked
     linked="$(cd "$WORK" && dpkg-shlibdeps -O "$stage/usr/bin/$APP" "$stage/usr/lib/$APP/onedrive" 2>/dev/null | sed 's/^shlibs:Depends=//')"
     # libraries the window opens at runtime (dlopen), which shlibdeps can't see
@@ -124,7 +132,7 @@ Package: $APP
 Version: $VERSION
 Section: net
 Priority: optional
-Architecture: amd64
+Architecture: $DEB_ARCH
 Maintainer: sweatshopking <336541686+sweatshopking@users.noreply.github.com>
 Depends: $linked, $runtime
 Recommends: kdialog | zenity
@@ -134,8 +142,26 @@ Description: OneDrive and SharePoint sync with a tray icon and settings window
  which is bundled. Sign in, choose folders, set sync times, pause, see what
  synced and share links, without using the command line.
 EOF
-    dpkg-deb --root-owner-group --build "$stage" "$DIST/${APP}_${VERSION}_amd64.deb" >/dev/null
-    dpkg-deb --info "$DIST/${APP}_${VERSION}_amd64.deb" | sed -n '/Depends/p'
+    dpkg-deb --root-owner-group --build "$stage" "$DIST/${APP}_${VERSION}_${DEB_ARCH}.deb" >/dev/null
+    dpkg-deb --info "$DIST/${APP}_${VERSION}_${DEB_ARCH}.deb" | sed -n '/Depends/p'
+}
+
+# Lists the distribution packages (and exact versions) that the libraries copied into an AppImage
+# came from, so anyone can get the matching source, as their (L)GPL licenses ask.
+bundled_sources() {
+    local appdir="$1" lib pkg distro
+    # read only the name: sourcing os-release would overwrite our own VERSION
+    distro="$(. /etc/os-release && echo "$PRETTY_NAME")"
+    echo "Libraries copied unmodified from $distro into this AppImage."
+    echo "Their copyright and license files are in usr/share/doc/<package>/ inside the AppImage."
+    echo "Source for each is available from https://launchpad.net/ubuntu/+source/<source>/<version>"
+    echo "or with: apt-get source <source>=<version>"
+    echo
+    echo "source version"
+    for lib in "$appdir"/usr/lib/*.so*; do
+        pkg="$(dpkg -S "*/$(basename "$lib")" 2>/dev/null | head -1 | cut -d: -f1)" || true
+        [ -n "$pkg" ] && dpkg-query -W -f='${source:Package} ${source:Version}\n' "$pkg"  || true
+    done | sort -u
 }
 
 build_appimage() {
@@ -147,24 +173,27 @@ build_appimage() {
     install -Dm644 "$ROOT/packaging/$APPSTREAM_ID.metainfo.xml" "$appdir/usr/share/metainfo/$APPSTREAM_ID.metainfo.xml"
     install -Dm644 "$ROOT/LICENSE" "$appdir/usr/share/licenses/$APP/LICENSE"
     install -Dm644 "$WORK/onedrive/LICENSE" "$appdir/usr/share/licenses/$APP/onedrive-LICENSE"
-    local ld="$WORK/linuxdeploy-x86_64.AppImage"
+    install -Dm644 "$ROOT/packaging/THIRD-PARTY.md" "$appdir/usr/share/doc/$APP/THIRD-PARTY.md"
+    local ld="$WORK/linuxdeploy-$ARCH.AppImage"
     [ -x "$ld" ] || {
-        curl -fsSL -o "$ld" "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_TAG/linuxdeploy-x86_64.AppImage"
+        curl -fsSL -o "$ld" "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_TAG/linuxdeploy-$ARCH.AppImage"
         chmod +x "$ld"
     }
     # containers have no FUSE, so let the tool unpack itself
     export APPIMAGE_EXTRACT_AND_RUN=1
     (
         cd "$WORK"
-        LDAI_OUTPUT="$DIST/Linux_OneDrive_GUI-${VERSION}-x86_64.AppImage" \
+        LDAI_OUTPUT="$DIST/Linux_OneDrive_GUI-${VERSION}-${ARCH}.AppImage" \
             "$ld" --appdir "$appdir" \
             --executable "$BIN" \
             --executable "$WORK/onedrive/onedrive" \
             --desktop-file "$ROOT/packaging/$APP.desktop" \
-            --icon-file "$ROOT/assets/$APP.svg" \
-            --output appimage >"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
+            --icon-file "$ROOT/assets/$APP.svg" >"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
+        bundled_sources "$appdir" >"$appdir/usr/share/licenses/$APP/BUNDLED-LIBRARIES.txt"
+        LDAI_OUTPUT="$DIST/Linux_OneDrive_GUI-${VERSION}-${ARCH}.AppImage" \
+            "$ld" --appdir "$appdir" --output appimage >>"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
     )
-    ls -la "$DIST"/*.AppImage
+    ls -la "$DIST"/*-"$ARCH".AppImage
 }
 
 build_rpm() {
@@ -179,8 +208,8 @@ build_rpm() {
         --define "_topdir $top" \
         --define "stage $stage" \
         "$top/SPECS/$APP.spec"
-    cp "$top"/RPMS/x86_64/*.rpm "$DIST/"
-    rpm -qp --requires "$DIST"/*.rpm | grep -v '^rpmlib' | tr '\n' ' '
+    cp "$top"/RPMS/"$ARCH"/*.rpm "$DIST/"
+    rpm -qp --requires "$DIST"/*."$ARCH".rpm | grep -v '^rpmlib' | tr '\n' ' '
     echo
 }
 

@@ -1633,16 +1633,23 @@ fn business_accounts(c: &Ctx) -> Vec<AccountInfo> {
         .collect()
 }
 
-fn default_folder(name: &str, sharepoint: bool) -> String {
-    let base = core::home();
-    let p = if sharepoint {
-        base.join("SharePoint").join(name)
-    } else if !base.join("OneDrive").exists() {
-        base.join("OneDrive")
+/// Suggests a folder in the home folder that doesn't exist yet, so nothing already there gets
+/// uploaded by accident: ~/OneDrive, then "~/OneDrive - Work", then numbered copies.
+fn default_folder(home: &Path, name: &str, sharepoint: bool) -> PathBuf {
+    let (dir, first) = if sharepoint {
+        (home.join("SharePoint"), name.to_string())
+    } else if name.is_empty() || name.eq_ignore_ascii_case("onedrive") {
+        (home.to_path_buf(), "OneDrive".to_string())
+    } else if !home.join("OneDrive").exists() {
+        return home.join("OneDrive");
     } else {
-        base.join(format!("OneDrive - {name}"))
+        (home.to_path_buf(), format!("OneDrive - {name}"))
     };
-    p.to_string_lossy().to_string()
+    std::iter::once(first.clone())
+        .chain((2..).map(|n| format!("{first} ({n})")))
+        .map(|f| dir.join(f))
+        .find(|p| !p.exists())
+        .unwrap()
 }
 
 fn add_choose(ctx: &Shared, mode: i32) {
@@ -1654,7 +1661,9 @@ fn add_choose(ctx: &Shared, mode: i32) {
             let first = ctx.borrow().accounts.is_empty();
             let name = if first { "OneDrive" } else { "Work" };
             ui.set_add_name(ss(name));
-            ui.set_add_folder(ss(default_folder(name, false)));
+            ui.set_add_folder(ss(
+                default_folder(&core::home(), name, false).to_string_lossy()
+            ));
         }
         2 => {
             ui.set_add_name(ss(""));
@@ -1668,14 +1677,23 @@ fn add_choose(ctx: &Shared, mode: i32) {
 }
 
 fn add_browse(ctx: &Shared) {
-    let start = ctx.borrow().ui().get_add_folder().to_string();
-    let start = if start.is_empty() {
-        core::home().to_string_lossy().to_string()
-    } else {
-        start
-    };
+    // open the chooser at the suggested folder, or the nearest parent that exists yet
+    let typed = core::expand_tilde(ctx.borrow().ui().get_add_folder().trim());
+    let start = typed
+        .ancestors()
+        .find(|p| p.is_absolute() && p.is_dir())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(core::home)
+        .to_string_lossy()
+        .to_string();
     bg(
         move || {
+            // Err = no folder chooser at all, Ok(None) = the user cancelled
+            if let Some(picked) =
+                crate::dbus::choose_folder("Choose a folder to sync into", Path::new(&start))
+            {
+                return Ok(picked.map(|p| p.to_string_lossy().to_string()));
+            }
             let tries: [(&str, Vec<String>); 2] = [
                 (
                     "kdialog",
@@ -1696,18 +1714,19 @@ fn add_browse(ctx: &Shared) {
                 }
                 if let Ok(o) = Command::new(prog).args(&args).output() {
                     let p = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                    return if o.status.success() && !p.is_empty() {
-                        Some(p)
-                    } else {
-                        None
-                    };
+                    return Ok((o.status.success() && !p.is_empty()).then_some(p));
                 }
             }
-            None
+            Err(())
         },
         |ctx, picked| {
-            if let Some(p) = picked {
-                ctx.borrow().ui().set_add_folder(ss(p));
+            let ui = ctx.borrow().ui();
+            match picked {
+                Ok(Some(p)) => ui.set_add_folder(ss(p)),
+                Ok(None) => {}
+                Err(()) => ui.set_add_msg(ss(
+                    "No folder chooser is available on this desktop. Type the folder's full path instead.",
+                )),
             }
         },
     );
@@ -1786,7 +1805,9 @@ fn add_lib_picked(ctx: &Shared, i: usize) {
             format!("{} - {}", l.site, l.name)
         };
         ui.set_add_name(ss(&name));
-        ui.set_add_folder(ss(default_folder(&name, true)));
+        ui.set_add_folder(ss(
+            default_folder(&core::home(), &name, true).to_string_lossy()
+        ));
     }
 }
 
@@ -2068,7 +2089,7 @@ pub fn run(account: Option<String>) {
     if let Err(e) = slint::set_xdg_app_id(core::APP_ID) {
         eprintln!("couldn't set the application id: {e}");
     }
-    if let Some(dark) = crate::dbus::prefers_dark() {
+    if let Some(dark) = crate::dbus::prefers_dark(std::time::Duration::from_millis(1500)) {
         ui.set_dark(dark);
     }
     let rows = Rc::new(VecModel::<FolderRow>::default());
@@ -2344,6 +2365,25 @@ pub fn run(account: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn default_folders() {
+        let home = std::env::temp_dir().join(format!("lodg-home-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&home);
+        fs::create_dir_all(&home).unwrap();
+        let f = |name, sp| default_folder(&home, name, sp);
+        assert_eq!(f("OneDrive", false), home.join("OneDrive"));
+        assert_eq!(f("Work", false), home.join("OneDrive"));
+        fs::create_dir(home.join("OneDrive")).unwrap();
+        assert_eq!(f("OneDrive", false), home.join("OneDrive (2)"));
+        assert_eq!(f("Work", false), home.join("OneDrive - Work"));
+        fs::create_dir(home.join("OneDrive - Work")).unwrap();
+        assert_eq!(f("Work", false), home.join("OneDrive - Work (2)"));
+        assert_eq!(f("Team", true), home.join("SharePoint/Team"));
+        fs::create_dir_all(home.join("SharePoint/Team")).unwrap();
+        assert_eq!(f("Team", true), home.join("SharePoint/Team (2)"));
+        fs::remove_dir_all(&home).unwrap();
+    }
 
     #[test]
     fn summary_counts() {
