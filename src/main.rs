@@ -1,4 +1,4 @@
-//! Linux OneDrive GUI — a tray icon and settings window for the OneDrive Client for Linux.
+//! A GUI that works with OneDrive on Linux (unofficial) — a tray icon and settings window for the OneDrive Client for Linux.
 //!
 //!   linux-onedrive-gui              open the window (and start the tray icon if it isn't running)
 //!   linux-onedrive-gui --tray       tray icon only (used at login)

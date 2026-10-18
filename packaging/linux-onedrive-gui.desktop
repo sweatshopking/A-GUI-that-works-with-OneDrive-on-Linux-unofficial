@@ -1,6 +1,6 @@
 [Desktop Entry]
 Type=Application
-Name=Linux OneDrive GUI
+Name=A GUI that works with OneDrive on Linux (unofficial)
 GenericName=OneDrive Sync
 Comment=Sync OneDrive and SharePoint folders
 Exec=linux-onedrive-gui

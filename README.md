@@ -1,4 +1,6 @@
-# Entirely Unofficial Linux OneDrive GUI - not endorsed by Microsoft at all
+# A GUI that works with OneDrive on Linux (unofficial)
+
+**Entirely unofficial — not endorsed by Microsoft at all.**
 
 **Sync OneDrive and SharePoint on Linux, without the command line.**
 
@@ -54,7 +56,7 @@ ending in `arm64` / `aarch64` instead.
 Installing the .deb or .rpm fetches everything else it needs automatically, and the AppImage has it built
 in, so there's nothing else to install.
 
-Then open **Linux OneDrive GUI** from your applications menu and follow the steps.
+Then open **A GUI that works with OneDrive on Linux (unofficial)** from your applications menu and follow the steps.
 
 You don't need to install the `onedrive` package yourself — a tested copy is included.
 (Ubuntu's own `onedrive` package is very old and not supported by its author; this app doesn't use it.)

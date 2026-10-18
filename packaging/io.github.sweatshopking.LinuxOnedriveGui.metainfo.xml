@@ -3,7 +3,7 @@
   <id>io.github.sweatshopking.LinuxOnedriveGui</id>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later</project_license>
-  <name>Linux OneDrive GUI</name>
+  <name>A GUI that works with OneDrive on Linux (unofficial)</name>
   <summary>Sync OneDrive and SharePoint folders</summary>
   <description>
     <p>
