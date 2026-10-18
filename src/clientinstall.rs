@@ -208,7 +208,24 @@ impl Plan {
                  and offers to update it for you."
                 .to_string(),
         };
-        format!("{what}\n\nYour computer will ask for your password.")
+        let only = match self {
+            Plan::Package { .. } => {
+                "to install the OneDrive client and the few parts it needs to run"
+            }
+            Plan::AptSource { .. } => {
+                "to add the client's package source and install the OneDrive client and the few \
+                 parts it needs to run"
+            }
+            Plan::Aur => "to install the build tools and the OneDrive client",
+        };
+        format!(
+            "{what}\n\n\
+             Why your password? Installing software changes the whole computer, not just your \
+             account, so your computer checks that it's really you. You type it into your \
+             computer's own password window, not into this app. Your computer checks it once and \
+             then forgets it: it isn't saved, and this app never sees it or sends it anywhere. \
+             It's only used {only}. Nothing else is changed."
+        )
     }
 }
 
