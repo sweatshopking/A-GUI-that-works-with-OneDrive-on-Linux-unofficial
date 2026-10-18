@@ -7,8 +7,9 @@
   <summary>Sync OneDrive and SharePoint folders</summary>
   <description>
     <p>
-      A friendly front end for the OneDrive Client for Linux. Sign in with your Microsoft account,
-      pick which folders to keep on your computer, and keep them in sync in the background.
+      A friendly front end for the OneDrive Client for Linux (installed separately, version 2.5 or
+      newer). Sign in with your Microsoft account, pick which folders to keep on your computer, and
+      keep them in sync in the background.
     </p>
     <ul>
       <li>Personal, work or school OneDrive accounts and SharePoint libraries</li>
@@ -37,6 +38,7 @@
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.2.0" date="2026-10-18"/>
     <release version="0.1.3" date="2026-10-18"/>
     <release version="0.1.2" date="2026-10-18"/>
     <release version="0.1.1" date="2026-10-18"/>

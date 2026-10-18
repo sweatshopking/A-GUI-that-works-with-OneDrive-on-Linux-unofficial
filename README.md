@@ -2,13 +2,15 @@
 
 **Entirely unofficial — not endorsed by Microsoft at all.**
 
-**Sync OneDrive and SharePoint on Linux, without the command line.**
+**Sync OneDrive and SharePoint on Linux without the command line.** A settings window and tray icon for
+the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg, which does
+the actual syncing. Install the client and this app, sign in, pick your folders, done.
 
-A tray icon and settings window for the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive)
-by abraunegg, which does the actual syncing and is installed separately so it keeps getting updates
-from its author. Install both, sign in, pick your folders, done. I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code
-is safe, does what it says, or won't harm your PC in some way. It's vibe coded and you are welcome and encouraged to review the source code prior to installing. 
-Again, to be clear, this app is not endorsed by Microsoft and I'm not affiliated with Microsoft in anyway. Since it's just a rust GUI for the existing onedrive sync client, syncing issues should go to the original app, which is linked above. 
+I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code is safe,
+does what it says, or won't harm your PC in some way. It's vibe coded and you are welcome and encouraged
+to review the source code prior to installing. Again, to be clear, this app is not endorsed by Microsoft
+and I'm not affiliated with Microsoft in any way. Since it's just a Rust GUI for the existing OneDrive
+sync client, syncing issues should go to the original app, which is linked above.
 
 ![Status page](docs/screenshots/status-light.png)
 
@@ -19,85 +21,102 @@ Again, to be clear, this app is not endorsed by Microsoft and I'm not affiliated
   </tr>
 </table>
 
-## Features
+## What it does
 
-- **Personal, work/school and SharePoint** — add as many accounts and document libraries as you like.
-  For SharePoint, paste the site or library address from your browser, or pick from the sites your work
-  account belongs to. Only sites that account can already open ever appear.
-- **Sign in and out from the app** — your browser opens, you log in, and the app picks it up by itself.
-- **Pick folders** — browse everything in your OneDrive, including folders that aren't on this computer yet,
-  and tick the ones you want.
-- **Safe changes** — anything that needs the sync engine to rebuild its view (a "full resync") first runs a
-  dry run and shows exactly what would be downloaded, uploaded or deleted. Nothing changes until you press
-  Apply. You can switch full resyncs off per account.
-- **Tray icon** — live status for every account, recent files, *Sync now*, *Pause for 1 hour / 4 hours /
-  until tomorrow*, and notifications when something needs attention.
-- **Sync schedules** — e.g. only sync overnight between 23:00 and 07:00, plus a speed limit.
-- **Activity view** — what was uploaded, downloaded or deleted, with *Show in folder*.
-- **File manager integration (Dolphin)** — right-click a synced file for *Copy sharing link* or
-  *View on the OneDrive website*.
-- **Follows your desktop** — light and dark mode, your file manager, your browser.
-- Works alongside an existing setup: accounts you already configured for the OneDrive client
-  (including `onedrive-*.service` units) show up automatically.
+- **Personal, work/school and SharePoint.** Add as many accounts and document libraries as you like. For
+  SharePoint, paste the site or library address from your browser, or pick from the sites your work
+  account belongs to (only sites that account can already open ever appear).
+- **Signing in and out.** Your browser opens, you log in, and the app picks it up by itself. If Microsoft
+  stops accepting a saved sign-in (after a password change, say), the app says so and lets you sign in again.
+- **Choosing folders.** Browse everything in your OneDrive, including folders that aren't on this computer
+  yet, and tick the ones you want. Rules you've written into `sync_list` yourself are kept.
+- **Safe changes.** Anything that makes the client rebuild its view (a "full resync") first runs a dry run
+  showing exactly what would be downloaded, uploaded or deleted. Nothing changes until you press Apply,
+  and you can switch full resyncs off per account.
+- **Tray icon.** Live status for every account, recent files, *Sync now*, *Pause for 1 hour / 4 hours /
+  until tomorrow*, and a notification when something needs your attention (an error, a resync, signing in again).
+- **Sync schedules** (for example only overnight, 23:00 to 07:00) and a **speed limit**.
+- **Activity view** of what was uploaded, downloaded or deleted, with *Show in folder*.
+- **Dolphin right-click actions**: *Copy sharing link* and *View on the OneDrive website*.
+- **Fits your desktop**: light and dark mode, your file manager and your browser.
+- **Plays well with an existing setup.** Accounts you already set up for the OneDrive client (including
+  `onedrive*.service` units) show up automatically, and everything the app sets up keeps working from the
+  command line.
+- **Updates itself in place.** After you install a new version, the tray and an open window switch to it
+  on their own.
 
 ## Install
 
-### 1. The OneDrive Client for Linux (version 2.5 or newer)
+### 1. The OneDrive Client for Linux, version 2.5 or newer
 
-This does the syncing. If it isn't installed, or is too old, the app tells you and links here.
+It does the syncing and is installed on its own, so it keeps getting updates from its author. If it's
+missing or too old, the app tells you and links to these instructions.
 
-| Your system | How to install it |
+| Your system | How to install the client |
 |---|---|
-| Fedora | `sudo dnf install onedrive` (the app's .rpm also pulls it in automatically) |
-| openSUSE | `sudo zypper install onedrive` (the app's .rpm also pulls it in automatically) |
-| Ubuntu, Linux Mint, Debian, Pop!_OS, Zorin | The built-in `onedrive` package is too old. Follow the [official instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) to add the client's own package repository, then install `onedrive` from it. |
-| Arch, Manjaro, EndeavourOS | Install `onedrive-abraunegg` from the AUR. |
-| Anything else | See the [official installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md). |
-
-On Fedora and openSUSE the app can also install it for you with one click.
+| Fedora | `sudo dnf install onedrive` — or let the app do it: its .rpm pulls it in, and the app has an *Install it for me* button |
+| openSUSE Tumbleweed | `sudo zypper install onedrive` — or the app's *Install it for me* button |
+| Ubuntu, Linux Mint, Debian, Pop!_OS, Zorin, Raspberry Pi OS | **Don't** use the built-in `onedrive` package; it's too old. Follow the client's [Ubuntu / Debian installation guide](https://github.com/abraunegg/onedrive/blob/master/docs/ubuntu-package-install.md) to install it from the client's own package repository. |
+| Arch, Manjaro, EndeavourOS | `onedrive-abraunegg` from the AUR |
+| Anything else | The client's [installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) |
 
 ### 2. This app
 
-Download from the [latest release](https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/releases/latest):
+Download it from the [latest release](https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/releases/latest):
 
-| Your system | Download | How to install |
+| Your system | File | How to install |
 |---|---|---|
 | Ubuntu 22.04+, Linux Mint 21+, Debian 12+, Pop!_OS, Zorin | `linux-onedrive-gui_…_amd64.deb` | Double-click it, or `sudo apt install ./linux-onedrive-gui_*.deb` |
-| Fedora 41+, openSUSE Tumbleweed / Leap 16 | `linux-onedrive-gui-….x86_64.rpm` | Double-click it, or `sudo dnf install ./linux-onedrive-gui-*.rpm` (openSUSE: `sudo zypper install ./linux-onedrive-gui-*.rpm`) |
-| Anything else (Arch, Manjaro, older distros, no admin rights) | `A_GUI_that_works_with_OneDrive_on_Linux-unofficial-…-x86_64.AppImage` | Right-click → Properties → allow executing, then double-click. In the app, *App settings → Add to my applications menu*. |
+| Fedora 41+, openSUSE | `linux-onedrive-gui-….x86_64.rpm` | Double-click it, or `sudo dnf install ./linux-onedrive-gui-*.rpm` (openSUSE: `sudo zypper install ./linux-onedrive-gui-*.rpm`) |
+| Anything else, or no admin rights | `A_GUI_that_works_with_OneDrive_on_Linux-unofficial-…-x86_64.AppImage` | Right-click → Properties → allow executing, then double-click it. In the app, *App settings → Add to my applications menu*. |
 
 Those are for ordinary PCs. For ARM computers (Raspberry Pi 4/5, ARM laptops) pick the same kind of file
-ending in `arm64` / `aarch64` instead.
+ending in `arm64` / `aarch64`.
 
-Installing the .deb or .rpm fetches everything else the app needs automatically, and the AppImage has it
-built in.
-
-Then open **A GUI that works with OneDrive on Linux (unofficial)** from your applications menu and follow the steps.
-
+Then open **A GUI that works with OneDrive on Linux (unofficial)** from your applications menu and follow
+the steps. To update, install the newer file the same way.
 
 ### Requirements
 
 - 64-bit Linux with systemd (almost every desktop distribution)
-- The [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) 2.5 or newer (see step 1)
-- A system tray for the tray icon: built into KDE Plasma, Cinnamon, XFCE, MATE and Budgie.
-  On GNOME, install the *AppIndicator and KStatusNotifierItem Support* extension (Ubuntu has it already).
-
-## How it works
-
-Each account is a configuration folder for the OneDrive client (`~/.config/onedrive`, `~/.config/onedrive-work`, …)
-and a systemd user service that keeps it syncing in the background — even after a restart and when the app
-is closed. The app writes the client's normal config files, so you can switch to the command line at any
-time and everything still works.
-
-- Status comes from the service's log; controls go through `systemctl --user`.
-- Browsing online folders, finding SharePoint libraries, storage use and sharing links use Microsoft Graph
-  with the client's saved sign-in (read-only; the client's own sign-in file is never modified).
-- Settings that are the app's own (names, schedules, pauses) live in `~/.config/linux-onedrive-gui/settings.json`.
+- The OneDrive Client for Linux 2.5 or newer (step 1)
+- For the tray icon, a system tray: built into KDE Plasma, Cinnamon, XFCE, MATE and Budgie. On GNOME, add
+  the *AppIndicator and KStatusNotifierItem Support* extension (Ubuntu has it already). Without one,
+  syncing, schedules and pauses still work; you just don't see the icon.
 
 ## Uninstalling
 
-Remove each account in the app first if you want its background service gone (your files are kept), then
-uninstall the package — or delete the AppImage.
+Use **App settings → Uninstall…**. It asks what should happen to your OneDrive setup:
+
+- **Keep my OneDrive setup** — only the app goes. Your accounts keep syncing in the background with the
+  OneDrive Client for Linux, and you can keep using it from the command line.
+- **Remove everything** — also stops all background syncing, signs out and deletes every OneDrive sync
+  configuration on this computer.
+
+Your synced files stay on the computer either way. Then it removes the app itself (for a .deb or .rpm it
+asks for your password). Uninstalling with your package manager instead is the same as *Keep my OneDrive
+setup*.
+
+## Where to report problems
+
+- Problems with **syncing itself** (files not syncing, errors from the client): the
+  [OneDrive Client for Linux](https://github.com/abraunegg/onedrive/issues).
+- Problems with **this app** (a button that doesn't work, something confusing, ideas):
+  [this project's issues](https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/issues).
+
+## How it works
+
+Each account is a configuration folder for the OneDrive client (`~/.config/onedrive`,
+`~/.config/onedrive-work`, …) and a systemd user service that runs `onedrive --monitor` for it, so it keeps
+syncing in the background, after a restart, and when the app is closed. The app only writes the client's
+normal configuration files.
+
+- Status and activity come from each service's log; controls go through `systemctl --user`.
+- Browsing online folders, finding SharePoint libraries, storage use and sharing links use Microsoft Graph
+  with the client's saved sign-in, which the app only reads.
+- The app's own settings (names, schedules, pauses) live in `~/.config/linux-onedrive-gui/settings.json`.
+- Every week, an automated check makes sure the newest client release still has everything this app
+  relies on ([`packaging/check-client-compat.sh`](packaging/check-client-compat.sh)), and opens an issue if not.
 
 ## Building from source
 
@@ -109,29 +128,22 @@ cargo build --release
 ./target/release/linux-onedrive-gui
 ```
 
-During development it uses the `onedrive` client from your `PATH`.
-
-To build the release packages exactly like the GitHub workflow does (needs podman or docker):
+To build the release packages the way the GitHub workflow does (needs podman or docker):
 
 ```sh
-packaging/build-in-containers.sh        # .deb + AppImage on Ubuntu 22.04, .rpm on Fedora 41
+packaging/build-in-containers.sh   # .deb + AppImage on Ubuntu 22.04, .rpm on Fedora 41
 ```
 
-### Tests
-
-```sh
-cargo test
-```
-
-The window can also be driven by a script for end-to-end testing — see `src/testdrive.rs`
-(build with `--features test-driver`).
+Tests: `cargo test`. The window can also be driven by a script for end-to-end tests (see
+`src/testdrive.rs`, built with `--features test-driver`), and `packaging/smoke-test.sh` installs a built
+package on a fresh system and checks that it opens.
 
 ## License and credits
 
-GPL-3.0-or-later — see [LICENSE](LICENSE).
+GPL-3.0-or-later; see [LICENSE](LICENSE).
 
 - Syncing is done by the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg
-  (GPL-3.0), which you install separately. This app only runs it. See
+  (GPL-3.0), which you install separately; this app runs it. See
   [packaging/THIRD-PARTY.md](packaging/THIRD-PARTY.md).
 - The interface uses [Slint](https://slint.dev) (under its GPL-3.0 license) and
   [ksni](https://github.com/iovxw/ksni) for the tray icon.
