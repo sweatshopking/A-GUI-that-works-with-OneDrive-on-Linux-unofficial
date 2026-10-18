@@ -161,7 +161,7 @@ impl Tray {
             }
             .into(),
         );
-        let can_sync = a.info.signed_in && !a.resyncing;
+        let can_sync = a.info.signed_in && !a.resyncing && self.client_problem.is_none();
         items.push(
             StandardItem {
                 label: "Sync now".into(),
@@ -579,8 +579,9 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
                 })
                 .unwrap_or(false);
             if fixed {
-                // the client was just installed: point the units at it
+                // the client was just installed: point the units at it and get them going
                 core::repair_managed_units();
+                core::start_idle_units(&AppSettings::load());
             }
         }
         round = round.wrapping_add(1);
@@ -716,6 +717,7 @@ fn restart_into_new_version() {
 pub fn run() {
     crate::ui::recover_interrupted_preview();
     core::repair_managed_units();
+    core::start_idle_units(&AppSettings::load());
     // At login we can start before the panel is ready, and on GNOME there may be no tray at
     // all. Keep running either way: the icon appears whenever a tray shows up, and schedules
     // and pauses are enforced meanwhile.

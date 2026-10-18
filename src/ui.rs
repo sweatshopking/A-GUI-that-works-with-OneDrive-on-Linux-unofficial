@@ -476,9 +476,8 @@ fn save_options(ctx: &Shared) {
         ui.get_o_from().trim().to_string(),
         ui.get_o_to().trim().to_string(),
     );
-    if sched_on
-        && (core::parse_hhmm(&from).is_none() || core::parse_hhmm(&to).is_none() || from == to)
-    {
+    let (a, b) = (core::parse_hhmm(&from), core::parse_hhmm(&to));
+    if sched_on && (a.is_none() || b.is_none() || a == b) {
         ui.set_o_msg(ss(
             "Schedule times must be two different 24-hour times like 23:00 and 07:00.",
         ));
@@ -757,12 +756,19 @@ fn folder_changes(c: &Ctx, ui: &AppWindow) -> Option<(Vec<String>, Option<bool>)
     if !sync_all && t.selected.is_empty() {
         return None;
     }
-    let mut lines: Vec<String> = if sync_all {
-        Vec::new()
-    } else {
-        t.selected.iter().cloned().collect()
-    };
-    lines.extend(t.extra_rules.iter().cloned());
+    // "Everything" means no sync_list at all: the client excludes everything a sync_list doesn't
+    // include, so the user's own rules can't stay on their own (they're saved aside instead).
+    if sync_all {
+        return Some((Vec::new(), root_changed.then_some(root_files)));
+    }
+    // the client wants exclusions before inclusions
+    let (exclusions, other): (Vec<&String>, Vec<&String>) = t
+        .extra_rules
+        .iter()
+        .partition(|r| r.starts_with('!') || r.starts_with('-'));
+    let mut lines: Vec<String> = exclusions.into_iter().cloned().collect();
+    lines.extend(t.selected.iter().cloned());
+    lines.extend(other.into_iter().cloned());
     Some((lines, root_changed.then_some(root_files)))
 }
 
@@ -1260,7 +1266,10 @@ fn preview_apply(ctx: &Shared) {
             "--collect",
             "--quiet",
             &format!("--unit={job}"),
-            &format!("--description=OneDrive full resync ({})", acc.name),
+            &format!(
+                "--description=OneDrive full resync ({})",
+                core::unit_text(&acc.name)
+            ),
             "/bin/sh",
             "-c",
             &script,
@@ -1941,10 +1950,8 @@ fn add_create(ctx: &Shared) {
         return;
     }
     let folder = core::expand_tilde(&folder);
-    if !folder.is_absolute() {
-        ui.set_add_msg(ss(
-            "The local folder must be a full path, like /home/you/OneDrive.",
-        ));
+    if let Some(why) = core::unsuitable_sync_folder(&folder) {
+        ui.set_add_msg(ss(why));
         return;
     }
     let c = ctx.borrow();
@@ -2156,7 +2163,14 @@ fn add_to_menu(ctx: &Shared) {
 /// Looks for the OneDrive Client for Linux and shows the banner while it's missing or too old.
 fn check_client() {
     bg(core::check_client, |ctx, check| {
-        show_client_check(ctx, &check)
+        let was_missing = !ctx.borrow().ui().get_client_problem().is_empty();
+        show_client_check(ctx, &check);
+        if was_missing && check.is_ok() {
+            // installed by hand while the window was open ("Check again")
+            core::repair_managed_units();
+            core::start_idle_units(&AppSettings::load());
+            refresh(ctx);
+        }
     });
 }
 
@@ -2226,6 +2240,7 @@ fn install_client(ctx: &Shared) {
             show_client_check(ctx, &check);
             if check.is_ok() {
                 core::repair_managed_units();
+                core::start_idle_units(&AppSettings::load());
                 refresh(ctx);
             }
         },
@@ -2348,6 +2363,7 @@ pub fn run(account: Option<String>) {
     }
     recover_interrupted_preview();
     core::repair_managed_units();
+    core::start_idle_units(&AppSettings::load());
     let ui = AppWindow::new().expect("couldn't create the window");
     // Matches the .desktop file name, so desktops show our icon and group the window correctly.
     // Slint only accepts this once its backend exists (after AppWindow::new) and before the
@@ -2440,6 +2456,11 @@ pub fn run(account: Option<String>) {
     });
     on!(on_sync_now, |c| {
         let Some(acc) = current(c) else { return };
+        if let Some(why) = client_blocker() {
+            c.borrow().ui().set_s_msg(ss(why));
+            check_client();
+            return;
+        }
         let mut s = AppSettings::load();
         s.prefs_mut(&acc.confdir).override_until = Local::now().timestamp() + 3600;
         let _ = s.save();

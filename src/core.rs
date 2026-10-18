@@ -310,10 +310,22 @@ impl AppSettings {
         app_dir().join("settings.json")
     }
     pub fn load() -> Self {
-        fs::read_to_string(Self::path())
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default()
+        let Ok(text) = fs::read_to_string(Self::path()) else {
+            return Self::default();
+        };
+        serde_json::from_str(&text).unwrap_or_else(|e| {
+            // keep a damaged file rather than overwrite it with defaults on the next save
+            let aside = Self::path().with_extension("json.damaged");
+            if !aside.exists() {
+                let _ = fs::copy(Self::path(), &aside);
+                eprintln!(
+                    "{} couldn't be read ({e}); a copy was kept as {}",
+                    Self::path().display(),
+                    aside.display()
+                );
+            }
+            Self::default()
+        })
     }
     pub fn save(&self) -> std::io::Result<()> {
         create_private_dir(&app_dir())?;
@@ -454,6 +466,15 @@ pub fn write_sync_list(confdir: &Path, entries: &[String]) -> std::io::Result<()
     let p = confdir.join("sync_list");
     if entries.is_empty() {
         if p.exists() {
+            // keep any rules the user wrote by hand, which syncing everything can't honour
+            let own_rules = fs::read_to_string(&p)
+                .unwrap_or_default()
+                .lines()
+                .map(str::trim)
+                .any(|l| !l.is_empty() && !l.starts_with('#') && sync_list_folder(l).is_none());
+            if own_rules {
+                fs::copy(&p, confdir.join("sync_list.saved"))?;
+            }
             fs::remove_file(p)?;
         }
         return Ok(());
@@ -608,7 +629,7 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
     fs::create_dir_all(user_unit_dir())?;
     let body = format!(
         "[Unit]\n\
-         Description=OneDrive sync ({name})\n\
+         Description=OneDrive sync ({})\n\
          Documentation=https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
@@ -624,6 +645,7 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
          \n\
          [Install]\n\
          WantedBy=default.target\n",
+        unit_text(name),
         condition_line(&client),
         systemd_quote(&client.to_string_lossy()),
         systemd_quote(&confdir.to_string_lossy()),
@@ -631,6 +653,76 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
     atomic_write(&user_unit_dir().join(unit), body.as_bytes())?;
     systemctl(&["daemon-reload"]);
     Ok(())
+}
+
+/// Starts the enabled sync units that aren't running, e.g. ones skipped while the client was
+/// missing. Pauses and schedules are applied by the tray right after, as usual.
+pub fn start_idle_units(settings: &AppSettings) {
+    for acc in discover(settings) {
+        let Some(u) = &acc.unit else { continue };
+        let st = unit_state(u);
+        if st.enabled && !st.active && acc.signed_in && settings.prefs(&acc.confdir).sync_allowed()
+        {
+            systemctl(&["start", u]);
+        }
+    }
+}
+
+/// Text that is safe in a unit file setting: one line, and `%` (systemd's specifier marker) escaped.
+pub fn unit_text(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .replace('%', "%%")
+}
+
+/// Why `folder` can't be used as an account's sync folder, if it can't.
+pub fn unsuitable_sync_folder(folder: &Path) -> Option<String> {
+    let shown = folder.display();
+    if !folder.is_absolute() {
+        return Some("The local folder must be a full path, like /home/you/OneDrive.".into());
+    }
+    let text = folder.to_string_lossy();
+    if text.contains('"') || text.chars().any(char::is_control) {
+        return Some(
+            "The sync engine can't use a folder whose name contains double quotes. Pick or rename a folder without them."
+                .into(),
+        );
+    }
+    let home = home();
+    if folder == home || home.starts_with(folder) {
+        let what = if folder == home {
+            "everything in your home folder"
+        } else {
+            "everything on this computer"
+        };
+        return Some(format!(
+            "Syncing {shown} would upload {what}. Pick or create a folder inside your home folder, like {}.",
+            home.join("OneDrive").display()
+        ));
+    }
+    for own in [config_home(), data_home()] {
+        if folder.starts_with(&own) || own.starts_with(folder) {
+            return Some(format!(
+                "{shown} holds your settings. Pick a different folder."
+            ));
+        }
+    }
+    let user_mounts = ["/run/media/", "/media/", "/mnt/"];
+    let system = [
+        "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/proc", "/root", "/run",
+        "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
+    ];
+    let under = |top: &str| folder == Path::new(top) || folder.starts_with(format!("{top}/"));
+    if !user_mounts.iter().any(|m| text.starts_with(m)) && system.iter().any(|t| under(t)) {
+        return Some(format!(
+            "{shown} is a system folder. Pick a folder in your home folder or on a drive of your own."
+        ));
+    }
+    if folder.is_file() {
+        return Some(format!("{shown} is a file, not a folder."));
+    }
+    None
 }
 
 /// Makes a unit skip quietly, instead of failing every few seconds, if the client is uninstalled.
@@ -797,7 +889,8 @@ fn description_name(text: &str) -> Option<String> {
         .lines()
         .find_map(|l| l.trim().strip_prefix("Description="))?;
     let (a, b) = (d.find('(')?, d.rfind(')')?);
-    (b > a + 1).then(|| d[a + 1..b].to_string())
+    // undo unit_text()'s escaping of systemd's % specifiers
+    (b > a + 1).then(|| d[a + 1..b].replace("%%", "%"))
 }
 
 /// Every account we can find: user units named onedrive*.service, plus config directories
@@ -1302,6 +1395,62 @@ mod tests {
         };
         assert!(day.allows(t("09:00")) && !day.allows(t("17:00")));
         assert!(Schedule::default().allows(t("12:00")));
+    }
+
+    #[test]
+    fn schedule_times() {
+        assert_eq!(parse_hhmm("7:00"), parse_hhmm("07:00"));
+        assert!(parse_hhmm(" 23:30 ").is_some());
+        for bad in ["24:00", "07:60", "7", "", "ab:cd", "-1:00"] {
+            assert!(parse_hhmm(bad).is_none(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn sync_folder_safety() {
+        let home = home();
+        let bad = |p: &Path| unsuitable_sync_folder(p).is_some();
+        assert!(bad(&home));
+        assert!(bad(Path::new("/")));
+        assert!(bad(home.parent().unwrap()));
+        assert!(bad(Path::new("/usr/share/x")));
+        assert!(bad(Path::new("/tmp")));
+        assert!(bad(&config_home().join("onedrive")));
+        assert!(bad(Path::new("relative/path")));
+        assert!(bad(&home.join("My \"Quoted\" Drive")));
+        assert!(!bad(&home.join("OneDrive")));
+        assert!(!bad(&home.join("Ünïcode & spaces #1")));
+        assert!(!bad(Path::new("/run/media/me/USB/OneDrive")));
+        assert!(!bad(Path::new("/mnt/data/OneDrive")));
+    }
+
+    #[test]
+    fn unit_text_is_safe() {
+        assert_eq!(unit_text("100% Work"), "100%% Work");
+        assert_eq!(
+            description_name(&format!(
+                "Description=OneDrive sync ({})\n",
+                unit_text("100% Work")
+            )),
+            Some("100% Work".into())
+        );
+        assert_eq!(unit_text("two\nlines"), "two lines");
+    }
+
+    #[test]
+    fn sync_everything_keeps_own_rules() {
+        let dir = std::env::temp_dir().join(format!("lodg-sl-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("sync_list"), "# mine\n!/Junk/*\n/Documents\n").unwrap();
+        write_sync_list(&dir, &[]).unwrap();
+        assert!(!dir.join("sync_list").exists());
+        assert!(
+            fs::read_to_string(dir.join("sync_list.saved"))
+                .unwrap()
+                .contains("!/Junk/*")
+        );
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

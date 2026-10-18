@@ -45,6 +45,10 @@ fn at(url: &str) -> String {
     url.to_string()
 }
 
+fn unreachable(e: ureq::Error) -> String {
+    format!("Couldn't reach Microsoft. Check your internet connection and try again. ({e})")
+}
+
 /// Reads a JSON reply, explaining replies that aren't JSON (an outage page, an empty "too many
 /// requests" answer) instead of passing on a parser error.
 fn read_reply(resp: &mut ureq::http::Response<ureq::Body>) -> Result<Value, String> {
@@ -93,7 +97,7 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
             ("redirect_uri", redirect.as_str()),
             ("scope", SCOPE),
         ])
-        .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
+        .map_err(unreachable)?;
     let v = read_reply(&mut resp)?;
     match v["access_token"].as_str() {
         Some(a) => Ok(Token {
@@ -113,7 +117,7 @@ fn get(tok: &Token, url: &str) -> Result<Value, String> {
         .get(at(url))
         .header("Authorization", &format!("Bearer {}", tok.access))
         .call()
-        .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
+        .map_err(unreachable)?;
     let status = resp.status().as_u16();
     let v = read_reply(&mut resp)?;
     if status >= 400 {
@@ -455,7 +459,7 @@ pub fn create_link(
             .post(at(&url))
             .header("Authorization", &format!("Bearer {}", tok.access))
             .send_json(serde_json::json!({ "type": "view", "scope": scope }))
-            .map_err(|e| format!("Couldn't reach Microsoft: {e}"))?;
+            .map_err(unreachable)?;
         let status = resp.status().as_u16();
         let v = read_reply(&mut resp)?;
         if status < 400
