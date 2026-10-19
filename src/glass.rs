@@ -149,7 +149,8 @@ unsafe fn attach(
     let compositor = globals
         .bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=4, ())
         .ok()?;
-    let id = unsafe { ObjectId::from_ptr(wl_surface::WlSurface::interface(), surface.cast()) }.ok()?;
+    let id =
+        unsafe { ObjectId::from_ptr(wl_surface::WlSurface::interface(), surface.cast()) }.ok()?;
     let surface = wl_surface::WlSurface::from_id(&conn, id).ok()?;
     let effect = manager.get_background_effect(&surface, &qh, ());
     let _ = queue.roundtrip(&mut State::default());
