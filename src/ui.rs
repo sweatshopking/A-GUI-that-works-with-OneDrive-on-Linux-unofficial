@@ -287,6 +287,15 @@ fn refresh(ctx: &Shared) {
     read_and_apply_snapshot();
 }
 
+/// The timer's regular refresh. Unlike a refresh after a change, it doesn't ask for the one
+/// being read to be read again: on a slow computer every read would be thrown away, and the
+/// window would stop updating.
+fn refresh_tick(ctx: &Shared) {
+    if !ctx.borrow().refreshing {
+        refresh(ctx);
+    }
+}
+
 fn read_and_apply_snapshot() {
     bg(take_snapshot, |ctx, snap| {
         if std::mem::take(&mut ctx.borrow_mut().refresh_again) {
@@ -319,17 +328,58 @@ static LOOK: Mutex<Look> = Mutex::new(Look {
 });
 static GLASS: AtomicBool = AtomicBool::new(false);
 static BLUR_SENT: AtomicBool = AtomicBool::new(false);
+/// the desktop has told us of a change since the window opened (see read_look)
+static APPEARANCE_CHANGED: AtomicBool = AtomicBool::new(false);
 
-/// Reads the desktop's settings, giving up after `wait` (the window is opening meanwhile).
-fn read_look(wait: Duration) -> Look {
-    let (tx, rx) = std::sync::mpsc::channel();
+/// Call before the window hides. On Wayland hiding destroys the window and showing makes a new
+/// one, so its blur is dropped now and asked for again once the new one exists.
+fn window_hiding() {
+    crate::glass::forget();
+    BLUR_SENT.store(false, Ordering::Relaxed);
+}
+
+/// Reads the desktop's settings, waiting at most `wait` (the window is opening meanwhile). An
+/// answer that comes later (the desktop's settings service can be slow to start) is applied
+/// to `ui` when it arrives.
+fn read_look(ui: &AppWindow, wait: Duration) -> Look {
+    // None while waiting; Some(None) once the wait is over and the answer should go to the window
+    let shared = Arc::new((Mutex::new(None::<Option<Look>>), std::sync::Condvar::new()));
+    let theirs = shared.clone();
+    let weak = ui.as_weak();
     std::thread::spawn(move || {
-        let _ = tx.send(Look {
+        let look = Look {
             appearance: crate::dbus::appearance(),
             blurs: crate::glass::desktop_blurs(),
-        });
+        };
+        let (slot, ready) = &*theirs;
+        let mut slot = slot.lock().unwrap();
+        if slot.is_some() {
+            drop(slot);
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    // a change the desktop reported meanwhile is newer than this answer
+                    let look = if APPEARANCE_CHANGED.load(Ordering::Relaxed) {
+                        Look {
+                            blurs: look.blurs,
+                            ..*LOOK.lock().unwrap()
+                        }
+                    } else {
+                        look
+                    };
+                    apply_look(&ui, AppSettings::load().glass, look);
+                }
+            });
+        } else {
+            *slot = Some(Some(look));
+            ready.notify_one();
+        }
     });
-    rx.recv_timeout(wait).unwrap_or_default()
+    let (slot, ready) = &*shared;
+    let (mut slot, _) = ready
+        .wait_timeout_while(slot.lock().unwrap(), wait, |s| s.is_none())
+        .unwrap();
+    // takes the answer, or marks the wait over so a late one goes to the window
+    slot.replace(None).flatten().unwrap_or_default()
 }
 
 /// Whether the window is see-through: as set, or by default wherever the desktop blurs what's
@@ -1349,6 +1399,7 @@ fn finish_cancel(ctx: &Shared) {
     }
     refresh(ctx);
     if ctx.borrow().close_when_idle {
+        window_hiding();
         let _ = ctx.borrow().ui().hide();
     }
 }
@@ -2687,7 +2738,7 @@ pub fn run(account: Option<String>) {
         eprintln!("couldn't set the application id: {e}");
     }
     // the look follows the desktop, now and whenever it changes (dark at sunset, say)
-    let look = read_look(Duration::from_millis(1500));
+    let look = read_look(&ui, Duration::from_millis(1500));
     apply_look(&ui, AppSettings::load().glass, look);
     {
         let weak = ui.as_weak();
@@ -2695,6 +2746,7 @@ pub fn run(account: Option<String>) {
             let weak = weak.clone();
             let _ = slint::invoke_from_event_loop(move || {
                 if let Some(ui) = weak.upgrade() {
+                    APPEARANCE_CHANGED.store(true, Ordering::Relaxed);
                     let look = Look {
                         appearance,
                         ..*LOOK.lock().unwrap()
@@ -3020,6 +3072,7 @@ pub fn run(account: Option<String>) {
                 let _ = si.child.kill();
                 let _ = si.child.wait();
             }
+            window_hiding();
             slint::CloseRequestResponse::HideWindow
         });
     }
@@ -3067,7 +3120,7 @@ pub fn run(account: Option<String>) {
                 update_install_live(&w);
                 ticks += 1;
                 if ticks.is_multiple_of(8) {
-                    refresh(&w);
+                    refresh_tick(&w);
                     // installed some other way while the window is open
                     let ui = w.borrow().ui();
                     if !ui.get_client_problem().is_empty()

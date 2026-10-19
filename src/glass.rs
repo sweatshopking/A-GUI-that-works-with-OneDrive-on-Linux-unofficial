@@ -87,17 +87,25 @@ pub fn desktop_blurs() -> bool {
     }
 }
 
-/// The blur request for the open window, on the window's own Wayland connection.
+/// What the window's own Wayland connection offers for blur, set up once and kept for as long as
+/// the app runs: dropping its queue with objects still on it would leave them dangling.
+enum Blur {
+    /// the desktop has no ext-background-effect (KWin before 6.6, GNOME): winit's KWin blur only
+    Unavailable,
+    Ready(Box<WindowBlur>),
+}
+
 struct WindowBlur {
-    surface_ptr: usize,
     conn: Connection,
     queue: EventQueue<State>,
+    manager: ExtBackgroundEffectManagerV1,
     compositor: wl_compositor::WlCompositor,
-    effect: ExtBackgroundEffectSurfaceV1,
+    /// the blur request for the open window's surface, and that surface's address
+    effect: Option<(usize, ExtBackgroundEffectSurfaceV1)>,
 }
 
 thread_local! {
-    static WINDOW_BLUR: RefCell<Option<WindowBlur>> = const { RefCell::new(None) };
+    static WINDOW_BLUR: RefCell<Option<Blur>> = const { RefCell::new(None) };
 }
 
 /// Turns the blur behind `window` on or off. The change shows with the window's next frame.
@@ -113,52 +121,81 @@ pub fn set(window: &slint::winit_030::winit::window::Window, on: bool) {
     };
     let surface_ptr = w.surface.as_ptr() as usize;
     WINDOW_BLUR.with_borrow_mut(|slot| {
-        // the window's surface is new after it was hidden and shown again
-        if slot.as_ref().is_none_or(|b| b.surface_ptr != surface_ptr) {
-            // SAFETY: both pointers come from the live winit window and stay valid while it
-            // exists; the requests go out on a queue of our own, next to winit's
-            *slot = unsafe { attach(d.display.as_ptr(), w.surface.as_ptr(), surface_ptr) };
-        }
-        let Some(b) = slot.as_mut() else { return };
+        // SAFETY: the display pointer comes from the live winit window, and winit's display lives
+        // as long as the event loop; the requests go out on a queue of our own, next to winit's
+        let blur = slot.get_or_insert_with(|| unsafe { attach(d.display.as_ptr()) });
+        let Blur::Ready(b) = blur else { return };
         let qh = b.queue.handle();
+        if b.effect.as_ref().is_none_or(|(p, _)| *p != surface_ptr) {
+            if let Some((_, old)) = b.effect.take() {
+                old.destroy();
+            }
+            // SAFETY: the surface pointer comes from the live winit window
+            let Ok(id) = (unsafe {
+                ObjectId::from_ptr(
+                    wl_surface::WlSurface::interface(),
+                    w.surface.as_ptr().cast(),
+                )
+            }) else {
+                return;
+            };
+            let Ok(surface) = wl_surface::WlSurface::from_id(&b.conn, id) else {
+                return;
+            };
+            b.effect = Some((
+                surface_ptr,
+                b.manager.get_background_effect(&surface, &qh, ()),
+            ));
+        }
+        let Some((_, effect)) = &b.effect else { return };
         if on {
             let region = b.compositor.create_region(&qh, ());
             region.add(0, 0, i32::MAX, i32::MAX);
-            b.effect.set_blur_region(Some(&region));
+            effect.set_blur_region(Some(&region));
             region.destroy();
         } else {
-            b.effect.set_blur_region(None);
+            effect.set_blur_region(None);
         }
+        let _ = b.queue.dispatch_pending(&mut State::default());
         let _ = b.conn.flush();
     });
     window.request_redraw(); // the region applies with the surface's next commit
 }
 
-unsafe fn attach(
-    display: *mut std::ffi::c_void,
-    surface: *mut std::ffi::c_void,
-    surface_ptr: usize,
-) -> Option<WindowBlur> {
+/// Drops the blur request while the window still exists. Call it before the window is hidden:
+/// on Wayland hiding destroys the window, and a request left on a destroyed surface is an error
+/// the desktop answers by disconnecting the app (a new window can reuse the old one's address).
+pub fn forget() {
+    WINDOW_BLUR.with_borrow_mut(|slot| {
+        if let Some(Blur::Ready(b)) = slot
+            && let Some((_, effect)) = b.effect.take()
+        {
+            effect.destroy();
+            let _ = b.conn.flush();
+        }
+    });
+}
+
+unsafe fn attach(display: *mut std::ffi::c_void) -> Blur {
     let backend = unsafe { Backend::from_foreign_display(display.cast()) };
     let conn = Connection::from_backend(backend);
-    let (globals, mut queue) = registry_queue_init::<State>(&conn).ok()?;
+    let Ok((globals, queue)) = registry_queue_init::<State>(&conn) else {
+        return Blur::Unavailable;
+    };
     let qh = queue.handle();
-    let manager = globals
-        .bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ())
-        .ok()?;
-    let compositor = globals
-        .bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=4, ())
-        .ok()?;
-    let id =
-        unsafe { ObjectId::from_ptr(wl_surface::WlSurface::interface(), surface.cast()) }.ok()?;
-    let surface = wl_surface::WlSurface::from_id(&conn, id).ok()?;
-    let effect = manager.get_background_effect(&surface, &qh, ());
-    let _ = queue.roundtrip(&mut State::default());
-    Some(WindowBlur {
-        surface_ptr,
+    let (Ok(manager), Ok(compositor)) = (
+        globals.bind::<ExtBackgroundEffectManagerV1, _, _>(&qh, 1..=1, ()),
+        globals.bind::<wl_compositor::WlCompositor, _, _>(&qh, 1..=4, ()),
+    ) else {
+        // the queue stays alive with the registry on it (see Blur)
+        std::mem::forget(queue);
+        return Blur::Unavailable;
+    };
+    Blur::Ready(Box::new(WindowBlur {
         conn,
         queue,
+        manager,
         compositor,
-        effect,
-    })
+        effect: None,
+    }))
 }

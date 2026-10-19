@@ -9,6 +9,7 @@
 //!   dump <property>                print a property's value
 //!   selectname <text>              open the first account whose name contains text
 //!   demo                           fill the window with made-up accounts (run with LODG_DEMO=1)
+//!   key <name>                     press and release a key: tab, backtab, space, return, left, right, home, end
 //!   quit                           close the window
 //! Results go to stdout as `STEP …`, `DUMP …` and `FAIL …` lines.
 
@@ -31,6 +32,7 @@ enum Step {
     Dump(String),
     SelectName(String),
     Demo,
+    Key(String),
     Quit,
 }
 
@@ -59,6 +61,7 @@ fn parse(line: &str) -> Option<Step> {
         "dump" => Step::Dump(rest),
         "selectname" => Step::SelectName(rest),
         "demo" => Step::Demo,
+        "key" => Step::Key(rest),
         "quit" => Step::Quit,
         _ => {
             println!("FAIL unknown step: {line}");
@@ -387,6 +390,29 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                     next_at.set(Instant::now() + Duration::from_millis(300));
                 }
                 Step::Demo => fill_demo(&ui),
+                Step::Key(name) => {
+                    use slint::platform::{Key, WindowEvent};
+                    let key: Option<SharedString> = match name.as_str() {
+                        "tab" => Some(Key::Tab.into()),
+                        "backtab" => Some(Key::Backtab.into()),
+                        "space" => Some(Key::Space.into()),
+                        "return" => Some(Key::Return.into()),
+                        "left" => Some(Key::LeftArrow.into()),
+                        "right" => Some(Key::RightArrow.into()),
+                        "home" => Some(Key::Home.into()),
+                        "end" => Some(Key::End.into()),
+                        _ => None,
+                    };
+                    match key {
+                        Some(text) => {
+                            ui.window()
+                                .dispatch_event(WindowEvent::KeyPressed { text: text.clone() });
+                            ui.window()
+                                .dispatch_event(WindowEvent::KeyReleased { text });
+                        }
+                        None => println!("FAIL unknown key {name}"),
+                    }
+                }
                 Step::Quit => {
                     let _ = std::io::stdout().flush();
                     // close the window the way a user does, so its close handling runs

@@ -131,6 +131,23 @@ component NavRow inherits Rectangle {
             root.clicked();
         }
     }
+    // reachable with Tab and pressed with Space or Enter, like the buttons these replace
+    fs := FocusScope {
+        x: 0;
+        width: 0; // clicks go to the TouchArea
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    if fs.has-focus: Rectangle {
+        border-radius: root.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+    }
     HorizontalLayout {
         padding-left: 10px;
         spacing: 12px;
@@ -196,7 +213,33 @@ component Segmented inherits Rectangle {
         drop-shadow-blur: Theme.dark ? 0px : 4px;
         drop-shadow-offset-y: 1px;
         drop-shadow-color: #00000024;
+        border-width: fs.has-focus ? 2px : 0;
+        border-color: Theme.accent;
         animate x { duration: Theme.slide; easing: ease-out; }
+    }
+    // reachable with Tab; the arrow keys move between the tabs
+    fs := FocusScope {
+        x: 0;
+        width: 0; // clicks go to the tabs' TouchAreas
+        key-pressed(event) => {
+            if (event.text == Key.LeftArrow) {
+                root.current = max(0, root.current - 1);
+                return accept;
+            }
+            if (event.text == Key.RightArrow) {
+                root.current = min(root.labels.length - 1, root.current + 1);
+                return accept;
+            }
+            if (event.text == Key.Home) {
+                root.current = 0;
+                return accept;
+            }
+            if (event.text == Key.End) {
+                root.current = root.labels.length - 1;
+                return accept;
+            }
+            return reject;
+        }
     }
     for label[i] in root.labels: Rectangle {
         x: 3px + i * root.seg;
