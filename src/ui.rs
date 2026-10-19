@@ -1470,7 +1470,7 @@ fn poll_signin(ctx: &Shared) {
             .as_ref()
             .and_then(|f| fs::read_to_string(f).ok())
             .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty());
+            .filter(|s| s.starts_with("https://"));
         si.url = from_shim.or_else(|| {
             text.split_whitespace()
                 .find(|w| w.starts_with("https://login.") && w.contains("authorize"))
@@ -1547,10 +1547,7 @@ fn friendly_signin_error(detail: &str) -> String {
 /// Puts a small `xdg-open` wrapper first on the client's PATH that records the sign-in address
 /// before opening the browser, so we can offer "open again" and "copy link".
 fn browser_shim(cmd: &mut Command) -> Option<PathBuf> {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let dir = base.join(core::APP_ID).join("shim");
+    let dir = core::runtime_dir().join("shim");
     fs::create_dir_all(&dir).ok()?;
     let url_file = dir.join("last-url");
     let _ = fs::remove_file(&url_file);
@@ -1697,7 +1694,7 @@ fn remove_confirm(ctx: &Shared) {
                     .arg("--logout")
                     .stdin(Stdio::null())
                     .output();
-                fs::remove_dir_all(&acc.confdir)
+                core::delete_confdir(&acc.confdir)
                     .map_err(|e| format!("Couldn't delete {}: {e}", acc.confdir.display()))?;
                 s.accounts.remove(&acc.key());
             }
@@ -2451,10 +2448,7 @@ fn uninstall(ctx: &Shared) {
 // ---------------------------------------------------------------- wiring
 
 fn instance_socket() -> PathBuf {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join(core::APP_ID).join("window.sock")
+    core::runtime_dir().join("window.sock")
 }
 
 /// If a window is already open, asks it to show `account` and returns true.

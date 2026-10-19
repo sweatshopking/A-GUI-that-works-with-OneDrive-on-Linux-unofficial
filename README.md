@@ -37,7 +37,9 @@ sync client, syncing issues should go to the original app, which is linked above
   until tomorrow*, and a notification when something needs your attention (an error, a resync, signing in again).
 - **Sync schedules** (for example only overnight, 23:00 to 07:00) and a **speed limit**.
 - **Activity view** of what was uploaded, downloaded or deleted, with *Show in folder*.
-- **Dolphin right-click actions**: *Copy sharing link* and *View on the OneDrive website*.
+- **Dolphin right-click actions**: *Copy sharing link* and *View on the OneDrive website*. Links are
+  view-only. For a personal account, anyone with the link can view; for a work or school account, only
+  people in your organization can.
 - **Fits your desktop**: light and dark mode, your file manager and your browser.
 - **Plays well with an existing setup.** Accounts you already set up for the OneDrive client (including
   `onedrive*.service` units) show up automatically, and everything the app sets up keeps working from the

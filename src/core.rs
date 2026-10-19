@@ -42,6 +42,26 @@ pub fn user_unit_dir() -> PathBuf {
     config_home().join("systemd/user")
 }
 
+/// The app's folder for things that only matter while you're logged in (the window's socket,
+/// markers, the sign-in helper). It's in $XDG_RUNTIME_DIR, which only you can open; without one,
+/// in your own cache folder rather than the shared /tmp, where another account could plant files.
+pub fn runtime_dir() -> PathBuf {
+    let dir = match std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute())
+    {
+        Some(base) => base.join(APP_ID),
+        None => std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .filter(|p| p.is_absolute())
+            .unwrap_or_else(|| home().join(".cache"))
+            .join(APP_ID)
+            .join("run"),
+    };
+    let _ = create_private_dir(&dir);
+    dir
+}
+
 /// The command other processes should run to reach this app: the AppImage file when we are
 /// inside one (its mount point changes every run), otherwise our own executable.
 pub fn self_command() -> PathBuf {
@@ -656,10 +676,7 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
 pub struct BusyMarker(PathBuf);
 
 fn busy_path(confdir: &Path) -> PathBuf {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join(APP_ID)
+    runtime_dir()
         .join("busy")
         .join(slug(&confdir.to_string_lossy()))
 }
@@ -1078,6 +1095,47 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
     out
 }
 
+/// The files the client keeps in a configuration folder, plus the "-shm"/"-wal" companions of its
+/// databases and its resume files (`session_upload.*`, `resume_download.*`).
+const CLIENT_FILES: &[&str] = &[
+    "config",
+    ".config.backup",
+    ".config.hash",
+    "refresh_token",
+    "intune_account",
+    "items.sqlite3",
+    "items-dryrun.sqlite3",
+    "sync_list",
+    "sync_list.saved",
+    ".sync_list.hash",
+    "business_shared_items",
+    ".business_shared_items.hash",
+];
+
+fn is_client_file(name: &str) -> bool {
+    let db = name
+        .strip_suffix("-shm")
+        .or_else(|| name.strip_suffix("-wal"))
+        .unwrap_or(name);
+    CLIENT_FILES.contains(&db)
+        || name.starts_with("session_upload.")
+        || name.starts_with("resume_download.")
+}
+
+/// Deletes an account's configuration (its settings, sign-in and database). Only the client's
+/// own files are deleted, and then the folder if that left it empty: a unit written by hand can
+/// point the client at any folder, even the home folder or the one with the synced files, and
+/// nothing else in it may go. Returns true when the folder itself is gone.
+pub fn delete_confdir(confdir: &Path) -> std::io::Result<bool> {
+    for e in fs::read_dir(confdir)?.flatten() {
+        let is_file = e.file_type().is_ok_and(|t| !t.is_dir());
+        if is_file && is_client_file(&e.file_name().to_string_lossy()) {
+            fs::remove_file(e.path())?;
+        }
+    }
+    Ok(fs::remove_dir(confdir).is_ok())
+}
+
 /// Makes sure an account has a background service, creating a managed one if needed.
 pub fn ensure_unit(acc: &AccountInfo) -> std::io::Result<String> {
     if let Some(u) = &acc.unit {
@@ -1398,10 +1456,7 @@ pub fn unit_action(verb: &'static str, unit: &str) {
 }
 
 fn restarted_recently(unit: &str) -> bool {
-    let base = std::env::var("XDG_RUNTIME_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let mark = base.join(APP_ID).join("restarted").join(slug(unit));
+    let mark = runtime_dir().join("restarted").join(slug(unit));
     let recent = fs::metadata(&mark)
         .and_then(|m| m.modified())
         .ok()
@@ -1596,6 +1651,53 @@ mod tests {
                 .contains("!/Junk/*")
         );
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn deleting_a_config_folder_never_takes_other_files() {
+        let conf = std::env::temp_dir().join(format!("lodg-dc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&conf);
+        let fill = || {
+            fs::create_dir_all(&conf).unwrap();
+            for f in [
+                "config",
+                "refresh_token",
+                "items.sqlite3-wal",
+                "session_upload.abc",
+            ] {
+                fs::write(conf.join(f), "x").unwrap();
+            }
+        };
+        // the client's own folder goes completely
+        fill();
+        assert!(delete_confdir(&conf).unwrap());
+        assert!(!conf.exists());
+        // anything else in it stays, and so does the folder
+        fill();
+        fs::create_dir_all(conf.join("OneDrive")).unwrap();
+        fs::write(conf.join("OneDrive/report.docx"), "mine").unwrap();
+        fs::write(conf.join("notes.txt"), "mine").unwrap();
+        fs::write(conf.join("config.bak-2026"), "mine").unwrap();
+        assert!(!delete_confdir(&conf).unwrap());
+        let mut left: Vec<_> = fs::read_dir(&conf)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["OneDrive", "config.bak-2026", "notes.txt"]);
+        assert!(conf.join("OneDrive/report.docx").exists());
+        fs::remove_dir_all(&conf).unwrap();
+    }
+
+    #[test]
+    fn runtime_folder_is_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = runtime_dir();
+        assert!(!d.starts_with("/tmp"));
+        assert_eq!(
+            fs::metadata(&d).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
     }
 
     #[test]

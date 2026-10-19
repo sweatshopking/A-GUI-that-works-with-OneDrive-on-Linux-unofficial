@@ -124,11 +124,14 @@ aur_install() {
         sh "$dir" "https://aur.archlinux.org/cgit/aur.git/snapshot/onedrive-abraunegg.tar.gz"
     # anything the recipe needs now that the list above doesn't cover
     missing="$(sed -n 's/^[[:space:]]*\(make\)\{0,1\}depends = //p' "$dir/onedrive-abraunegg/.SRCINFO" \
-        | xargs -r pacman -T || true)"
+        | xargs -r pacman -T -- || true)"
     if [ -n "$missing" ]; then
         step "Installing what the client needs…"
+        # one name per word, never read as an option or a file pattern
+        set -f
         # shellcheck disable=SC2086
-        pacman -S --needed --noconfirm $missing
+        pacman -S --needed --noconfirm -- $missing
+        set +f
     fi
     step "Building the client (this takes a few minutes)…"
     as_builder sh -c 'mkdir -p "$PKGDEST" "$SRCDEST" "$BUILDDIR" "$LOGDEST" &&

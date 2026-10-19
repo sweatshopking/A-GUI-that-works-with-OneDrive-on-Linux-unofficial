@@ -119,12 +119,20 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
                     .stderr(Stdio::null())
                     .status();
             }
-            match fs::remove_dir_all(&acc.confdir) {
-                Ok(()) => notes.push(format!(
-                    "{}: signed out and its sync settings removed. The files in {} are still there.",
-                    acc.name,
-                    acc.sync_dir.display()
-                )),
+            match core::delete_confdir(&acc.confdir) {
+                Ok(gone) => {
+                    notes.push(format!(
+                        "{}: signed out and its sync settings removed. The files in {} are still there.",
+                        acc.name,
+                        acc.sync_dir.display()
+                    ));
+                    if !gone {
+                        notes.push(format!(
+                            "{} also holds files that aren't the OneDrive client's, so they and the folder were kept.",
+                            acc.confdir.display()
+                        ));
+                    }
+                }
                 Err(e) => notes.push(format!("Couldn't delete {}: {e}", acc.confdir.display())),
             }
         }

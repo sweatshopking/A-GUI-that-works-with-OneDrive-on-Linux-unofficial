@@ -137,9 +137,30 @@ fn get_all(tok: &Token, mut url: String) -> Result<Vec<Value>, String> {
             out.extend(items.iter().cloned());
         }
         match v["@odata.nextLink"].as_str() {
-            Some(next) => url = next.to_string(),
+            // the next page carries the sign-in too, so it may only go to Microsoft Graph
+            Some(next) if is_graph(next) => url = next.to_string(),
+            Some(_) => return Err("Microsoft sent an unexpected reply. Try again later.".into()),
             None => return Ok(out),
         }
+    }
+}
+
+fn is_graph(url: &str) -> bool {
+    #[cfg(feature = "test-driver")]
+    if let Ok(fake) = std::env::var("LODG_TEST_MICROSOFT")
+        && url.starts_with(&fake)
+    {
+        return true;
+    }
+    url.starts_with("https://graph.microsoft.com/")
+}
+
+/// An address from Microsoft that is safe to hand to the browser: only https.
+fn web_address(url: &str) -> Result<String, String> {
+    if url.starts_with("https://") {
+        Ok(url.to_string())
+    } else {
+        Err("OneDrive didn't return a web address.".into())
     }
 }
 
@@ -425,10 +446,7 @@ fn item_url(drive_id: Option<&str>, rel: &str) -> String {
 /// The OneDrive website address for a file or folder (`rel` relative to the account's folder).
 pub fn item_web_url(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<String, String> {
     let v = get(tok, &format!("{}?$select=webUrl", item_url(drive_id, rel)))?;
-    v["webUrl"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| "OneDrive didn't return a web address.".into())
+    web_address(v["webUrl"].as_str().unwrap_or(""))
 }
 
 pub fn web_url(tok: &Token, drive_id: Option<&str>) -> Result<String, String> {
@@ -442,19 +460,27 @@ pub enum LinkScope {
     Organization,
 }
 
-/// Creates a view-only sharing link. Tries "anyone with the link" first and falls back to
-/// "people in your organisation" where the tenant doesn't allow anonymous links.
+/// Creates a view-only sharing link. Personal accounts get "anyone with the link"; work, school
+/// and SharePoint accounts only ever get "people in your organization", never a public link. When
+/// the account's kind isn't known yet, organization is tried first: personal accounts can't make
+/// those, so they end up with an anyone link as they should.
 pub fn create_link(
     tok: &Token,
     drive_id: Option<&str>,
     rel: &str,
+    account_kind: &str,
 ) -> Result<(String, LinkScope), String> {
     let url = format!("{}/createLink", item_url(drive_id, rel));
+    let scopes: &[(&str, LinkScope)] = match account_kind {
+        "personal" => &[("anonymous", LinkScope::Anyone)],
+        "business" | "sharepoint" => &[("organization", LinkScope::Organization)],
+        _ => &[
+            ("organization", LinkScope::Organization),
+            ("anonymous", LinkScope::Anyone),
+        ],
+    };
     let mut last = String::new();
-    for (scope, kind) in [
-        ("anonymous", LinkScope::Anyone),
-        ("organization", LinkScope::Organization),
-    ] {
+    for &(scope, kind) in scopes {
         let mut resp = agent()
             .post(at(&url))
             .header("Authorization", &format!("Bearer {}", tok.access))

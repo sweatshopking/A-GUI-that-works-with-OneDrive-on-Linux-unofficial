@@ -81,7 +81,7 @@ pub fn share_link(path: &Path) {
             ));
         }
         let t = graph::token(&acc.confdir)?;
-        graph::create_link(&t, acc.drive_id.as_deref(), &rel)
+        graph::create_link(&t, acc.drive_id.as_deref(), &rel, &acc.kind)
     });
     let name = path
         .file_name()
