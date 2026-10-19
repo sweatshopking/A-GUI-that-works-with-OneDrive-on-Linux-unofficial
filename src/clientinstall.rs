@@ -38,11 +38,16 @@ pub enum Manager {
 }
 
 /// /etc/os-release as key → value (quotes removed).
+/// Read once: the window asks every few seconds while the banner shows.
 pub fn os_release() -> HashMap<String, String> {
-    // lets the automated tests pretend to be another distribution
-    let path =
-        std::env::var("LINUX_ONEDRIVE_GUI_OS_RELEASE").unwrap_or_else(|_| "/etc/os-release".into());
-    parse_os_release(&fs::read_to_string(path).unwrap_or_default())
+    static OS: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
+    OS.get_or_init(|| {
+        // lets the automated tests pretend to be another distribution
+        let path = std::env::var("LINUX_ONEDRIVE_GUI_OS_RELEASE")
+            .unwrap_or_else(|_| "/etc/os-release".into());
+        parse_os_release(&fs::read_to_string(path).unwrap_or_default())
+    })
+    .clone()
 }
 
 pub fn parse_os_release(text: &str) -> HashMap<String, String> {
@@ -64,6 +69,10 @@ fn family(os: &HashMap<String, String>) -> Vec<String> {
         .filter_map(|k| os.get(*k))
         .flat_map(|v| v.split_whitespace().map(str::to_lowercase))
         .collect()
+}
+
+fn version_starts(os: &HashMap<String, String>, prefix: &str) -> bool {
+    os.get("VERSION_ID").is_some_and(|v| v.starts_with(prefix))
 }
 
 fn is(os: &HashMap<String, String>, id: &str) -> bool {
@@ -130,7 +139,8 @@ pub fn plan_for(
             manager: Manager::Dnf,
         });
     }
-    if is(os, "suse") && has("zypper") {
+    // openSUSE Leap 15 and SUSE Linux Enterprise 15 only have the 2.4 client
+    if is(os, "suse") && has("zypper") && !version_starts(os, "15") {
         return Some(Plan::Package {
             manager: Manager::Zypper,
         });
@@ -152,8 +162,12 @@ pub fn plan() -> Option<Plan> {
         &os_release(),
         &fs::read_to_string("/etc/debian_version").unwrap_or_default(),
         |p| which(p).is_some(),
-        std::path::Path::new("/run/ostree-booted").exists(),
+        image_based(),
     )
+}
+
+fn image_based() -> bool {
+    std::path::Path::new("/run/ostree-booted").exists()
 }
 
 /// The installer that runs as root. The .deb and .rpm also install it as `HELPER`, together with a
@@ -244,7 +258,9 @@ pub fn hint(plan: Option<&Plan>) -> String {
         Some(Plan::Package { .. }) => "The app can install it for you.".into(),
         Some(Plan::AptSource { .. }) => "The copy that comes with your system is too old, so the app gets the current version for you.".into(),
         Some(Plan::Aur) => "On Arch it comes from the AUR (install recipes shared by Arch users). The app can build and install it for you.".into(),
-        None if is(&os, "fedora") => "On Fedora Silverblue, Kinoite and other image-based versions: open a terminal and run  rpm-ostree install onedrive  then restart.".into(),
+        None if is(&os, "fedora") && image_based() => "On Fedora Silverblue, Kinoite and other image-based versions: open a terminal and run  rpm-ostree install onedrive  then restart.".into(),
+        None if is(&os, "fedora") => "Open a terminal and run  sudo dnf install onedrive".into(),
+        None if is(&os, "suse") && version_starts(&os, "15") => "This version of openSUSE only has an old OneDrive client. The instructions show how to get a current one.".into(),
         None if is(&os, "debian") || is(&os, "ubuntu") => "The app can't install it automatically on this version of your system. The instructions show how to install it yourself.".into(),
         None => "The instructions cover every major distribution.".into(),
     }
@@ -336,6 +352,21 @@ mod tests {
             Some(Plan::Package {
                 manager: Manager::Zypper
             })
+        );
+        // Leap 15 only has the 2.4 client
+        assert_eq!(
+            plan_of(
+                "ID=\"opensuse-leap\"\nVERSION_ID=\"15.6\"\nID_LIKE=\"suse opensuse\"",
+                ""
+            ),
+            None
+        );
+        assert!(
+            plan_of(
+                "ID=\"opensuse-leap\"\nVERSION_ID=\"16.0\"\nID_LIKE=\"suse opensuse\"",
+                ""
+            )
+            .is_some()
         );
         // image-based Fedora can't use dnf install
         assert_eq!(

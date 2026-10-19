@@ -689,6 +689,20 @@ pub fn account_busy(confdir: &Path) -> bool {
         .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
 }
 
+/// Restarts the sync units that are running, so they pick up a client that was just updated.
+/// `done`: ones already restarted (by `repair_managed_units`).
+pub fn restart_active_units(settings: &AppSettings, done: &[String]) {
+    for acc in discover(settings) {
+        if let Some(u) = &acc.unit
+            && !done.contains(u)
+            && !account_busy(&acc.confdir)
+            && unit_state(u).active
+        {
+            systemctl(&["try-restart", u]);
+        }
+    }
+}
+
 /// Starts the enabled sync units that aren't running, e.g. ones skipped while the client was
 /// missing. Pauses and schedules are applied by the tray right after, as usual.
 pub fn start_idle_units(settings: &AppSettings) {
@@ -796,12 +810,13 @@ fn condition_line(program: &Path) -> String {
 
 /// Keeps our managed units running the installed client: follows it if it moves (e.g. from
 /// /usr/local/bin to /usr/bin), and converts units from versions that ran it through this app.
-pub fn repair_managed_units() {
+/// Returns the units it restarted.
+pub fn repair_managed_units() -> Vec<String> {
     let Some(client) = client_binary() else {
-        return; // nothing to point them at; they skip quietly until the client is installed
+        return Vec::new(); // nothing to point them at; they skip quietly until the client is installed
     };
     let Ok(rd) = fs::read_dir(user_unit_dir()) else {
-        return;
+        return Vec::new();
     };
     let mut changed = Vec::new();
     for e in rd.flatten() {
@@ -840,16 +855,17 @@ pub fn repair_managed_units() {
         }
     }
     if changed.is_empty() {
-        return;
+        return changed;
     }
     systemctl(&["daemon-reload"]);
-    for u in changed {
-        let st = unit_state(&u);
+    for u in &changed {
+        let st = unit_state(u);
         if st.enabled {
             // pick up the new command (a running unit keeps the old one until restarted)
-            systemctl(&["try-restart", &u]);
+            systemctl(&["try-restart", u]);
         }
     }
+    changed
 }
 
 // ---------------------------------------------------------------- accounts

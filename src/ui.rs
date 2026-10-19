@@ -69,6 +69,9 @@ struct SignIn {
     child: Child,
     stdin: Option<ChildStdin>,
     out: Arc<Mutex<String>>,
+    readers: Vec<std::thread::JoinHandle<()>>,
+    /// polls since the client exited, while the last of its output comes in
+    exited_polls: u32,
     url: Option<String>,
     url_file: Option<PathBuf>,
     enable_after: bool,
@@ -116,6 +119,8 @@ struct Ctx {
     preview: Option<Preview>,
     /// What the client's installer has printed so far, while it runs.
     install_out: Option<Arc<Mutex<String>>>,
+    /// how much of `install_out` has been looked at for progress steps
+    install_seen: usize,
     /// "Not now" on the offer to update the client: don't offer again while the window is open.
     update_dismissed: bool,
     refreshing: bool,
@@ -881,12 +886,14 @@ fn sh_quote(s: &str) -> String {
 }
 
 /// Starts `cmd`, appending everything it prints (stdout and stderr) to `out` as it arrives.
-/// Reads raw chunks rather than lines so prompts without a newline show up too.
+/// Reads raw chunks rather than lines so prompts without a newline show up too. The reader
+/// threads come back as well: a caller that reads `out` once the program has ended lets them
+/// finish first (`finish_reading`), or the last lines, often the error, may not be in yet.
 fn spawn_capture(
     mut cmd: Command,
     out: Arc<Mutex<String>>,
     with_stdin: bool,
-) -> std::io::Result<(Child, Option<ChildStdin>)> {
+) -> std::io::Result<(Child, Option<ChildStdin>, Vec<std::thread::JoinHandle<()>>)> {
     let stdin = if with_stdin {
         Stdio::piped()
     } else {
@@ -901,9 +908,10 @@ fn spawn_capture(
         child.stdout.take().map(|p| Box::new(p) as _),
         child.stderr.take().map(|p| Box::new(p) as _),
     ];
+    let mut readers = Vec::new();
     for mut pipe in pipes.into_iter().flatten() {
         let out = out.clone();
-        std::thread::spawn(move || {
+        readers.push(std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             while let Ok(n) = pipe.read(&mut buf) {
                 if n == 0 {
@@ -913,10 +921,24 @@ fn spawn_capture(
                     .unwrap()
                     .push_str(&String::from_utf8_lossy(&buf[..n]));
             }
-        });
+        }));
     }
     let stdin = child.stdin.take();
-    Ok((child, stdin))
+    Ok((child, stdin, readers))
+}
+
+/// Gives the reader threads up to two seconds to take in the last of the output. Not longer: a
+/// program the command left running in the background can hold the pipes open for good.
+fn finish_reading(readers: Vec<std::thread::JoinHandle<()>>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(2);
+    for r in readers {
+        while !r.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if r.is_finished() {
+            let _ = r.join();
+        }
+    }
 }
 
 fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewChange) {
@@ -991,10 +1013,11 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
                 "--dry-run",
                 "--verbose",
             ]);
-            let (mut child, _) = spawn_capture(cmd, out, false)
+            let (mut child, _, readers) = spawn_capture(cmd, out, false)
                 .map_err(|e| format!("Couldn't start the sync engine: {e}"))?;
             pid.store(child.id(), Ordering::SeqCst);
             let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            finish_reading(readers);
             pid.store(0, Ordering::SeqCst);
             Ok(ok)
         },
@@ -1404,7 +1427,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
     let url_file = browser_shim(&mut cmd);
     core::activate(&mut cmd);
     let ui = ctx.borrow().ui();
-    let (child, stdin) = match spawn_capture(cmd, out.clone(), true) {
+    let (child, stdin, readers) = match spawn_capture(cmd, out.clone(), true) {
         Ok(c) => c,
         Err(e) => {
             ui.set_s_msg(ss(format!("Couldn't start the sync engine: {e}")));
@@ -1422,6 +1445,8 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
         child,
         stdin,
         out,
+        readers,
+        exited_polls: 0,
         url: None,
         url_file,
         enable_after,
@@ -1461,6 +1486,12 @@ fn poll_signin(ctx: &Shared) {
     if exited.is_none() {
         return;
     }
+    // let the last of its output (often the error) come in first, for up to about 2 s
+    si.exited_polls += 1;
+    if si.exited_polls < 5 && !si.readers.iter().all(|r| r.is_finished()) {
+        return;
+    }
+    let text = si.out.lock().unwrap().clone();
     si.finished = true;
     let key = si.key.clone();
     let enable_after = si.enable_after;
@@ -2174,11 +2205,26 @@ fn check_client() {
                 ctx,
                 format!("Found the OneDrive client ({version}). You're ready to sync."),
             );
-            core::repair_managed_units();
-            core::start_idle_units(&AppSettings::load());
-            refresh(ctx);
+            put_client_to_work(false);
         }
     });
+}
+
+/// Once the client is in place: points the sync units at it, restarts running ones when it was
+/// replaced (they'd keep using the old program), and starts the ones that were waiting for it.
+/// systemctl takes a while per unit, so not on the window's thread.
+fn put_client_to_work(replaced: bool) {
+    bg(
+        move || {
+            let restarted = core::repair_managed_units();
+            let settings = AppSettings::load();
+            if replaced {
+                core::restart_active_units(&settings, &restarted);
+            }
+            core::start_idle_units(&settings);
+        },
+        |ctx, ()| refresh(ctx),
+    );
 }
 
 fn show_client_check(ctx: &Shared, check: &core::ClientCheck) {
@@ -2262,11 +2308,13 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
     ui.set_client_install_msg(ss("Your computer will ask for your password…"));
     let out = Arc::new(Mutex::new(String::new()));
     ctx.borrow_mut().install_out = Some(out.clone());
+    ctx.borrow_mut().install_seen = 0;
     let was_update = ui.get_client_update();
     bg(
         move || {
-            let (mut child, _) = spawn_capture(plan.command(), out.clone(), false)?;
+            let (mut child, _, readers) = spawn_capture(plan.command(), out.clone(), false)?;
             let status = child.wait()?;
+            finish_reading(readers);
             let text = out.lock().unwrap().clone();
             Ok::<_, std::io::Error>((status.code(), text))
         },
@@ -2287,23 +2335,32 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
             };
             let failed = match &r {
                 Ok((Some(0), _)) => None,
-                // pkexec: 126 = the password prompt was dismissed, 127 = not allowed
-                Ok((Some(126 | 127), _)) => {
-                    Some("Nothing was changed (the password prompt was cancelled).".to_string())
+                // the installer itself never started: pkexec's 126 = the password window was
+                // closed, 127 = not allowed (wrong password, or no password window available)
+                Ok((Some(126), text)) if !text.contains(STEP) => {
+                    Some("Nothing was changed (the password window was closed).".to_string())
                 }
+                Ok((Some(127), text)) if !text.contains(STEP) => Some(
+                    "Nothing was changed: your computer didn't allow it (the password wasn't \
+                     accepted, or no password window could be shown)."
+                        .to_string(),
+                ),
                 Ok((_, text)) => Some(format!("That didn't work: {}", last(text))),
                 Err(e) => Some(format!("Couldn't start the installer: {e}")),
             };
-            show_client_check(ctx, &check);
             match failed {
+                // the client still works: keep offering the update, with the reason
+                Some(msg) if was_update && check.is_ok() => {
+                    ui.set_client_update(true);
+                    ui.set_client_can_install(true);
+                    ui.set_client_install_msg(ss(msg));
+                }
                 Some(msg) => {
-                    if was_update && check.is_ok() {
-                        // still offer the update again
-                        check_client_update();
-                    }
+                    show_client_check(ctx, &check);
                     ui.set_client_install_msg(ss(msg));
                 }
                 None => {
+                    show_client_check(ctx, &check);
                     ui.set_client_install_msg(ss(""));
                     if let core::ClientCheck::Ok { version, .. } = &check {
                         show_client_done(
@@ -2314,9 +2371,7 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
                                 "The OneDrive client is installed. You're ready to sync.".into()
                             },
                         );
-                        core::repair_managed_units();
-                        core::start_idle_units(&AppSettings::load());
-                        refresh(ctx);
+                        put_client_to_work(true);
                     } else {
                         ui.set_client_install_msg(ss(
                             "It finished, but the OneDrive client still isn't working. The instructions show how to install it by hand.",
@@ -2330,14 +2385,23 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
 
 /// Shows the installer's latest step while it runs (building on Arch takes minutes).
 fn update_install_live(ctx: &Shared) {
-    let c = ctx.borrow();
-    let Some(out) = c.install_out.as_ref() else {
+    let mut c = ctx.borrow_mut();
+    let Some(out) = c.install_out.clone() else {
         return;
     };
     let out = out.lock().unwrap();
-    if let Some(step) = out.lines().rev().find_map(|l| l.strip_prefix(STEP)) {
+    // only what came in since the last look, up to its last full line (a line still arriving is
+    // read whole next time); makepkg's output runs to many thousands of lines
+    let new = &out[c.install_seen.min(out.len())..];
+    let complete = new.rfind('\n').map_or(0, |i| i + 1);
+    if let Some(step) = new[..complete]
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix(STEP))
+    {
         c.ui().set_client_install_msg(ss(step.trim()));
     }
+    c.install_seen += complete;
 }
 
 /// A short "it worked" note where the banner was. It stays until OK or adding an account: going
@@ -2535,6 +2599,7 @@ pub fn run(account: Option<String>) {
         signin: None,
         preview: None,
         install_out: None,
+        install_seen: 0,
         update_dismissed: false,
         refreshing: false,
         close_when_idle: false,

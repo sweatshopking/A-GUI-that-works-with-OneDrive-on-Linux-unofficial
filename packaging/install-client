@@ -4,11 +4,33 @@
 # (its polkit action words the password prompt), otherwise handed to /bin/sh by the app.
 #   install-client apt <release folder>  Ubuntu/Debian: the client author's package source,
 #                                        e.g. xUbuntu_24.04 or Debian_12
-#   install-client aur                   Arch: build the AUR recipe as the person asking
+#   install-client aur                   Arch: build the AUR recipe, then install it
 #   install-client dnf | zypper          the distribution's own package
 # Lines starting with "STEP " are the progress the app shows; everything else is for the log.
 set -eu
 step() { echo "STEP $*"; }
+
+# Whether the client's package source for release $1 is set up, and switched on, somewhere other
+# than our own onedrive.list. Software & Updates switches a source off by commenting out its line
+# (.list) or with "Enabled: no" in its stanza (.sources); backups like .list.save don't count.
+source_in_use() {
+    pat="npreining:/debian-ubuntu-onedrive/$1"
+    for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
+        [ -f "$f" ] && [ "$f" != /etc/apt/sources.list.d/onedrive.list ] &&
+            grep -qsE "^[[:space:]]*deb[[:space:]].*$pat" "$f" && return 0
+    done
+    for f in /etc/apt/sources.list.d/*.sources; do
+        [ -f "$f" ] && awk -v pat="$pat" 'BEGIN { RS = "" }
+            { on = 1; has = 0; n = split($0, l, "\n")
+              for (i = 1; i <= n; i++) {
+                  if (l[i] ~ /^[ \t]*Enabled:[ \t]*[Nn][Oo]/) on = 0
+                  if (l[i] ~ /^[ \t]*URIs:/ && index(l[i], pat)) has = 1
+              }
+              if (on && has) found = 1 }
+            END { exit !found }' "$f" && return 0
+    done
+    return 1
+}
 
 apt_install() {
     case "$1" in
@@ -19,8 +41,7 @@ apt_install() {
     repo="https://download.opensuse.org/repositories/home:/npreining:/debian-ubuntu-onedrive/$1/"
     wait="-o DPkg::Lock::Timeout=300"
     # Someone who followed the guide by hand already has the source; a second copy would break apt.
-    if grep -rqsF "npreining:/debian-ubuntu-onedrive/$1" /etc/apt/sources.list /etc/apt/sources.list.d \
-            --exclude=onedrive.list; then
+    if source_in_use "$1"; then
         step "The client's package source is already set up."
     else
         step "Adding the OneDrive client's package source…"
@@ -49,31 +70,72 @@ apt_install() {
     # for every user at login, outside this app.
     rm -f /etc/systemd/user/default.target.wants/onedrive.service
     step "Checking for packages…"
-    apt-get $wait update
+    # the lock timeout may not cover the package lists, which the desktop's updater refreshes;
+    # any other failure is reported straight away
+    tries=1
+    while ! out="$(apt-get $wait update 2>&1)"; do
+        if [ "$tries" -lt 3 ] && printf '%s\n' "$out" | grep -q "Could not get lock"; then
+            tries=$((tries + 1))
+            step "Waiting for another software update to finish…"
+            sleep 30
+        else
+            printf '%s\n' "$out"
+            exit 1
+        fi
+    done
+    printf '%s\n' "$out"
     step "Installing the OneDrive client…"
     apt-get $wait install -y --no-install-recommends --no-install-suggests onedrive
 }
 
-# makepkg refuses to run as root, so the recipe is downloaded and built as the person who asked
-# (pkexec sets PKEXEC_UID), in a temporary folder.
+# makepkg refuses to run as root. The recipe is built by a throwaway account systemd makes for
+# this one build (DynamicUser), in a folder only it and root can reach, so what gets installed is
+# exactly what the recipe built: no one else, including the person asking (who may not be the
+# admin typing the password), can change it in between. Where systemd can't do that, "nobody"
+# builds it.
 aur_install() {
-    user="$(getent passwd "${PKEXEC_UID:?}" | cut -d: -f1)"
-    home="$(getent passwd "$PKEXEC_UID" | cut -d: -f6)"
-    as_user() { runuser -u "$user" -- env HOME="$home" "$@"; }
     step "Installing the tools needed to build the client…"
     if ! pacman -S --needed --noconfirm base-devel ldc libnotify sqlite dbus curl; then
         echo "Couldn't install the build tools. Update your system (pacman -Syu, or your update app) and try again." >&2
         exit 1
     fi
-    dir="$(as_user mktemp -d)"
-    trap 'rm -rf "$dir"' EXIT
+    if [ -d /run/systemd/system ] &&
+        systemd-run --quiet --wait --pipe --collect -p DynamicUser=yes true >/dev/null 2>&1; then
+        name="linux-onedrive-gui-build-$$"
+        dir="/var/lib/$name" # the account's StateDirectory; really /var/lib/private/$name
+        trap 'rm -rf "/var/lib/private/$name" "/var/lib/$name"' EXIT
+        isolate() {
+            systemd-run --quiet --wait --pipe --collect -p DynamicUser=yes -p StateDirectory="$name" \
+                -p WorkingDirectory="$dir" "$@"
+        }
+    else
+        dir="$(mktemp -d)"
+        trap 'rm -rf "$dir"' EXIT
+        chown nobody "$dir"
+        isolate() { runuser -u nobody -- "$@"; }
+    fi
+    # its own folders for everything, whatever makepkg.conf says
+    as_builder() {
+        isolate env HOME="$dir" PKGDEST="$dir/out" SRCDEST="$dir/src" BUILDDIR="$dir/build" \
+            LOGDEST="$dir/log" "$@"
+    }
     step "Downloading the recipe from the AUR…"
-    as_user curl -fsSL -o "$dir/recipe.tar.gz" "https://aur.archlinux.org/cgit/aur.git/snapshot/onedrive-abraunegg.tar.gz"
-    as_user tar -xzf "$dir/recipe.tar.gz" -C "$dir"
+    as_builder sh -c 'curl -fsSL -o "$1/recipe.tar.gz" "$2" && tar -xzf "$1/recipe.tar.gz" -C "$1"' \
+        sh "$dir" "https://aur.archlinux.org/cgit/aur.git/snapshot/onedrive-abraunegg.tar.gz"
+    # anything the recipe needs now that the list above doesn't cover
+    missing="$(sed -n 's/^[[:space:]]*\(make\)\{0,1\}depends = //p' "$dir/onedrive-abraunegg/.SRCINFO" \
+        | xargs -r pacman -T || true)"
+    if [ -n "$missing" ]; then
+        step "Installing what the client needs…"
+        # shellcheck disable=SC2086
+        pacman -S --needed --noconfirm $missing
+    fi
     step "Building the client (this takes a few minutes)…"
-    as_user sh -c 'cd "$1/onedrive-abraunegg" && makepkg --noconfirm --cleanbuild' sh "$dir"
+    as_builder sh -c 'mkdir -p "$PKGDEST" "$SRCDEST" "$BUILDDIR" "$LOGDEST" &&
+        cd "$1/onedrive-abraunegg" && makepkg --noconfirm --cleanbuild' sh "$dir"
     step "Installing the OneDrive client…"
-    pacman -U --noconfirm "$dir"/onedrive-abraunegg/onedrive-abraunegg-*.pkg.tar.*
+    # [0-9]: not the -debug package makepkg also makes by default
+    pacman -U --noconfirm "$dir"/out/onedrive-abraunegg-[0-9]*.pkg.tar.*
 }
 
 case "${1:-}" in

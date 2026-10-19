@@ -76,7 +76,7 @@ wherever it came from.
 | Your system | What *Install it for me* does |
 |---|---|
 | Fedora | `dnf install onedrive` (the app's .rpm already pulls it in) |
-| openSUSE | `zypper install onedrive` |
+| openSUSE Tumbleweed, Leap 16 | `zypper install onedrive` (Leap 15 only has an old client, so there the app shows the instructions instead) |
 | Ubuntu 22.04+, Linux Mint, Debian 11+, Pop!_OS, Zorin, Raspberry Pi OS | These come with an old version of the client that its author no longer supports. So the app adds the place the author recommends getting it from to your computer's list of software sources (like adding a trusted app store), then installs the current version from there. Your normal software updates keep it up to date after that. This is the same setup as the client's [Ubuntu / Debian installation guide](https://github.com/abraunegg/onedrive/blob/master/docs/ubuntu-package-install.md). |
 | Arch, Manjaro, EndeavourOS, CachyOS | Arch doesn't include the client, but the AUR (install recipes shared by Arch users) does. The app builds it from there, which takes a few minutes. Normal software updates don't cover the AUR, so the app tells you when a newer client is out and updates it for you. |
 | Fedora Silverblue/Kinoite, SteamOS, anything else | No button; the app links to the client's [installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) |
