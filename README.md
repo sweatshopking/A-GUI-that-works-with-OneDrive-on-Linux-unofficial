@@ -44,14 +44,32 @@ sync client, syncing issues should go to the original app, which is linked above
   command line.
 - **Updates itself in place.** After you install a new version, the tray and an open window switch to it
   on their own.
+- **Light on your computer.** It's written in Rust, a language that compiles to a small, fast native
+  program: no web browser engine built in (unlike Electron apps) and no Python or Java needed. The
+  download is 10–14 MB.
+
+### How much memory and CPU it uses
+
+Measured on a desktop PC with three accounts syncing:
+
+| Part | When it runs | Memory | CPU |
+|---|---|---|---|
+| Tray icon | All the time | About 10 MB | Practically none: about 1 second of CPU time per 40 minutes |
+| Log reader, one per account | While the tray runs | 4–5 MB each | Practically none |
+| Settings window | Only while it's open; it fully exits when you close it | About 60 MB (up to 140 MB counting graphics libraries shared with other programs) | Near zero once it's drawn |
+| AppImage helper (AppImage only, not the .deb or .rpm) | While the app runs | About 16 MB | None |
+
+The OneDrive client, the separate program that does the actual syncing, uses more: from about 15 MB to
+several hundred MB per account, depending on how many files that account has.
 
 ## Install
 
 ### 1. The OneDrive Client for Linux, version 2.5 or newer
 
-It does the syncing and is installed on its own, so it keeps getting updates from its author. You
-usually don't need to do anything: if it's missing or too old, the app says so and its **Install it for
-me** button installs it after asking for your password. If you'd rather install it yourself, choose
+This is the free program that does the actual syncing; this app is the window and tray icon for it.
+It's a separate program, so it gets its own updates. You usually don't need to do anything: if it's
+missing or too old, the app says so and its **Install it for me** button installs it after asking
+for your password. If you'd rather install it yourself, choose
 *I'll install it myself*. The app notices the client within a few seconds of it being installed,
 wherever it came from.
 
@@ -59,8 +77,8 @@ wherever it came from.
 |---|---|
 | Fedora | `dnf install onedrive` (the app's .rpm already pulls it in) |
 | openSUSE | `zypper install onedrive` |
-| Ubuntu 22.04+, Linux Mint, Debian 11+, Pop!_OS, Zorin, Raspberry Pi OS | The built-in `onedrive` package is too old, so it adds the client's own package source, as in the client's [Ubuntu / Debian installation guide](https://github.com/abraunegg/onedrive/blob/master/docs/ubuntu-package-install.md), and installs from there. Normal system updates keep it current. |
-| Arch, Manjaro, EndeavourOS, CachyOS | Builds `onedrive-abraunegg` from the AUR (a few minutes). The AUR isn't covered by system updates, so the app tells you when a newer client is out and updates it for you. |
+| Ubuntu 22.04+, Linux Mint, Debian 11+, Pop!_OS, Zorin, Raspberry Pi OS | These come with an old version of the client that its author no longer supports. So the app adds the place the author recommends getting it from to your computer's list of software sources (like adding a trusted app store), then installs the current version from there. Your normal software updates keep it up to date after that. This is the same setup as the client's [Ubuntu / Debian installation guide](https://github.com/abraunegg/onedrive/blob/master/docs/ubuntu-package-install.md). |
+| Arch, Manjaro, EndeavourOS, CachyOS | Arch doesn't include the client, but the AUR (install recipes shared by Arch users) does. The app builds it from there, which takes a few minutes. Normal software updates don't cover the AUR, so the app tells you when a newer client is out and updates it for you. |
 | Fedora Silverblue/Kinoite, SteamOS, anything else | No button; the app links to the client's [installation instructions](https://github.com/abraunegg/onedrive/blob/master/docs/install.md) |
 
 ### 2. This app

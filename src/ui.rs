@@ -2215,7 +2215,7 @@ fn check_client_update() {
             "A newer OneDrive Client for Linux is available ({newest}; you have {installed})"
         )));
         ui.set_client_hint(ss(
-            "On Arch-based systems it comes from the AUR, so your normal system updates don't update it.",
+            "It came from the AUR, which your normal software updates don't cover.",
         ));
         ui.set_client_can_install(true);
     });

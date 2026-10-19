@@ -192,29 +192,37 @@ impl Plan {
     /// What the confirmation says before the password prompt.
     pub fn confirmation(&self) -> String {
         let what = match self {
-            Plan::Package { .. } => "This installs the \"onedrive\" package from your system's own software, \
-                 so your normal system updates keep it up to date."
-                .to_string(),
+            Plan::Package { .. } => {
+                "This installs the OneDrive client from your system's own software \
+                 collection, the same place your other programs come from. Your normal software \
+                 updates keep it up to date."
+                    .to_string()
+            }
             Plan::AptSource { release, .. } => format!(
-                "The OneDrive client in {release}'s own software is too old, so this adds the client's \
-                 own package source — the one its author recommends — and installs it from there. \
-                 After that your normal system updates keep it up to date."
+                "{release} comes with an old version of the OneDrive client that its author no \
+                 longer supports. So this does two things:\n\n\
+                 • Adds the place the client's author recommends getting it from to your \
+                 computer's list of software sources. It's like adding a trusted app store.\n\
+                 • Installs the current version of the client from there.\n\n\
+                 After that, your normal software updates keep it up to date, like any other program."
             ),
-            Plan::Aur => "The OneDrive client isn't in Arch's own software, so this builds it on your computer \
-                 from its recipe in the AUR (the Arch User Repository, where Arch keeps community \
-                 packages) and installs it as a normal package. Any build tools you don't have yet \
-                 are installed first. It takes a few minutes.\n\n\
-                 Your normal system updates won't update it, so this app checks for new versions \
-                 and offers to update it for you."
-                .to_string(),
+            Plan::Aur => {
+                "Arch doesn't include the OneDrive client, but the AUR does. The AUR is a \
+                 collection of install recipes shared by Arch users. This downloads the client's \
+                 recipe, builds the program on your computer and installs it. Any tools needed to \
+                 build it are installed first. It takes a few minutes.\n\n\
+                 Your normal software updates don't cover the AUR, so this app checks for new \
+                 versions of the client and offers to update it for you."
+                    .to_string()
+            }
         };
         let only = match self {
             Plan::Package { .. } => {
-                "to install the OneDrive client and the few parts it needs to run"
+                "to install the OneDrive client (plus a few small parts it needs)"
             }
             Plan::AptSource { .. } => {
-                "to add the client's package source and install the OneDrive client and the few \
-                 parts it needs to run"
+                "to add that software source and install the OneDrive client (plus a few small \
+                 parts it needs)"
             }
             Plan::Aur => "to install the build tools and the OneDrive client",
         };
@@ -234,10 +242,10 @@ pub fn hint(plan: Option<&Plan>) -> String {
     let os = os_release();
     match plan {
         Some(Plan::Package { .. }) => "The app can install it for you.".into(),
-        Some(Plan::AptSource { .. }) => "The built-in \"onedrive\" package is too old, so the app installs it from the client's own package source.".into(),
-        Some(Plan::Aur) => "On Arch-based systems it comes from the AUR. The app can build and install it for you.".into(),
+        Some(Plan::AptSource { .. }) => "The copy that comes with your system is too old, so the app gets the current version for you.".into(),
+        Some(Plan::Aur) => "On Arch it comes from the AUR (install recipes shared by Arch users). The app can build and install it for you.".into(),
         None if is(&os, "fedora") => "On Fedora Silverblue, Kinoite and other image-based versions: open a terminal and run  rpm-ostree install onedrive  then restart.".into(),
-        None if is(&os, "debian") || is(&os, "ubuntu") => "The client's own packages don't cover this release yet. The instructions show other ways to install it.".into(),
+        None if is(&os, "debian") || is(&os, "ubuntu") => "The app can't install it automatically on this version of your system. The instructions show how to install it yourself.".into(),
         None => "The instructions cover every major distribution.".into(),
     }
 }
