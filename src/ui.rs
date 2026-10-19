@@ -2931,7 +2931,9 @@ pub fn run(account: Option<String>) {
             ui.set_app_msg(ss(format!("Couldn't save the setting: {e}")));
         }
         c.borrow_mut().settings.glass = glass;
-        apply_look(&ui, glass, *LOOK.lock().unwrap());
+        // copied out first: apply_look locks LOOK itself, and a guard in the call would still hold it
+        let look = *LOOK.lock().unwrap();
+        apply_look(&ui, glass, look);
     });
     on!(on_client_recheck, |_c| check_client());
     on!(on_client_install, |c| install_client(c));
