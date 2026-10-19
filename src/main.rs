@@ -18,7 +18,42 @@ mod uninstall;
 
 use std::os::unix::process::CommandExt;
 
+/// An AppImage stays mounted until every process holding its runtime's keep-alive pipe has
+/// exited, and that pipe isn't close-on-exec. So everything we start (log readers, the tray that
+/// replaces us after an update) would inherit it, and keep an old version mounted, with its
+/// runtime running, for as long as the new version runs. We keep our own copy; children get none.
+/// Nothing we start runs from inside our mount: we relaunch ourselves through the AppImage file.
+fn keep_inherited_files_to_ourselves() {
+    if std::env::var_os("APPIMAGE").is_none() {
+        return;
+    }
+    // SAFETY: only sets the close-on-exec flag on descriptors >= 3; runs before any other thread
+    let r = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3u32,
+            u32::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if r != 0 {
+        // kernels before 5.11
+        let fds: Vec<i32> = std::fs::read_dir("/proc/self/fd")
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(|e| e.file_name().to_str()?.parse().ok())
+            .filter(|&fd| fd > 2)
+            .collect();
+        for fd in fds {
+            // SAFETY: as above
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+    }
+}
+
 fn main() {
+    keep_inherited_files_to_ourselves();
     #[cfg(feature = "test-driver")]
     testdrive::take_env();
     let args: Vec<String> = std::env::args().skip(1).collect();
