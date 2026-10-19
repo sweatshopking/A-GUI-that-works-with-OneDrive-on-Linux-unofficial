@@ -201,6 +201,8 @@ fn set(ui: &AppWindow, k: &str, v: &str) -> bool {
         "u_keep_setup" => ui.set_u_keep_setup(b),
         "app_autostart" => ui.set_app_autostart(b),
         "dark" => ui.set_dark(b),
+        "glass" => ui.global::<crate::ui::Theme>().set_glass(b),
+        "contrast" => ui.global::<crate::ui::Theme>().set_contrast(b),
         "tab" => ui.set_tab(i),
         _ => return false,
     }
@@ -406,6 +408,7 @@ fn fill_demo(ui: &AppWindow) {
     use slint::{ModelRc, StandardListViewItem, VecModel};
     let row = |name: &str, kind: &str, status: &str, tone: i32| AccountRow {
         name: name.into(),
+        initial: crate::ui::initial(name).into(),
         kind: kind.into(),
         status: status.into(),
         tone,

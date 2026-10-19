@@ -8,6 +8,7 @@
 mod clientinstall;
 mod core;
 mod dbus;
+mod glass;
 mod graph;
 mod share;
 #[cfg(feature = "test-driver")]

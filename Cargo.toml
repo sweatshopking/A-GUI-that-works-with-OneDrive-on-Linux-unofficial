@@ -1,6 +1,6 @@
 [package]
 name = "linux-onedrive-gui"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 description = "Tray app and settings window for the OneDrive Client for Linux"
 license = "GPL-3.0-or-later"
@@ -20,6 +20,11 @@ slint = { version = "1.18.1", default-features = false, features = ["std", "back
 ureq = { version = "3.4.2", features = ["json"] }
 libc = "0.2"
 zbus = "5.19"
+# the blur behind the see-through window (src/glass.rs); all already used by Slint's winit backend
+raw-window-handle = "0.6"
+wayland-backend = { version = "0.3", features = ["client_system"] }
+wayland-client = "0.31"
+wayland-protocols = { version = "0.32", features = ["client", "staging"] }
 
 [features]
 # scripted UI driver used by the automated tests (see src/testdrive.rs)

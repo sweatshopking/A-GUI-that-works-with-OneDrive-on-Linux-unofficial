@@ -124,6 +124,8 @@ struct Ctx {
     /// "Not now" on the offer to update the client: don't offer again while the window is open.
     update_dismissed: bool,
     refreshing: bool,
+    /// asked for again while one was running, so that one may be out of date
+    refresh_again: bool,
     /// The user closed the window while a dry run was still stopping; close once it has.
     close_when_idle: bool,
     rows: Rc<VecModel<FolderRow>>,
@@ -274,13 +276,116 @@ fn refresh(ctx: &Shared) {
     if std::env::var_os("LODG_DEMO").is_some() {
         return;
     }
-    if std::mem::replace(&mut ctx.borrow_mut().refreshing, true) {
+    let mut c = ctx.borrow_mut();
+    if c.refreshing {
+        // what's being read now may already be out of date (an account was just added, say)
+        c.refresh_again = true;
         return;
     }
+    c.refreshing = true;
+    drop(c);
+    read_and_apply_snapshot();
+}
+
+fn read_and_apply_snapshot() {
     bg(take_snapshot, |ctx, snap| {
+        if std::mem::take(&mut ctx.borrow_mut().refresh_again) {
+            // something changed while this was being read: read again rather than show it
+            read_and_apply_snapshot();
+            return;
+        }
         ctx.borrow_mut().refreshing = false;
         apply_snapshot(ctx, snap);
     });
+}
+
+// ---------------------------------------------------------------- look
+
+/// What the window's look depends on, read off the desktop.
+#[derive(Clone, Copy, Debug, Default)]
+struct Look {
+    appearance: crate::dbus::Appearance,
+    /// the desktop blurs what's behind see-through windows
+    blurs: bool,
+}
+
+static LOOK: Mutex<Look> = Mutex::new(Look {
+    appearance: crate::dbus::Appearance {
+        dark: None,
+        high_contrast: false,
+        reduce_motion: false,
+    },
+    blurs: false,
+});
+static GLASS: AtomicBool = AtomicBool::new(false);
+static BLUR_SENT: AtomicBool = AtomicBool::new(false);
+
+/// Reads the desktop's settings, giving up after `wait` (the window is opening meanwhile).
+fn read_look(wait: Duration) -> Look {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(Look {
+            appearance: crate::dbus::appearance(),
+            blurs: crate::glass::desktop_blurs(),
+        });
+    });
+    rx.recv_timeout(wait).unwrap_or_default()
+}
+
+/// Whether the window is see-through: as set, or by default wherever the desktop blurs what's
+/// behind it and hasn't asked for high contrast. Without the blur, glass just looks washed out.
+fn glass_wanted(setting: Option<bool>, look: Look) -> bool {
+    setting.unwrap_or(look.blurs && !look.appearance.high_contrast)
+}
+
+fn glass_note(setting: Option<bool>, look: Look) -> &'static str {
+    match setting {
+        None if glass_wanted(None, look) => {
+            "Glass is on: your desktop blurs what's behind windows, so the window is see-through."
+        }
+        None if look.appearance.high_contrast => {
+            "Glass is off because your desktop asks for high contrast."
+        }
+        None => {
+            "Glass is off: your desktop doesn't blur what's behind windows, so the window stays solid and easy to read. If yours does (Hyprland with blur switched on, for example), choose On."
+        }
+        Some(true) => {
+            "Always see-through. If the window looks washed out, your desktop doesn't blur behind it: choose Automatic."
+        }
+        Some(false) => "Always solid.",
+    }
+}
+
+fn apply_look(ui: &AppWindow, setting: Option<bool>, look: Look) {
+    *LOOK.lock().unwrap() = look;
+    if let Some(dark) = look.appearance.dark {
+        ui.set_dark(dark);
+    }
+    let theme = ui.global::<Theme>();
+    theme.set_contrast(look.appearance.high_contrast);
+    theme.set_reduce_motion(look.appearance.reduce_motion);
+    let glass = glass_wanted(setting, look);
+    theme.set_glass(glass);
+    GLASS.store(glass, Ordering::Relaxed);
+    {
+        use slint::winit_030::WinitWindowAccessor;
+        ui.window()
+            .with_winit_window(|w| crate::glass::set(w, glass));
+    }
+    ui.set_app_glass(match setting {
+        None => 0,
+        Some(true) => 1,
+        Some(false) => 2,
+    });
+    ui.set_app_glass_note(ss(glass_note(setting, look)));
+}
+
+/// The letter on an account's badge: the first letter or digit of its name, as a capital.
+pub fn initial(name: &str) -> String {
+    name.chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_else(|| "?".into())
 }
 
 fn apply_snapshot(ctx: &Shared, snap: Snapshot) {
@@ -295,6 +400,7 @@ fn apply_snapshot(ctx: &Shared, snap: Snapshot) {
         .zip(&c.statuses)
         .map(|(a, s)| AccountRow {
             name: ss(&a.name),
+            initial: ss(initial(&a.name)),
             kind: ss(a.kind_label()),
             status: ss(s.text(&c.settings.prefs(&a.confdir))),
             tone: tone(s.phase),
@@ -1492,11 +1598,16 @@ fn poll_signin(ctx: &Shared) {
         return;
     }
     let text = si.out.lock().unwrap().clone();
-    si.finished = true;
     let key = si.key.clone();
     let enable_after = si.enable_after;
-    let acc = c.account(&key).cloned();
-    let Some(acc) = acc else { return };
+    // a quick sign-in can end before the account list (refreshed in the background) has the
+    // account it just made: keep waiting for it rather than leave the dialog hanging
+    let Some(acc) = c.account(&key).cloned() else {
+        return;
+    };
+    if let Some(si) = c.signin.as_mut() {
+        si.finished = true;
+    }
     if acc.confdir.join("refresh_token").exists() {
         ui.set_si_text(ss(if enable_after {
             "Signed in. Your files will start syncing in a moment."
@@ -2575,8 +2686,23 @@ pub fn run(account: Option<String>) {
     if let Err(e) = slint::set_xdg_app_id(core::APP_ID) {
         eprintln!("couldn't set the application id: {e}");
     }
-    if let Some(dark) = crate::dbus::prefers_dark(std::time::Duration::from_millis(1500)) {
-        ui.set_dark(dark);
+    // the look follows the desktop, now and whenever it changes (dark at sunset, say)
+    let look = read_look(Duration::from_millis(1500));
+    apply_look(&ui, AppSettings::load().glass, look);
+    {
+        let weak = ui.as_weak();
+        crate::dbus::watch_appearance(move |appearance| {
+            let weak = weak.clone();
+            let _ = slint::invoke_from_event_loop(move || {
+                if let Some(ui) = weak.upgrade() {
+                    let look = Look {
+                        appearance,
+                        ..*LOOK.lock().unwrap()
+                    };
+                    apply_look(&ui, AppSettings::load().glass, look);
+                }
+            });
+        });
     }
     let rows = Rc::new(VecModel::<FolderRow>::default());
     ui.set_f_rows(ModelRc::from(rows.clone()));
@@ -2596,6 +2722,7 @@ pub fn run(account: Option<String>) {
         install_seen: 0,
         update_dismissed: false,
         refreshing: false,
+        refresh_again: false,
         close_when_idle: false,
         rows,
     }));
@@ -2791,6 +2918,21 @@ pub fn run(account: Option<String>) {
         }
     });
     on!(on_app_add_to_menu, |c| add_to_menu(c));
+    on!(on_app_glass_changed, |c| {
+        let ui = c.borrow().ui();
+        let glass = match ui.get_app_glass() {
+            1 => Some(true),
+            2 => Some(false),
+            _ => None,
+        };
+        let mut settings = AppSettings::load();
+        settings.glass = glass;
+        if let Err(e) = settings.save() {
+            ui.set_app_msg(ss(format!("Couldn't save the setting: {e}")));
+        }
+        c.borrow_mut().settings.glass = glass;
+        apply_look(&ui, glass, *LOOK.lock().unwrap());
+    });
     on!(on_client_recheck, |_c| check_client());
     on!(on_client_install, |c| install_client(c));
     on!(on_ci_confirm, |c| {
@@ -2887,6 +3029,10 @@ pub fn run(account: Option<String>) {
         use slint::winit_030::winit::platform::startup_notify::WindowExtStartupNotify;
         use slint::winit_030::{EventResult, WinitWindowAccessor};
         ui.window().on_winit_window_event(|w, ev| {
+            // the window only exists once the event loop runs, so its blur is asked for here
+            if !BLUR_SENT.swap(true, Ordering::Relaxed) {
+                w.with_winit_window(|ww| crate::glass::set(ww, GLASS.load(Ordering::Relaxed)));
+            }
             match ev {
                 WindowEvent::MouseInput {
                     state: ElementState::Pressed,

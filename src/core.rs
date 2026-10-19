@@ -278,6 +278,9 @@ pub struct AppSettings {
     /// Config directories the user removed but whose (unmanaged) service still exists.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub hidden: Vec<String>,
+    /// The see-through window: None follows the desktop (see ui::glass_wanted).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glass: Option<bool>,
 }
 
 impl AppSettings {

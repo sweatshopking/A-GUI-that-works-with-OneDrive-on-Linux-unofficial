@@ -45,17 +45,69 @@ pub fn notify(app_name: &str, icon: &str, summary: &str, body: &str) -> bool {
     .is_ok()
 }
 
-/// The desktop's light/dark preference from the settings portal: Some(true) = dark. Gives up
-/// after `wait`, since it's asked while the window is opening.
-pub fn prefers_dark(wait: Duration) -> Option<bool> {
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(read_color_scheme());
-    });
-    rx.recv_timeout(wait).ok().flatten()
+/// What the desktop asks of how apps look, from the settings portal (every desktop with
+/// xdg-desktop-portal: KDE, GNOME, Cinnamon, COSMIC, …). Anything it doesn't say stays at the default.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Appearance {
+    /// None when the desktop has no preference
+    pub dark: Option<bool>,
+    pub high_contrast: bool,
+    pub reduce_motion: bool,
 }
 
-fn read_color_scheme() -> Option<bool> {
+pub fn appearance() -> Appearance {
+    let scheme = portal_setting("org.freedesktop.appearance", "color-scheme").and_then(as_u32);
+    let contrast = portal_setting("org.freedesktop.appearance", "contrast").and_then(as_u32);
+    // GNOME and its relatives switch animations off here, KDE by setting their speed to 0
+    let gnome_animations =
+        portal_setting("org.gnome.desktop.interface", "enable-animations").and_then(as_bool);
+    let kde_speed =
+        portal_setting("org.kde.kdeglobals.KDE", "AnimationDurationFactor").and_then(as_f64);
+    Appearance {
+        dark: match scheme {
+            Some(1) => Some(true),
+            Some(2) => Some(false),
+            _ => None,
+        },
+        high_contrast: contrast == Some(1),
+        reduce_motion: gnome_animations == Some(false) || kde_speed == Some(0.0),
+    }
+}
+
+/// Calls `changed` with the new appearance whenever the desktop changes one of those settings
+/// (switching to dark at sunset, say). Runs for as long as the app does.
+pub fn watch_appearance(changed: impl Fn(Appearance) + Send + 'static) {
+    std::thread::spawn(move || {
+        let Some(c) = session() else { return };
+        let Ok(proxy) = zbus::blocking::Proxy::new(
+            c,
+            "org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop",
+            "org.freedesktop.portal.Settings",
+        ) else {
+            return;
+        };
+        let Ok(signals) = proxy.receive_signal("SettingChanged") else {
+            return;
+        };
+        for msg in signals {
+            let Ok((namespace, key, _)) = msg.body().deserialize::<(String, String, OwnedValue)>()
+            else {
+                continue;
+            };
+            if matches!(
+                (namespace.as_str(), key.as_str()),
+                ("org.freedesktop.appearance", "color-scheme" | "contrast")
+                    | ("org.gnome.desktop.interface", "enable-animations")
+                    | ("org.kde.kdeglobals.KDE", "AnimationDurationFactor")
+            ) {
+                changed(appearance());
+            }
+        }
+    });
+}
+
+fn portal_setting(namespace: &str, key: &str) -> Option<OwnedValue> {
     let c = session()?;
     let call = |method: &str| {
         c.call_method(
@@ -63,24 +115,42 @@ fn read_color_scheme() -> Option<bool> {
             "/org/freedesktop/portal/desktop",
             Some("org.freedesktop.portal.Settings"),
             method,
-            &("org.freedesktop.appearance", "color-scheme"),
+            &(namespace, key),
         )
         .ok()
         .and_then(|m| m.body().deserialize::<OwnedValue>().ok())
     };
     // ReadOne returns the value directly; the older Read wraps it in one more variant
-    let v = call("ReadOne").or_else(|| call("Read"))?;
-    let n = match &*v {
-        Value::U32(n) => *n,
-        Value::Value(inner) => match **inner {
-            Value::U32(n) => n,
-            _ => return None,
-        },
-        _ => return None,
-    };
-    match n {
-        1 => Some(true),
-        2 => Some(false),
+    call("ReadOne").or_else(|| call("Read"))
+}
+
+/// The value inside a portal reply, unwrapping the extra variant the older Read adds.
+fn unwrapped<'a>(v: &'a Value<'a>) -> &'a Value<'a> {
+    match v {
+        Value::Value(inner) => inner,
+        v => v,
+    }
+}
+
+fn as_u32(v: OwnedValue) -> Option<u32> {
+    match unwrapped(&v) {
+        Value::U32(n) => Some(*n),
+        _ => None,
+    }
+}
+
+fn as_bool(v: OwnedValue) -> Option<bool> {
+    match unwrapped(&v) {
+        Value::Bool(b) => Some(*b),
+        _ => None,
+    }
+}
+
+fn as_f64(v: OwnedValue) -> Option<f64> {
+    match unwrapped(&v) {
+        Value::F64(n) => Some(*n),
+        // kdeglobals values come through as text
+        Value::Str(s) => s.parse().ok(),
         _ => None,
     }
 }
