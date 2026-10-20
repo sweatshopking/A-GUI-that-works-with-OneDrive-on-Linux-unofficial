@@ -1169,9 +1169,127 @@ pub enum LogEvent {
     Syncing,
     Complete,
     Error(String),
-    File { kind: &'static str, path: String },
+    File {
+        kind: &'static str,
+        path: String,
+    },
+    /// One file the client couldn't sync; the rest of the account is fine.
+    Blocked {
+        path: String,
+        reason: BlockReason,
+    },
+    /// A new client run: it re-checks every pending file, so old blocks are re-reported if
+    /// they still apply.
+    ClientStart,
     NeedsResync,
     NeedsLogin,
+}
+
+/// Why the client left one file alone.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BlockReason {
+    /// Open for editing (checked out or locked) by someone in SharePoint or Office
+    Locked,
+    /// Shared with this account as read-only, so changes can't go up
+    ReadOnly,
+    /// Shared as view-only without download permission
+    NoDownload,
+    /// OneDrive turned the upload away for now
+    NotNow,
+}
+
+/// The client's messages for a single file it couldn't sync, and why.
+const BLOCKED_MESSAGES: [(&str, BlockReason); 4] = [
+    (
+        "Unable to upload this modified file as this is currently checked out or locked for editing by another user: ",
+        BlockReason::Locked,
+    ),
+    (
+        "Unable to upload this modified file as this was shared as read-only: ",
+        BlockReason::ReadOnly,
+    ),
+    (
+        "Unable to download this file as this was shared as read-only without download permission: ",
+        BlockReason::NoDownload,
+    ),
+    (
+        "Unable to upload this modified file at this point in time: ",
+        BlockReason::NotNow,
+    ),
+];
+
+/// A file left unsynced, kept until it syncs, goes away, or a new client run stops reporting it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Blocked {
+    pub path: String,
+    pub reason: BlockReason,
+}
+
+/// Keeps the list of blocked files up to date with one log event.
+pub fn track_blocked(list: &mut Vec<Blocked>, ev: &LogEvent) {
+    match ev {
+        LogEvent::Blocked { path, reason } => {
+            list.retain(|b| &b.path != path);
+            list.push(Blocked {
+                path: path.clone(),
+                reason: *reason,
+            });
+        }
+        // uploaded, downloaded or deleted since: nothing left to do for it
+        LogEvent::File { path, .. } => list.retain(|b| &b.path != path),
+        LogEvent::ClientStart => list.clear(),
+        _ => {}
+    }
+}
+
+impl BlockReason {
+    /// Changes the user made that aren't online. A view-only file is the sharer's choice, not
+    /// something to keep flagging.
+    pub fn needs_attention(self) -> bool {
+        self != BlockReason::NoDownload
+    }
+}
+
+/// The file's own name, safe to show: no control characters (a name can hold a newline) and
+/// short enough for a menu or a line of text.
+pub fn shown_name(path: &str) -> String {
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let name: String = name
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if name.chars().count() > 60 {
+        let head: String = name.chars().take(57).collect();
+        format!("{head}…")
+    } else {
+        name
+    }
+}
+
+/// Plain words for the files that didn't sync, or "" when there are none.
+pub fn blocked_text(list: &[Blocked]) -> String {
+    let mut out = Vec::new();
+    for b in list.iter().take(3) {
+        let name = shown_name(&b.path);
+        out.push(match b.reason {
+            BlockReason::Locked => format!(
+                "\u{201c}{name}\u{201d} didn't upload: it's open for editing in SharePoint or Office (by someone else, or by you on another device), which locks it. Your changes are still on this PC. Once it's closed there, press \u{201c}Sync now\u{201d} to upload them."
+            ),
+            BlockReason::ReadOnly => format!(
+                "\u{201c}{name}\u{201d} didn't upload: it's shared with you as read-only, so your changes stay only on this PC."
+            ),
+            BlockReason::NoDownload => format!(
+                "\u{201c}{name}\u{201d} isn't on this PC: it's shared as view-only, without permission to download. Open it on the OneDrive website instead."
+            ),
+            BlockReason::NotNow => format!(
+                "\u{201c}{name}\u{201d} didn't upload: OneDrive turned it away for now. Your changes are still on this PC. Press \u{201c}Sync now\u{201d} to try again."
+            ),
+        });
+    }
+    if list.len() > 3 {
+        out.push(format!("\u{2026}and {} more files.", list.len() - 3));
+    }
+    out.join("\n")
 }
 
 pub fn parse_log(msg: &str) -> Option<LogEvent> {
@@ -1193,6 +1311,16 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
         || msg.contains("invalid_grant")
     {
         return Some(LogEvent::NeedsLogin);
+    }
+    for (prefix, reason) in BLOCKED_MESSAGES {
+        if let Some(path) = msg.strip_prefix(prefix) {
+            let path = path.trim();
+            let path = path.strip_prefix("./").unwrap_or(path).to_string();
+            return Some(LogEvent::Blocked { path, reason });
+        }
+    }
+    if msg.starts_with("Reading configuration file: ") {
+        return Some(LogEvent::ClientStart);
     }
     if msg.starts_with("ERROR") || msg.contains("ERROR:") || msg.starts_with("Unable to ") {
         return Some(LogEvent::Error(msg.to_string()));
@@ -1299,6 +1427,90 @@ fn oldest_first(mut newest_first: Vec<String>) -> Vec<String> {
     newest_first
 }
 
+/// The files still blocked: the client's latest run reported them and they haven't synced since.
+pub fn blocked_files(unit: &str) -> Vec<Blocked> {
+    // the block messages and client starts only, newest first, then turned around
+    let mut pattern = String::from("Reading configuration file: ");
+    for (prefix, _) in BLOCKED_MESSAGES {
+        pattern.push('|');
+        pattern.push_str(&regex_escape(prefix.trim_end()));
+    }
+    let Some(lines) = journal_grep(unit, &pattern, &["-n", "200", "--reverse"]) else {
+        return Vec::new();
+    };
+    let mut list = Vec::new();
+    let mut since = None;
+    for line in oldest_first(lines) {
+        let Some((when, msg)) = split_journal_line(&line) else {
+            continue;
+        };
+        if let Some(ev) = parse_log(msg) {
+            match ev {
+                LogEvent::Blocked { .. } if since.is_none() => since = Some(when),
+                LogEvent::ClientStart => since = None,
+                _ => {}
+            }
+            track_blocked(&mut list, &ev);
+        }
+    }
+    let Some(since) = since.filter(|_| !list.is_empty()) else {
+        return list;
+    };
+    // a file blocked earlier may have synced since, which only the busy file lines show, so
+    // replay every line about those files (and client starts) from the first block on
+    let mut pattern = String::from("Reading configuration file: ");
+    for b in &list {
+        pattern.push('|');
+        pattern.push_str(&regex_escape(&b.path));
+    }
+    let since = format!("@{}", since.timestamp());
+    let Some(lines) = journal_grep(unit, &pattern, &["--since", &since]) else {
+        return list;
+    };
+    let mut replayed = Vec::new();
+    for line in &lines {
+        if let Some((_, msg)) = split_journal_line(line)
+            && let Some(ev) = parse_log(msg)
+        {
+            track_blocked(&mut replayed, &ev);
+        }
+    }
+    replayed
+}
+
+/// Lines of the unit's journal matching a PCRE2 pattern, or None if journalctl can't grep.
+fn journal_grep(unit: &str, pattern: &str, extra: &[&str]) -> Option<Vec<String>> {
+    let o = Command::new("journalctl")
+        .args(["--user", "-u", unit, "-o", "short-unix", "--no-pager", "-q"])
+        .args(extra)
+        .args(["--grep", pattern])
+        .stderr(Stdio::piped())
+        .output()
+        .ok()?;
+    // exit status 1 with nothing on stderr just means "no matching lines"
+    if !(o.status.success() || (o.status.code() == Some(1) && o.stderr.is_empty())) {
+        return None;
+    }
+    Some(
+        String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .map(String::from)
+            .collect(),
+    )
+}
+
+/// Escapes text for journalctl's --grep (PCRE2), so a file name matches literally.
+fn regex_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        if "\\.^$|?*+()[]{}".contains(ch) {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 pub fn journal_tail(unit: &str, lines: usize) -> Vec<String> {
     Command::new("journalctl")
         .args([
@@ -1363,14 +1575,28 @@ pub struct Status {
     pub phase: Phase,
     pub last_complete: Option<DateTime<Local>>,
     pub last_error: Option<String>,
+    /// Files the client left unsynced while the account itself is fine
+    pub blocked: Vec<Blocked>,
     pub unit: UnitState,
 }
 
 impl Status {
+    /// Files the user changed that couldn't go up.
+    pub fn unsynced_changes(&self) -> usize {
+        self.blocked
+            .iter()
+            .filter(|b| b.reason.needs_attention())
+            .count()
+    }
+
     pub fn text(&self, prefs: &AccountPrefs) -> String {
         match self.phase {
             Phase::Syncing if self.unit.starting => "Starting…".into(),
             Phase::Syncing => "Syncing…".into(),
+            Phase::UpToDate if self.unsynced_changes() > 0 => match self.unsynced_changes() {
+                1 => "1 file not synced".into(),
+                n => format!("{n} files not synced"),
+            },
             Phase::UpToDate => match self.last_complete {
                 Some(t) => format!("Up to date ({})", short_time(t)),
                 None => "Up to date".into(),
@@ -1788,6 +2014,151 @@ mod tests {
         );
         assert_eq!(path_from_uri("https://example.com/x"), None);
         assert_eq!(path_from_uri("file://server/share"), None);
+    }
+
+    #[test]
+    fn blocked_files_are_tracked() {
+        let locked = "Unable to upload this modified file as this is currently checked out or locked for editing by another user: LSAs FILES/Agendas/28.LSA agenda 20.10.26.docx";
+        let ev = parse_log(locked).unwrap();
+        assert!(
+            matches!(&ev, LogEvent::Blocked { path, reason: BlockReason::Locked } if path == "LSAs FILES/Agendas/28.LSA agenda 20.10.26.docx")
+        );
+        assert!(matches!(
+            parse_log("Unable to upload this modified file as this was shared as read-only: ./a/b.txt"),
+            Some(LogEvent::Blocked { path, reason: BlockReason::ReadOnly }) if path == "a/b.txt"
+        ));
+        assert!(matches!(
+            parse_log(
+                "Unable to download this file as this was shared as read-only without download permission: x.pdf"
+            ),
+            Some(LogEvent::Blocked {
+                reason: BlockReason::NoDownload,
+                ..
+            })
+        ));
+        assert!(matches!(
+            parse_log("Unable to upload this modified file at this point in time: x.pdf"),
+            Some(LogEvent::Blocked {
+                reason: BlockReason::NotNow,
+                ..
+            })
+        ));
+        // other "Unable to" lines are still account errors
+        assert!(matches!(
+            parse_log(
+                "Unable to upload modified file as the creation of the upload session URL failed"
+            ),
+            Some(LogEvent::Error(_))
+        ));
+        assert!(matches!(
+            parse_log("Reading configuration file: /home/j/.config/onedrive/config"),
+            Some(LogEvent::ClientStart)
+        ));
+        // the failed upload line that follows the block is not a file event
+        assert!(
+            parse_log("Uploading modified file: LSAs FILES/Agendas/28.LSA agenda 20.10.26.docx ... failed!").is_none()
+        );
+
+        let path = "LSAs FILES/Agendas/28.LSA agenda 20.10.26.docx";
+        let mut list = Vec::new();
+        track_blocked(&mut list, &ev);
+        // a finished sync doesn't mean the file went up
+        track_blocked(&mut list, &LogEvent::Complete);
+        track_blocked(&mut list, &LogEvent::Syncing);
+        assert_eq!(list.len(), 1);
+        // blocked again: still one entry
+        track_blocked(&mut list, &ev);
+        assert_eq!(list.len(), 1);
+        // another file's upload leaves it alone
+        track_blocked(
+            &mut list,
+            &parse_log("Uploading new file: other.docx ... done").unwrap(),
+        );
+        assert_eq!(list.len(), 1);
+        // its own upload clears it
+        track_blocked(
+            &mut list,
+            &parse_log(&format!("Uploading modified file: {path} ... done")).unwrap(),
+        );
+        assert!(list.is_empty());
+        // a new client run forgets old blocks (it reports them again if they still apply)
+        track_blocked(&mut list, &ev);
+        track_blocked(&mut list, &LogEvent::ClientStart);
+        assert!(list.is_empty());
+    }
+
+    #[test]
+    fn blocked_words() {
+        assert_eq!(blocked_text(&[]), "");
+        let one = |p: &str, r| Blocked {
+            path: p.into(),
+            reason: r,
+        };
+        let t = blocked_text(&[one("a/b/Agenda.docx", BlockReason::Locked)]);
+        assert!(t.starts_with("\u{201c}Agenda.docx\u{201d} didn't upload: it's open for editing"));
+        assert!(t.contains("Sync now"));
+        let many: Vec<_> = (0..5)
+            .map(|i| one(&format!("f{i}.txt"), BlockReason::ReadOnly))
+            .collect();
+        let t = blocked_text(&many);
+        assert_eq!(t.lines().count(), 4);
+        assert!(t.ends_with("…and 2 more files."));
+
+        let mut st = Status {
+            phase: Phase::UpToDate,
+            last_complete: None,
+            last_error: None,
+            blocked: vec![one("a.txt", BlockReason::Locked)],
+            unit: UnitState::default(),
+        };
+        let prefs = AccountPrefs::default();
+        assert_eq!(st.text(&prefs), "1 file not synced");
+        st.blocked.push(one("b.txt", BlockReason::Locked));
+        assert_eq!(st.text(&prefs), "2 files not synced");
+        st.blocked.clear();
+        assert_eq!(st.text(&prefs), "Up to date");
+    }
+
+    #[test]
+    fn blocked_names_are_safe() {
+        assert_eq!(shown_name("a/b/c.docx"), "c.docx");
+        // a name with a newline stays on one line
+        assert_eq!(shown_name("dir/evil\nname.txt"), "evil name.txt");
+        let long = format!("x/{}", "y".repeat(200));
+        let shown = shown_name(&long);
+        assert_eq!(shown.chars().count(), 58);
+        assert!(shown.ends_with('…'));
+        let t = blocked_text(&[Blocked {
+            path: "two\nlines.txt".into(),
+            reason: BlockReason::Locked,
+        }]);
+        assert_eq!(t.lines().count(), 1);
+
+        // a view-only file is mentioned but doesn't flag the account
+        let mut st = Status {
+            phase: Phase::UpToDate,
+            last_complete: None,
+            last_error: None,
+            blocked: vec![Blocked {
+                path: "v.pdf".into(),
+                reason: BlockReason::NoDownload,
+            }],
+            unit: UnitState::default(),
+        };
+        assert_eq!(st.unsynced_changes(), 0);
+        assert_eq!(st.text(&AccountPrefs::default()), "Up to date");
+        st.blocked.push(Blocked {
+            path: "w.docx".into(),
+            reason: BlockReason::ReadOnly,
+        });
+        assert_eq!(st.text(&AccountPrefs::default()), "1 file not synced");
+    }
+
+    #[test]
+    fn grep_escape() {
+        assert_eq!(regex_escape("a (1).txt"), "a \\(1\\)\\.txt");
+        assert_eq!(regex_escape("x|y$[z]"), "x\\|y\\$\\[z\\]");
+        assert_eq!(regex_escape("Bahá'í"), "Bahá'í");
     }
 
     #[test]

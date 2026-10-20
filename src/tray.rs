@@ -32,6 +32,12 @@ struct Acc {
     log_phase: Phase,
     last_complete: Option<DateTime<Local>>,
     last_error: Option<String>,
+    blocked: Vec<core::Blocked>,
+    /// Files newly blocked since the tray started, waiting for a notification
+    fresh_blocked: Vec<core::Blocked>,
+    /// Files already notified about this session (until they sync), so a client restart or a
+    /// new login doesn't repeat the same notification
+    told_blocked: HashSet<String>,
     recent: VecDeque<Activity>,
 }
 
@@ -45,6 +51,9 @@ impl Acc {
             log_phase: Phase::Unknown,
             last_complete: None,
             last_error: None,
+            blocked: Vec::new(),
+            fresh_blocked: Vec::new(),
+            told_blocked: HashSet::new(),
             recent: VecDeque::new(),
         }
     }
@@ -59,6 +68,7 @@ impl Acc {
             ),
             last_complete: self.last_complete,
             last_error: self.last_error.clone(),
+            blocked: self.blocked.clone(),
             unit: self.unit.clone(),
         }
     }
@@ -129,6 +139,34 @@ impl Tray {
             items.push(
                 StandardItem {
                     label: e.chars().take(90).collect(),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        for b in a.blocked.iter().take(3) {
+            let why = match b.reason {
+                core::BlockReason::Locked => "open for editing elsewhere",
+                core::BlockReason::ReadOnly => "shared read-only",
+                core::BlockReason::NoDownload => "view-only, can't download",
+                core::BlockReason::NotNow => "turned away; try Sync now",
+            };
+            // a single _ would turn into a keyboard shortcut and vanish
+            let name = core::shown_name(&b.path).replace('_', "__");
+            items.push(
+                StandardItem {
+                    label: format!("Not synced: {name} ({why})"),
+                    enabled: false,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        if a.blocked.len() > 3 {
+            items.push(
+                StandardItem {
+                    label: format!("…and {} more not synced", a.blocked.len() - 3),
                     enabled: false,
                     ..Default::default()
                 }
@@ -484,7 +522,30 @@ fn apply_events(
     })
 }
 
+/// When the tray started: log lines from before then were already there, not news.
+fn tray_started() -> DateTime<Local> {
+    static STARTED: std::sync::OnceLock<DateTime<Local>> = std::sync::OnceLock::new();
+    *STARTED.get_or_init(Local::now)
+}
+
 fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
+    core::track_blocked(&mut a.blocked, &ev);
+    match &ev {
+        LogEvent::Blocked { path, reason }
+            if reason.needs_attention()
+                && when.timestamp() >= tray_started().timestamp()
+                && a.told_blocked.insert(path.clone()) =>
+        {
+            a.fresh_blocked.push(core::Blocked {
+                path: path.clone(),
+                reason: *reason,
+            });
+        }
+        LogEvent::File { path, .. } => {
+            a.told_blocked.remove(path);
+        }
+        _ => {}
+    }
     match ev {
         LogEvent::Syncing => a.log_phase = Phase::Syncing,
         LogEvent::Complete => {
@@ -501,6 +562,7 @@ fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
             a.log_phase = Phase::SignedOut;
             a.last_error = Some("Microsoft needs you to sign in again".into());
         }
+        LogEvent::Blocked { .. } | LogEvent::ClientStart => {}
         LogEvent::File { kind, path } => {
             a.recent.retain(|r| r.path != path);
             a.recent.push_front(Activity { when, kind, path });
@@ -520,6 +582,17 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
         })
         .collect();
     apply_events(&handle, &unit, status);
+    // files blocked before the recent log, and not synced since
+    let blocked = core::blocked_files(&unit);
+    handle.update(|t: &mut Tray| {
+        if let Some(a) = t
+            .accs
+            .iter_mut()
+            .find(|a| a.info.unit.as_deref() == Some(unit.as_str()))
+        {
+            a.blocked = blocked;
+        }
+    });
     loop {
         let child = Command::new("journalctl")
             .args([
@@ -578,6 +651,7 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
 fn poll(handle: ksni::blocking::Handle<Tray>) {
     let mut following: HashSet<String> = HashSet::new();
     let mut last_phase: HashMap<String, Phase> = HashMap::new();
+    tray_started();
     let mut replaced_seen = false;
     let mut round = 0u32;
     loop {
@@ -703,6 +777,19 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
                 share::notify(&format!("OneDrive: {name}"), body);
             }
         }
+        // tell the user about each file that newly couldn't sync (not ones from before the tray started)
+        let fresh: Vec<(String, Vec<core::Blocked>)> = handle
+            .update(|t: &mut Tray| {
+                t.accs
+                    .iter_mut()
+                    .filter(|a| !a.fresh_blocked.is_empty())
+                    .map(|a| (a.info.name.clone(), std::mem::take(&mut a.fresh_blocked)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for (name, list) in fresh {
+            share::notify(&format!("OneDrive: {name}"), &core::blocked_text(&list));
+        }
         // a unit that was removed stops its follower on its next log line; forget it so a re-add works
         following.retain(|u| {
             handle
@@ -763,5 +850,69 @@ pub fn run() {
     thread::spawn(move || poll(h));
     loop {
         thread::park();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn acc() -> Acc {
+        Acc::new(
+            AccountInfo {
+                name: "Work".into(),
+                confdir: "/c".into(),
+                unit: Some("onedrive-work".into()),
+                managed: true,
+                sync_dir: "/s".into(),
+                drive_id: None,
+                kind: "business".into(),
+                signed_in: true,
+            },
+            AccountPrefs::default(),
+        )
+    }
+
+    fn blocked(path: &str, reason: core::BlockReason) -> LogEvent {
+        LogEvent::Blocked {
+            path: path.into(),
+            reason,
+        }
+    }
+
+    #[test]
+    fn blocked_notifications() {
+        use crate::core::BlockReason::*;
+        let mut a = acc();
+        let old = tray_started() - chrono::Duration::hours(1);
+        let now = tray_started() + chrono::Duration::seconds(5);
+        // from before the tray started: listed, not announced
+        apply_one(&mut a, old, blocked("old.docx", Locked));
+        assert_eq!(a.blocked.len(), 1);
+        assert!(a.fresh_blocked.is_empty());
+        // new: announced once
+        apply_one(&mut a, now, blocked("a.docx", Locked));
+        assert_eq!(a.fresh_blocked.len(), 1);
+        a.fresh_blocked.clear();
+        // the client restarts and reports it again: still listed, not announced again
+        apply_one(&mut a, now, LogEvent::ClientStart);
+        assert!(a.blocked.is_empty());
+        apply_one(&mut a, now, blocked("a.docx", Locked));
+        assert_eq!(a.blocked.len(), 1);
+        assert!(a.fresh_blocked.is_empty());
+        // view-only files never notify
+        apply_one(&mut a, now, blocked("v.pdf", NoDownload));
+        assert!(a.fresh_blocked.is_empty());
+        // once it uploads, a later block is news again
+        apply_one(
+            &mut a,
+            now,
+            LogEvent::File {
+                kind: "↑",
+                path: "a.docx".into(),
+            },
+        );
+        apply_one(&mut a, now, blocked("a.docx", Locked));
+        assert_eq!(a.fresh_blocked.len(), 1);
     }
 }

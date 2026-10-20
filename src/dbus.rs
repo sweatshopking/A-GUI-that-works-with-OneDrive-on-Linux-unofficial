@@ -26,6 +26,14 @@ fn session() -> Option<&'static Connection> {
 pub fn notify(app_name: &str, icon: &str, summary: &str, body: &str) -> bool {
     let Some(c) = session() else { return false };
     let hints: HashMap<&str, Value> = HashMap::new();
+    // where the server reads the body as markup, a file name like "<b>x</b>" or "a&b" must
+    // show as written
+    let body = if body_markup(c) {
+        markup_escape(body)
+    } else {
+        body.to_string()
+    };
+    let body = body.as_str();
     c.call_method(
         Some("org.freedesktop.Notifications"),
         "/org/freedesktop/Notifications",
@@ -43,6 +51,29 @@ pub fn notify(app_name: &str, icon: &str, summary: &str, body: &str) -> bool {
         ),
     )
     .is_ok()
+}
+
+/// Whether the notification server reads bodies as markup (KDE and GNOME do).
+fn body_markup(c: &Connection) -> bool {
+    static MARKUP: OnceLock<bool> = OnceLock::new();
+    *MARKUP.get_or_init(|| {
+        c.call_method(
+            Some("org.freedesktop.Notifications"),
+            "/org/freedesktop/Notifications",
+            Some("org.freedesktop.Notifications"),
+            "GetCapabilities",
+            &(),
+        )
+        .ok()
+        .and_then(|m| m.body().deserialize::<Vec<String>>().ok())
+        .is_some_and(|caps| caps.iter().any(|c| c == "body-markup"))
+    })
+}
+
+fn markup_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// What the desktop asks of how apps look, from the settings portal (every desktop with
@@ -269,5 +300,19 @@ pub fn claim_name(name: &str) -> Claim {
         // zbus reports a name held elsewhere as an error rather than a reply
         Ok(_) | Err(zbus::Error::NameTaken) => Claim::TakenByAnother,
         Err(_) => Claim::Unavailable,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_markup() {
+        assert_eq!(
+            markup_escape("<b>a</b> & <img src=x>"),
+            "&lt;b&gt;a&lt;/b&gt; &amp; &lt;img src=x&gt;"
+        );
+        assert_eq!(markup_escape("plain"), "plain");
     }
 }

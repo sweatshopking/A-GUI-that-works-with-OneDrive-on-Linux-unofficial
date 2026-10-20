@@ -205,9 +205,21 @@ fn ss(s: impl AsRef<str>) -> SharedString {
 
 // ---------------------------------------------------------------- status refresh
 
-fn log_state(unit: Option<&str>) -> (Phase, Option<chrono::DateTime<Local>>, Option<String>) {
+struct LogState {
+    phase: Phase,
+    last_complete: Option<chrono::DateTime<Local>>,
+    last_error: Option<String>,
+    blocked: Vec<core::Blocked>,
+}
+
+fn log_state(unit: Option<&str>) -> LogState {
     let Some(unit) = unit else {
-        return (Phase::Unknown, None, None);
+        return LogState {
+            phase: Phase::Unknown,
+            last_complete: None,
+            last_error: None,
+            blocked: Vec::new(),
+        };
     };
     let (mut phase, mut last, mut err) = (Phase::Unknown, None, None);
     for line in core::journal_status_lines(unit) {
@@ -233,7 +245,12 @@ fn log_state(unit: Option<&str>) -> (Phase, Option<chrono::DateTime<Local>>, Opt
             _ => {}
         }
     }
-    (phase, last, err)
+    LogState {
+        phase,
+        last_complete: last,
+        last_error: err,
+        blocked: core::blocked_files(unit),
+    }
 }
 
 fn take_snapshot() -> Snapshot {
@@ -244,12 +261,13 @@ fn take_snapshot() -> Snapshot {
         .map(|i| {
             let unit = i.unit.as_deref().map(core::unit_state).unwrap_or_default();
             let resyncing = core::unit_state(&core::resync_unit(&i.confdir)).active;
-            let (log_phase, last_complete, last_error) = log_state(i.unit.as_deref());
+            let log = log_state(i.unit.as_deref());
             let prefs = settings.prefs(&i.confdir);
             Status {
-                phase: core::compose_phase(i, &prefs, &unit, resyncing, log_phase),
-                last_complete,
-                last_error,
+                phase: core::compose_phase(i, &prefs, &unit, resyncing, log.phase),
+                last_complete: log.last_complete,
+                last_error: log.last_error,
+                blocked: log.blocked,
                 unit,
             }
         })
@@ -261,8 +279,10 @@ fn take_snapshot() -> Snapshot {
     }
 }
 
-fn tone(p: Phase) -> i32 {
-    match p {
+fn tone(s: &Status) -> i32 {
+    match s.phase {
+        // the account is fine, but a file the user changed isn't online
+        Phase::UpToDate if s.unsynced_changes() > 0 => 2,
         Phase::UpToDate => 0,
         Phase::Syncing | Phase::Resyncing | Phase::Unknown => 1,
         Phase::Error | Phase::NeedsResync | Phase::SignedOut => 2,
@@ -453,7 +473,7 @@ fn apply_snapshot(ctx: &Shared, snap: Snapshot) {
             initial: ss(initial(&a.name)),
             kind: ss(a.kind_label()),
             status: ss(s.text(&c.settings.prefs(&a.confdir))),
-            tone: tone(s.phase),
+            tone: tone(s),
         })
         .collect();
     ui.set_accounts(ModelRc::new(VecModel::from(rows)));
@@ -481,7 +501,7 @@ fn show_status(c: &Ctx, i: usize) {
     ui.set_s_kind(ss(a.kind_label()));
     ui.set_s_folder(ss(a.sync_dir.to_string_lossy()));
     ui.set_s_status(ss(s.text(&prefs)));
-    ui.set_s_tone(tone(s.phase));
+    ui.set_s_tone(tone(s));
     ui.set_s_last(ss(s
         .last_complete
         .map(core::short_time)
@@ -491,6 +511,12 @@ fn show_status(c: &Ctx, i: usize) {
         Phase::NeedsResync => "The sync engine needs a full resync before it can continue. Open the Folders tab and press \"Apply changes…\", or turn on \"Allow full resyncs\" in Options and save.".into(),
         Phase::SignedOut if a.signed_in => "Microsoft no longer accepts the saved sign-in (this happens after a password change, or when access is revoked). Sign in again to continue.".into(),
         _ => String::new(),
+    };
+    let blocked = core::blocked_text(&s.blocked);
+    let err = match (err.is_empty(), blocked.is_empty()) {
+        (_, true) => err,
+        (true, false) => blocked,
+        (false, false) => format!("{err}\n{blocked}"),
     };
     ui.set_s_error(ss(err));
     ui.set_s_signed_in(a.signed_in && s.phase != Phase::SignedOut);
@@ -2247,6 +2273,7 @@ fn add_create(ctx: &Shared) {
             },
             last_complete: None,
             last_error: None,
+            blocked: Vec::new(),
             unit: Default::default(),
         });
         c.settings = s;
