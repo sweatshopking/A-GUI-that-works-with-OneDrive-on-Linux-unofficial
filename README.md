@@ -9,7 +9,7 @@ the actual syncing. Install the client and this app, sign in, pick your folders,
 I am not a programmer, and I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code is safe,
 does what it says, or won't harm your PC in some way. It's vibe coded and you are welcome and encouraged
 to review the source code prior to installing. Again, to be clear, this app is not endorsed by Microsoft
-and I'm not affiliated with Microsoft in any way. Since it's just a Rust GUI for the existing OneDrive
+and I'm not affiliated with Microsoft in any way. Since it's a Rust GUI for the existing OneDrive
 sync client, syncing issues should go to the original app, which is linked above.
 
 ![Status page](docs/screenshots/status-light.png)
