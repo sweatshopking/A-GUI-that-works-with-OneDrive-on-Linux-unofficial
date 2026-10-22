@@ -4,7 +4,10 @@
 
 **Sync OneDrive and SharePoint on Linux without the command line.** A settings window and tray icon for
 the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg, which does
-the actual syncing. Install the client and this app, sign in, pick your folders, done.
+the actual syncing. Install the client and this app, sign in, pick your folders, done.The goal was to build a
+full featured GUI based program which any person can install and use without needing the CLI at all or deep knowledge of Linux.
+Basically, I wanted my mom to be able to setup Onedrive on Linux and be able to use it without needing my help. 
+I also wanted it to be light and fast without the need for installing additional python libraries, hence the choice to use Rust.
 
 I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code is safe, does what it says, or won't harm
 your PC in some way. You are welcome and encouraged to review the source code 
