@@ -90,7 +90,14 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
     settings.hidden.clear(); // "remove everything" includes accounts hidden from the app
     let accounts = core::discover(&settings);
 
-    stop_tray();
+    // each account's service is stopped below anyway; a tray that's still there afterwards
+    // can't restart a service whose file is gone
+    if !stop_tray() {
+        notes.push(
+            "The tray icon didn't close. Log out and back in once this is done to be sure it's gone."
+                .into(),
+        );
+    }
     if keep_setup {
         // the background units run the OneDrive Client for Linux directly, so they carry on
         if accounts.iter().any(|a| a.unit.is_some()) {
@@ -101,12 +108,53 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
         }
     } else {
         for acc in &accounts {
-            core::systemctl(&["stop", &core::resync_unit(&acc.confdir)]);
+            if let Err(e) = core::validate_confdir(&acc.confdir) {
+                notes.push(format!(
+                    "{} was left untouched because its settings folder couldn't be checked: {e}",
+                    acc.name
+                ));
+                continue;
+            }
+            let resync = core::resync_unit(&acc.confdir);
+            if core::unit_state(&resync).active {
+                let (ok, err) = core::systemctl(&["stop", &resync]);
+                if !ok {
+                    notes.push(format!(
+                        "{} was left untouched because its one-time sync job couldn't be stopped: {}",
+                        acc.name,
+                        err.trim()
+                    ));
+                    continue;
+                }
+            }
             if let Some(unit) = &acc.unit {
-                core::systemctl(&["disable", "--now", unit]);
+                let (ok, err) = core::systemctl(&["stop", unit]);
+                if !ok {
+                    notes.push(format!(
+                        "{} was left untouched because its sync service couldn't be stopped: {}",
+                        acc.name,
+                        err.trim()
+                    ));
+                    continue;
+                }
+                let (ok, err) = core::systemctl(&["disable", unit]);
+                if !ok {
+                    notes.push(format!(
+                        "{} was stopped, but its service couldn't be disabled. Its files and service were left intact: {}",
+                        acc.name,
+                        err.trim()
+                    ));
+                    continue;
+                }
                 let file = core::user_unit_dir().join(unit);
-                if file.exists() {
-                    let _ = fs::remove_file(&file);
+                if file.exists()
+                    && let Err(e) = fs::remove_file(&file)
+                {
+                    notes.push(format!(
+                            "{} was stopped, but its service file couldn't be removed. Its account files were left intact: {e}",
+                            acc.name
+                        ));
+                    continue;
                 }
             }
             if core::client_binary().is_some() {
@@ -136,7 +184,13 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
                 Err(e) => notes.push(format!("Couldn't delete {}: {e}", acc.confdir.display())),
             }
         }
-        core::systemctl(&["daemon-reload"]);
+        let (ok, err) = core::systemctl(&["daemon-reload"]);
+        if !ok {
+            notes.push(format!(
+                "The account services were removed, but systemd couldn't reload its unit list: {}",
+                err.trim()
+            ));
+        }
     }
 
     // the app's own bits
@@ -153,25 +207,57 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
         data.join("kio/servicemenus")
             .join(format!("{}.desktop", core::APP_ID)),
     ] {
-        let _ = if f.is_dir() {
+        let result = if f.is_dir() {
             fs::remove_dir_all(&f)
         } else {
             fs::remove_file(&f)
         };
+        if let Err(e) = result
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            notes.push(format!("Couldn't remove {}: {e}", f.display()));
+        }
     }
     notes
 }
 
 /// Asks a running tray icon to go away, so it doesn't restart anything while we clean up.
-fn stop_tray() {
-    if let Some(pid) = crate::dbus::name_owner_pid(core::TRAY_BUS_NAME)
+fn stop_tray() -> bool {
+    let Ok(owner) = crate::dbus::name_owner_pid_checked(core::TRAY_BUS_NAME) else {
+        return false;
+    };
+    if let Some(pid) = owner
         && pid != std::process::id()
     {
-        // SAFETY: plain kill(2) on a pid we just looked up; failure is harmless
-        unsafe {
-            libc::kill(pid as i32, libc::SIGTERM);
+        // signal through a pidfd, so a pid reused after this point can't be hit
+        let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+        if raw_fd < 0 {
+            return false;
         }
+        use std::os::fd::FromRawFd;
+        // SAFETY: pidfd_open returned a new owned file descriptor.
+        let pidfd = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw_fd as i32) };
+        let sent = unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                std::os::fd::AsRawFd::as_raw_fd(&pidfd),
+                libc::SIGTERM,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        };
+        if sent != 0 {
+            return false;
+        }
+        for _ in 0..100 {
+            if crate::dbus::name_owner_pid(core::TRAY_BUS_NAME).is_none() {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        return false;
     }
+    true
 }
 
 /// Removes the app itself. Returns a note when the user has to finish by hand.

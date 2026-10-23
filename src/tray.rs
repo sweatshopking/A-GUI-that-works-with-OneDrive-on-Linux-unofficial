@@ -1,28 +1,23 @@
-//! System tray icon: live status per account, quick controls, and the sync schedule enforcer.
+//! System tray icon: live status per account, the panel a click opens (src/popup.rs), a short
+//! menu, and the sync schedule enforcer.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Local};
 use ksni::blocking::TrayMethods;
-use ksni::menu::{CheckmarkItem, MenuItem, StandardItem, SubMenu};
+use ksni::menu::{MenuItem, StandardItem, SubMenu};
 
 use crate::core::{
     self, AccountInfo, AccountPrefs, AppSettings, LogEvent, Phase, Status, UnitState,
 };
 use crate::share;
-
-const RECENT_MAX: usize = 15;
-
-#[derive(Clone)]
-struct Activity {
-    when: DateTime<Local>,
-    kind: &'static str,
-    path: String,
-}
 
 struct Acc {
     info: AccountInfo,
@@ -38,7 +33,8 @@ struct Acc {
     /// Files already notified about this session (until they sync), so a client restart or a
     /// new login doesn't repeat the same notification
     told_blocked: HashSet<String>,
-    recent: VecDeque<Activity>,
+    /// Told about the current big delete; a finished sync means it's over
+    told_big_delete: bool,
 }
 
 impl Acc {
@@ -54,7 +50,7 @@ impl Acc {
             blocked: Vec::new(),
             fresh_blocked: Vec::new(),
             told_blocked: HashSet::new(),
-            recent: VecDeque::new(),
+            told_big_delete: false,
         }
     }
     fn status(&self) -> Status {
@@ -69,6 +65,7 @@ impl Acc {
             last_complete: self.last_complete,
             last_error: self.last_error.clone(),
             blocked: self.blocked.clone(),
+            big_delete: None,
             unit: self.unit.clone(),
         }
     }
@@ -78,6 +75,10 @@ pub struct Tray {
     accs: Vec<Acc>,
     /// Set while the OneDrive Client for Linux is missing or too old
     client_problem: Option<String>,
+    /// "Quit" also stops syncing (App settings)
+    stop_on_quit: bool,
+    /// A newer version that's out
+    update: Option<String>,
 }
 
 fn open_settings(account: Option<&str>) {
@@ -94,13 +95,99 @@ fn open_settings(account: Option<&str>) {
     }
 }
 
+/// The open panel's process and when it opened, and when the last one closed.
+struct PopupState {
+    open: Option<(u32, Instant, Option<OwnedFd>)>,
+    closed: Option<Instant>,
+    /// the activation token the tray host handed over for the latest click on the icon
+    token: Option<(String, Instant)>,
+}
+
+static POPUP: Mutex<PopupState> = Mutex::new(PopupState {
+    open: None,
+    closed: None,
+    token: None,
+});
+
+/// Opens the panel, or closes it if it's open. `at`: where the tray icon was clicked.
+fn toggle_popup(at: Option<(i32, i32)>) {
+    let mut p = POPUP.lock().unwrap();
+    if let Some((_, opened, pidfd)) = p.open.as_ref() {
+        // the second click of a double-click: it was meant to open the panel, which it did
+        if opened.elapsed() < Duration::from_millis(400) {
+            return;
+        }
+        if let Some(fd) = pidfd {
+            // SAFETY: fd is a pidfd for this exact child process, so PID reuse cannot redirect it.
+            unsafe {
+                libc::syscall(
+                    libc::SYS_pidfd_send_signal,
+                    fd.as_raw_fd(),
+                    libc::SIGTERM,
+                    std::ptr::null::<libc::siginfo_t>(),
+                    0,
+                );
+            }
+        }
+        p.open = None;
+        return;
+    }
+    // A click on the icon while the panel is open first takes focus from the panel, which
+    // closes itself, and then arrives here: that click was meant to close it, not reopen it.
+    if p.closed
+        .is_some_and(|t| t.elapsed() < Duration::from_millis(500))
+    {
+        return;
+    }
+    let mut c = Command::new(core::self_command());
+    c.arg("--popup");
+    if let Some((x, y)) = at {
+        c.args([x.to_string(), y.to_string()]);
+    }
+    // the token that came with this click (a token works once, and only soon after)
+    if let Some((token, when)) = p.token.take()
+        && when.elapsed() < Duration::from_secs(2)
+    {
+        c.env("XDG_ACTIVATION_TOKEN", token);
+    }
+    let Ok(mut child) = c.stdout(Stdio::null()).stderr(Stdio::null()).spawn() else {
+        return;
+    };
+    let pid = child.id();
+    let raw_fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid as libc::pid_t, 0) };
+    let pidfd = if raw_fd >= 0 {
+        // SAFETY: pidfd_open returned a new owned file descriptor.
+        Some(unsafe { OwnedFd::from_raw_fd(raw_fd as i32) })
+    } else {
+        None
+    };
+    p.open = Some((pid, Instant::now(), pidfd));
+    drop(p);
+    thread::spawn(move || {
+        let _ = child.wait();
+        let mut p = POPUP.lock().unwrap();
+        if p.open
+            .as_ref()
+            .is_some_and(|(open_pid, _, _)| *open_pid == pid)
+        {
+            p.open = None;
+            // closed by itself (focus moved away); one closed by a click above isn't recorded,
+            // so clicking again right away reopens it
+            p.closed = Some(Instant::now());
+        }
+    });
+}
+
 impl Tray {
     fn overall(&self) -> Phase {
         let ps: Vec<Phase> = self.accs.iter().map(|a| a.status().phase).collect();
         if self.client_problem.is_some()
-            || ps
-                .iter()
-                .any(|p| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut))
+            || ps.iter().any(|p| {
+                matches!(
+                    p,
+                    Phase::Error | Phase::NeedsResync | Phase::SignedOut | Phase::BigDelete
+                )
+            })
         {
             Phase::Error
         } else if ps
@@ -119,290 +206,69 @@ impl Tray {
         }
     }
 
-    fn account_menu(&self, idx: usize) -> MenuItem<Self> {
+    /// One line per account: its status at a glance; a click opens its settings (where any
+    /// fix is).
+    fn account_line(&self, idx: usize) -> MenuItem<Self> {
         let a = &self.accs[idx];
         let st = a.status();
-        let text = st.text(&a.prefs);
-        let key = a.info.key();
-        let mut items: Vec<MenuItem<Self>> = vec![
-            StandardItem {
-                label: text.clone(),
-                icon_name: st.phase.icon().into(),
-                enabled: false,
-                ..Default::default()
-            }
-            .into(),
-        ];
-        if st.phase == Phase::Error
-            && let Some(e) = &a.last_error
-        {
-            items.push(
-                StandardItem {
-                    label: e.chars().take(90).collect(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        for b in a.blocked.iter().take(3) {
-            let why = match b.reason {
-                core::BlockReason::Locked => "open for editing elsewhere",
-                core::BlockReason::ReadOnly => "shared read-only",
-                core::BlockReason::NoDownload => "view-only, can't download",
-                core::BlockReason::NotNow => "turned away; try Sync now",
-            };
+        let k = a.info.key();
+        StandardItem {
             // a single _ would turn into a keyboard shortcut and vanish
-            let name = core::shown_name(&b.path).replace('_', "__");
-            items.push(
-                StandardItem {
-                    label: format!("Not synced: {name} ({why})"),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        if a.blocked.len() > 3 {
-            items.push(
-                StandardItem {
-                    label: format!("…and {} more not synced", a.blocked.len() - 3),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        if matches!(st.phase, Phase::SignedOut | Phase::NeedsResync) {
-            let k = key.clone();
-            items.push(
-                StandardItem {
-                    label: if st.phase == Phase::SignedOut {
-                        "Sign in…".into()
-                    } else {
-                        "Fix in settings…".into()
-                    },
-                    icon_name: "dialog-password".into(),
-                    activate: Box::new(move |_: &mut Self| open_settings(Some(&k))),
-                    ..Default::default()
-                }
-                .into(),
-            );
-        }
-        items.push(MenuItem::Separator);
-        items.push(
-            StandardItem {
-                label: "Open folder".into(),
-                icon_name: "folder-open".into(),
-                activate: Box::new(move |t: &mut Self| core::open_path(&t.accs[idx].info.sync_dir)),
-                ..Default::default()
-            }
-            .into(),
-        );
-        let can_sync = a.info.signed_in && !a.resyncing && self.client_problem.is_none();
-        items.push(
-            StandardItem {
-                label: "Sync now".into(),
-                icon_name: "view-refresh".into(),
-                enabled: can_sync,
-                activate: Box::new(move |t: &mut Self| t.sync_now(idx)),
-                ..Default::default()
-            }
-            .into(),
-        );
-        items.push(
-            CheckmarkItem {
-                label: "Background sync".into(),
-                checked: a.unit.enabled,
-                enabled: a.info.signed_in && !a.resyncing,
-                activate: Box::new(move |t: &mut Self| t.toggle(idx)),
-                ..Default::default()
-            }
-            .into(),
-        );
-        if a.unit.enabled && a.info.signed_in {
-            if a.prefs.paused() {
-                items.push(
-                    StandardItem {
-                        label: "Resume syncing".into(),
-                        icon_name: "media-playback-start".into(),
-                        activate: Box::new(move |t: &mut Self| t.pause(idx, 0)),
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-            } else {
-                let choices = [
-                    ("For 1 hour", 3600),
-                    ("For 4 hours", 4 * 3600),
-                    ("Until tomorrow morning", -1),
-                ];
-                let submenu = choices
-                    .into_iter()
-                    .map(|(label, secs)| {
-                        StandardItem {
-                            label: label.into(),
-                            activate: Box::new(move |t: &mut Self| t.pause(idx, secs)),
-                            ..Default::default()
-                        }
-                        .into()
-                    })
-                    .collect();
-                items.push(
-                    SubMenu {
-                        label: "Pause syncing".into(),
-                        icon_name: "media-playback-pause".into(),
-                        submenu,
-                        ..Default::default()
-                    }
-                    .into(),
-                );
-            }
-        }
-        let recent: Vec<MenuItem<Self>> = if a.recent.is_empty() {
-            vec![
-                StandardItem {
-                    label: "Nothing yet".into(),
-                    enabled: false,
-                    ..Default::default()
-                }
-                .into(),
-            ]
-        } else {
-            a.recent
-                .iter()
-                .enumerate()
-                .map(|(i, r)| {
-                    StandardItem {
-                        label: format!(
-                            "{} {}   {}",
-                            r.kind,
-                            r.path.replace('_', "__"),
-                            core::short_time(r.when)
-                        ),
-                        activate: Box::new(move |t: &mut Self| {
-                            let a = &t.accs[idx];
-                            if let Some(r) = a.recent.get(i) {
-                                core::show_in_folder(&a.info.sync_dir.join(&r.path));
-                            }
-                        }),
-                        ..Default::default()
-                    }
-                    .into()
-                })
-                .collect()
-        };
-        items.push(MenuItem::Separator);
-        items.push(
-            SubMenu {
-                label: "Recent files".into(),
-                icon_name: "document-open-recent".into(),
-                submenu: recent,
-                ..Default::default()
-            }
-            .into(),
-        );
-        let k = key.clone();
-        items.push(
-            StandardItem {
-                label: "Settings…".into(),
-                icon_name: "configure".into(),
-                activate: Box::new(move |_: &mut Self| open_settings(Some(&k))),
-                ..Default::default()
-            }
-            .into(),
-        );
-        SubMenu {
-            label: format!("{} — {}", a.info.name, text),
+            label: format!("{} — {}", a.info.name, st.text(&a.prefs)).replace('_', "__"),
             icon_name: st.phase.icon().into(),
-            submenu: items,
+            activate: Box::new(move |_: &mut Self| open_settings(Some(&k))),
             ..Default::default()
         }
         .into()
     }
 
     fn sync_now(&mut self, idx: usize) {
-        let a = &mut self.accs[idx];
-        // a manual sync outside the schedule window is allowed for an hour
-        if !a.prefs.sync_allowed() {
-            let mut s = AppSettings::load();
-            let p = s.prefs_mut(&a.info.confdir);
-            p.override_until = Local::now().timestamp() + 3600;
-            p.pause_until = 0;
-            let _ = s.save();
-            a.prefs = s.prefs(&a.info.confdir);
-        }
-        match &a.info.unit {
-            Some(u) => {
+        // the menu can be clicked after an account it was built with has gone
+        let Some(a) = self.accs.get_mut(idx) else {
+            return;
+        };
+        match core::sync_now(&a.info) {
+            Ok(u) => {
+                a.info.unit = Some(u);
                 a.unit.starting = true;
                 a.unit.active = true;
-                core::unit_action("restart", u);
+                a.last_error = None;
             }
-            None => {
-                if let Ok(u) = core::ensure_unit(&a.info) {
-                    a.info.unit = Some(u.clone());
-                    core::unit_action("start", &u);
-                }
-            }
+            Err(e) => a.last_error = Some(e),
         }
+        a.prefs = AppSettings::load().prefs(&a.info.confdir);
     }
 
     /// Pauses for `secs` seconds (-1 = until 06:00 tomorrow, 0 = resume).
     fn pause(&mut self, idx: usize, secs: i64) {
-        let a = &mut self.accs[idx];
-        let now = Local::now();
-        let until = match secs {
-            0 => 0,
-            -1 => (now.date_naive() + chrono::Days::new(1))
-                .and_hms_opt(6, 0, 0)
-                .and_then(|t| t.and_local_timezone(Local).single())
-                .map(|t| t.timestamp())
-                .unwrap_or(now.timestamp() + 12 * 3600),
-            s => now.timestamp() + s,
+        let Some(a) = self.accs.get_mut(idx) else {
+            return;
         };
-        let mut s = AppSettings::load();
-        let p = s.prefs_mut(&a.info.confdir);
-        p.pause_until = until;
-        p.override_until = 0;
-        let _ = s.save();
-        a.prefs = s.prefs(&a.info.confdir);
-        if let Some(u) = &a.info.unit {
-            let verb = if until == 0 { "start" } else { "stop" };
-            a.unit.active = until == 0;
-            core::unit_action(verb, u);
-        }
-    }
-
-    fn toggle(&mut self, idx: usize) {
-        let a = &mut self.accs[idx];
-        let on = !a.unit.enabled;
-        let unit = match &a.info.unit {
-            Some(u) => u.clone(),
-            None => match core::ensure_unit(&a.info) {
-                Ok(u) => {
-                    a.info.unit = Some(u.clone());
-                    u
+        match core::pause(&a.info, secs) {
+            Ok(until) => {
+                a.prefs = AppSettings::load().prefs(&a.info.confdir);
+                if a.info.unit.is_some() {
+                    a.unit.active = until == 0;
                 }
-                Err(_) => return,
-            },
-        };
-        a.unit.enabled = on;
-        a.unit.active = on;
-        a.unit.starting = on;
-        core::run_detached(
-            "systemctl",
-            &[
-                "--user",
-                if on { "enable" } else { "disable" },
-                "--now",
-                &unit,
-            ],
-        );
+                a.last_error = None;
+            }
+            Err(e) => a.last_error = Some(e),
+        }
     }
 }
 
 impl ksni::Tray for Tray {
-    const MENU_ON_ACTIVATE: bool = true;
+    // a click opens the panel; the menu is for a right-click
+    const MENU_ON_ACTIVATE: bool = false;
+
+    fn provide_xdg_activation_token(&mut self, token: String) {
+        POPUP.lock().unwrap().token = Some((token, Instant::now()));
+    }
+
+    fn activate(&mut self, x: i32, y: i32) {
+        // some trays don't say where (0, 0): the panel then goes by the mouse
+        toggle_popup((x != 0 || y != 0).then_some((x, y)));
+    }
 
     fn id(&self) -> String {
         core::APP_ID.into()
@@ -446,6 +312,20 @@ impl ksni::Tray for Tray {
     }
     fn menu(&self) -> Vec<MenuItem<Self>> {
         let mut m: Vec<MenuItem<Self>> = Vec::new();
+        if let Some(v) = &self.update {
+            m.push(
+                StandardItem {
+                    label: format!("Version {v} is out — get it…"),
+                    icon_name: "system-software-update".into(),
+                    activate: Box::new(|_: &mut Self| {
+                        core::run_detached("xdg-open", &[crate::update::RELEASES_URL])
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+            m.push(MenuItem::Separator);
+        }
         if let Some(p) = &self.client_problem {
             m.push(
                 StandardItem {
@@ -466,8 +346,8 @@ impl ksni::Tray for Tray {
             );
             m.push(MenuItem::Separator);
         }
-        m.extend((0..self.accs.len()).map(|i| self.account_menu(i)));
-        if m.is_empty() {
+        m.extend((0..self.accs.len()).map(|i| self.account_line(i)));
+        if self.accs.is_empty() {
             m.push(
                 StandardItem {
                     label: "No accounts yet".into(),
@@ -476,6 +356,136 @@ impl ksni::Tray for Tray {
                 }
                 .into(),
             );
+        }
+        m.push(MenuItem::Separator);
+        m.push(
+            StandardItem {
+                label: "Show activity…".into(),
+                icon_name: "view-list-details".into(),
+                activate: Box::new(|_: &mut Self| toggle_popup(None)),
+                ..Default::default()
+            }
+            .into(),
+        );
+        let syncable: Vec<usize> = (0..self.accs.len())
+            .filter(|&i| {
+                let a = &self.accs[i];
+                a.info.signed_in && !a.resyncing && self.client_problem.is_none()
+            })
+            .collect();
+        {
+            let which = syncable.clone();
+            m.push(
+                StandardItem {
+                    label: "Sync now".into(),
+                    icon_name: "view-refresh".into(),
+                    enabled: !which.is_empty(),
+                    activate: Box::new(move |t: &mut Self| {
+                        for &i in &which {
+                            t.sync_now(i);
+                        }
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        // pausing applies to the accounts syncing in the background
+        let pausable: Vec<usize> = syncable
+            .iter()
+            .copied()
+            .filter(|&i| self.accs[i].unit.enabled)
+            .collect();
+        let paused: Vec<usize> = pausable
+            .iter()
+            .copied()
+            .filter(|&i| self.accs[i].prefs.paused())
+            .collect();
+        if !paused.is_empty() {
+            m.push(
+                StandardItem {
+                    label: "Resume syncing".into(),
+                    icon_name: "media-playback-start".into(),
+                    activate: Box::new(move |t: &mut Self| {
+                        for &i in &paused {
+                            t.pause(i, 0);
+                        }
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            );
+        } else if !pausable.is_empty() {
+            let submenu = [
+                ("For 1 hour", 3600),
+                ("For 4 hours", 4 * 3600),
+                ("Until tomorrow morning", -1),
+            ]
+            .into_iter()
+            .map(|(label, secs)| {
+                let which = pausable.clone();
+                StandardItem {
+                    label: label.into(),
+                    activate: Box::new(move |t: &mut Self| {
+                        for &i in &which {
+                            t.pause(i, secs);
+                        }
+                    }),
+                    ..Default::default()
+                }
+                .into()
+            })
+            .collect();
+            m.push(
+                SubMenu {
+                    label: "Pause syncing".into(),
+                    icon_name: "media-playback-pause".into(),
+                    submenu,
+                    ..Default::default()
+                }
+                .into(),
+            );
+        }
+        match self.accs.len() {
+            0 => {}
+            1 => m.push(
+                StandardItem {
+                    label: "Open folder".into(),
+                    icon_name: "folder-open".into(),
+                    activate: Box::new(|t: &mut Self| {
+                        if let Some(a) = t.accs.first() {
+                            core::open_path(&a.info.sync_dir);
+                        }
+                    }),
+                    ..Default::default()
+                }
+                .into(),
+            ),
+            n => {
+                let submenu = (0..n)
+                    .map(|i| {
+                        StandardItem {
+                            label: self.accs[i].info.name.replace('_', "__"),
+                            activate: Box::new(move |t: &mut Self| {
+                                if let Some(a) = t.accs.get(i) {
+                                    core::open_path(&a.info.sync_dir);
+                                }
+                            }),
+                            ..Default::default()
+                        }
+                        .into()
+                    })
+                    .collect();
+                m.push(
+                    SubMenu {
+                        label: "Open folder".into(),
+                        icon_name: "folder-open".into(),
+                        submenu,
+                        ..Default::default()
+                    }
+                    .into(),
+                );
+            }
         }
         m.push(MenuItem::Separator);
         m.push(
@@ -489,9 +499,20 @@ impl ksni::Tray for Tray {
         );
         m.push(
             StandardItem {
-                label: "Quit tray icon".into(),
+                label: if self.stop_on_quit {
+                    "Quit and stop syncing".into()
+                } else {
+                    "Quit tray icon".into()
+                },
                 icon_name: "application-exit".into(),
-                activate: Box::new(|_| std::process::exit(0)),
+                activate: Box::new(|_| {
+                    // read again: the setting may have changed since the menu was built
+                    let settings = AppSettings::load();
+                    if settings.stop_sync_on_quit {
+                        core::stop_all_units(&settings);
+                    }
+                    std::process::exit(0)
+                }),
                 ..Default::default()
             }
             .into(),
@@ -549,6 +570,7 @@ fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
     match ev {
         LogEvent::Syncing => a.log_phase = Phase::Syncing,
         LogEvent::Complete => {
+            a.told_big_delete = false;
             a.log_phase = Phase::UpToDate;
             a.last_complete = Some(when);
             a.last_error = None;
@@ -562,12 +584,11 @@ fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
             a.log_phase = Phase::SignedOut;
             a.last_error = Some("Microsoft needs you to sign in again".into());
         }
-        LogEvent::Blocked { .. } | LogEvent::ClientStart => {}
-        LogEvent::File { kind, path } => {
-            a.recent.retain(|r| r.path != path);
-            a.recent.push_front(Activity { when, kind, path });
-            a.recent.truncate(RECENT_MAX);
-        }
+        LogEvent::BigDelete => a.log_phase = Phase::BigDelete,
+        // a new run checks again; until it says otherwise, the old big delete no longer applies
+        LogEvent::ClientStart if a.log_phase == Phase::BigDelete => a.log_phase = Phase::Unknown,
+        LogEvent::Blocked { .. } | LogEvent::ClientStart | LogEvent::Progress { .. } => {}
+        LogEvent::File { .. } => {}
     }
 }
 
@@ -629,6 +650,8 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
             let line = String::from_utf8_lossy(&raw);
             if let Some((when, msg)) = core::split_journal_line(line.trim_end())
                 && let Some(ev) = core::parse_log(msg)
+                // the popup reads progress itself; here it would only redraw the menu
+                && !matches!(ev, LogEvent::Progress { .. })
             {
                 batch.push((when, ev));
             }
@@ -647,6 +670,12 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
     }
 }
 
+fn set_device_held(confdir: &std::path::Path, held: bool) {
+    let mut s = AppSettings::load();
+    s.prefs_mut(confdir).device_held = held;
+    let _ = s.save();
+}
+
 /// Every few seconds: re-read accounts and settings, poll systemd, and apply schedules.
 fn poll(handle: ksni::blocking::Handle<Tray>) {
     let mut following: HashSet<String> = HashSet::new();
@@ -654,7 +683,26 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
     tray_started();
     let mut replaced_seen = false;
     let mut round = 0u32;
+    // first look for a new version a minute in (not in the rush of logging in), then daily
+    let mut next_update_check = Instant::now() + Duration::from_secs(60);
+    // storage warnings: a few minutes in, then every six hours
+    let mut next_quota_check = Instant::now() + Duration::from_secs(180);
     loop {
+        if UPDATE_CHECK_FAILED.swap(false, Ordering::Relaxed) {
+            // offline at login, or GitHub busy: try again within the hour
+            next_update_check = Instant::now() + Duration::from_secs(3600);
+        }
+        if Instant::now() >= next_update_check {
+            next_update_check = Instant::now() + Duration::from_secs(24 * 3600);
+            if AppSettings::load().check_updates.unwrap_or(true) {
+                let h = handle.clone();
+                thread::spawn(move || check_for_update(&h));
+            }
+        }
+        if Instant::now() >= next_quota_check {
+            next_quota_check = Instant::now() + Duration::from_secs(6 * 3600);
+            thread::spawn(check_storage);
+        }
         if round.is_multiple_of(20) {
             let problem = match core::check_client() {
                 core::ClientCheck::Ok { .. } => None,
@@ -694,21 +742,35 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         for (info, (st, resyncing)) in infos.iter().zip(&states) {
             let prefs = settings.prefs(&info.confdir);
             let Some(unit) = &info.unit else { continue };
-            let managed_by_time = prefs.schedule.enabled || prefs.pause_until > 0;
+            let hold = core::device_hold();
+            let managed_by_time = prefs.schedule.enabled
+                || prefs.pause_until > 0
+                || hold.is_some()
+                || prefs.device_held;
             if !managed_by_time
                 || !st.enabled
                 || *resyncing
                 || !info.signed_in
                 || core::account_busy(&info.confdir)
+                || core::unit_held(unit)
             {
                 continue;
             }
             let allowed = prefs.sync_allowed();
             if allowed && !st.active && !st.failed {
                 expired_pause |= prefs.pause_until > 0 && !prefs.paused();
+                if prefs.device_held {
+                    set_device_held(&info.confdir, false);
+                }
                 core::run_detached("systemctl", &["--user", "start", unit]);
             } else if !allowed && st.active {
+                // remember a stop for the network or battery, so it restarts when that's over
+                if hold.is_some() && !prefs.device_held {
+                    set_device_held(&info.confdir, true);
+                }
                 core::run_detached("systemctl", &["--user", "stop", unit]);
+            } else if prefs.device_held && hold.is_none() && !st.active && st.failed {
+                set_device_held(&info.confdir, false);
             }
         }
 
@@ -732,6 +794,11 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         }
 
         handle.update(|t: &mut Tray| {
+            t.stop_on_quit = settings.stop_sync_on_quit;
+            // switched off since one was found: stop offering it
+            if !settings.check_updates.unwrap_or(true) {
+                t.update = None;
+            }
             let mut old: Vec<Acc> = std::mem::take(&mut t.accs);
             for (info, (st, resyncing)) in infos.into_iter().zip(states) {
                 let prefs = settings.prefs(&info.confdir);
@@ -750,22 +817,56 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
             }
         });
         // tell the user when an account newly needs attention
-        let phases: Vec<(String, String, Phase)> = handle
+        let phases: Vec<(String, String, Phase, Option<String>, bool)> = handle
             .update(|t: &mut Tray| {
                 t.accs
                     .iter()
-                    .map(|a| (a.info.key(), a.info.name.clone(), a.status().phase))
+                    .map(|a| {
+                        (
+                            a.info.key(),
+                            a.info.name.clone(),
+                            a.status().phase,
+                            a.info.unit.clone(),
+                            a.unit.retrying,
+                        )
+                    })
                     .collect()
             })
             .unwrap_or_default();
-        for (key, name, phase) in &phases {
-            let before = last_phase.insert(key.clone(), *phase);
-            let bad = |p: Phase| matches!(p, Phase::Error | Phase::NeedsResync | Phase::SignedOut);
-            if let Some(before) = before
-                && bad(*phase)
-                && !bad(before)
+        for (key, name, phase, unit, retrying) in &phases {
+            if *phase == Phase::BigDelete
+                && *retrying
+                && let Some(u) = unit
             {
+                // each restart would stop again (and the client may notify each time); only
+                // while it waits to restart, as a run that just started may have been fixed
+                core::hold_for_big_delete(u);
+            }
+            let before = last_phase.insert(key.clone(), *phase);
+            let bad = |p: Phase| {
+                matches!(
+                    p,
+                    Phase::Error | Phase::NeedsResync | Phase::SignedOut | Phase::BigDelete
+                )
+            };
+            // A big delete is told about once until a sync finishes (the log decides, so a
+            // quick fix-and-repeat between two polls isn't missed); "Sync now" while it's still
+            // there stops again without telling again.
+            let big_delete_news = *phase == Phase::BigDelete
+                && !handle
+                    .update(|t: &mut Tray| {
+                        let a = t.accs.iter_mut().find(|a| a.info.key() == *key)?;
+                        Some(std::mem::replace(&mut a.told_big_delete, true))
+                    })
+                    .flatten()
+                    .unwrap_or(true);
+            let newly_bad =
+                *phase != Phase::BigDelete && before.is_some_and(|b| bad(*phase) && !bad(b));
+            if big_delete_news || newly_bad {
                 let body = match phase {
+                    Phase::BigDelete => {
+                        "Many files were deleted on this computer, so syncing stopped before deleting them online. Click the OneDrive icon to choose what to do."
+                    }
                     Phase::SignedOut => {
                         "Microsoft needs you to sign in again. Open the tray menu to fix it."
                     }
@@ -810,6 +911,78 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
     }
 }
 
+static UPDATE_CHECK_FAILED: AtomicBool = AtomicBool::new(false);
+
+/// Warns once when an account's storage is nearly full (90%) and again when it's full, as the
+/// Windows app does. Full storage stops uploads.
+fn check_storage() {
+    let settings = AppSettings::load();
+    for info in core::discover(&settings) {
+        if !info.signed_in {
+            continue;
+        }
+        let Ok(tok) = crate::graph::token(&info.confdir) else {
+            continue;
+        };
+        let Ok(q) = crate::graph::quota(&tok, info.drive_id.as_deref()) else {
+            continue;
+        };
+        let warned = settings.prefs(&info.confdir).quota_warned;
+        let Some(level) = core::quota_warning(q.used, q.total, warned) else {
+            continue;
+        };
+        let mut s = AppSettings::load();
+        s.prefs_mut(&info.confdir).quota_warned = level;
+        let _ = s.save();
+        let amount = format!(
+            "{} of {}",
+            crate::graph::human_size(q.used),
+            crate::graph::human_size(q.total)
+        );
+        let body = match level {
+            100 => format!(
+                "{} is full ({amount}). New and changed files won't upload until you free up space or get more storage.",
+                info.name
+            ),
+            90 => format!(
+                "{} is almost full ({amount}). Free up space or get more storage before uploads stop.",
+                info.name
+            ),
+            _ => continue,
+        };
+        share::notify(&format!("OneDrive: {}", info.name), &body);
+    }
+}
+
+/// Looks for a newer version; shows it in the menu, and tells the user once per version.
+fn check_for_update(handle: &ksni::blocking::Handle<Tray>) {
+    let latest = match crate::update::latest_version() {
+        Ok(Some(v)) => v,
+        // nothing to offer: look again tomorrow, as usual
+        Ok(None) => return,
+        Err(()) => {
+            UPDATE_CHECK_FAILED.store(true, Ordering::Relaxed);
+            return;
+        }
+    };
+    if !crate::update::is_newer(&latest, env!("CARGO_PKG_VERSION")) {
+        return;
+    }
+    let v = latest;
+    handle.update(|t: &mut Tray| t.update = Some(v.clone()));
+    let mut s = AppSettings::load();
+    if s.update_notified.as_deref() != Some(v.as_str()) {
+        s.update_notified = Some(v.clone());
+        let _ = s.save();
+        share::notify(
+            "OneDrive: a new version is out",
+            &format!(
+                "Version {v} of this app is available. Click the OneDrive tray icon (or right-click it) to get it."
+            ),
+        );
+    }
+}
+
 /// Set on the tray we start after an update, so it waits for this one to leave.
 pub const RESTART_ENV: &str = "LINUX_ONEDRIVE_GUI_TRAY_RESTART";
 
@@ -827,15 +1000,31 @@ fn restart_into_new_version() {
 }
 
 pub fn run() {
-    crate::ui::recover_interrupted_preview();
+    // if an interrupted preview can't be put right, keep the tray (so the user still sees what's
+    // going on) but start nothing: recovery keeps that account marked busy meanwhile
+    let recovered = crate::ui::recover_interrupted_preview();
+    if let Err(e) = &recovered {
+        share::notify(
+            "Preview recovery needs attention",
+            &format!(
+                "Sync services weren't started because preview settings couldn't be put back: {e}"
+            ),
+        );
+    }
+    // an AppImage update doesn't touch the Dolphin actions it once added for this user
+    share::refresh_service_menu();
     core::repair_managed_units();
-    core::start_idle_units(&AppSettings::load());
+    if recovered.is_ok() {
+        core::start_idle_units(&AppSettings::load());
+    }
     // At login we can start before the panel is ready, and on GNOME there may be no tray at
     // all. Keep running either way: the icon appears whenever a tray shows up, and schedules
     // and pauses are enforced meanwhile.
     let handle = match (Tray {
         accs: Vec::new(),
         client_problem: None,
+        stop_on_quit: AppSettings::load().stop_sync_on_quit,
+        update: None,
     })
     .assume_sni_available(true)
     .spawn()
@@ -878,6 +1067,22 @@ mod tests {
             path: path.into(),
             reason,
         }
+    }
+
+    #[test]
+    fn big_delete_phase() {
+        let mut a = acc();
+        let now = tray_started();
+        apply_one(&mut a, now, LogEvent::Syncing);
+        apply_one(&mut a, now, LogEvent::BigDelete);
+        assert_eq!(a.log_phase, Phase::BigDelete);
+        // a new run: no longer known until it says
+        apply_one(&mut a, now, LogEvent::ClientStart);
+        assert_eq!(a.log_phase, Phase::Unknown);
+        // a client start doesn't touch other phases
+        apply_one(&mut a, now, LogEvent::Complete);
+        apply_one(&mut a, now, LogEvent::ClientStart);
+        assert_eq!(a.log_phase, Phase::UpToDate);
     }
 
     #[test]

@@ -5,6 +5,7 @@
 //! refresh token file is only ever read, never rewritten, so the client's own sign-in is unaffected.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -130,8 +131,14 @@ fn get(tok: &Token, url: &str) -> Result<Value, String> {
 }
 
 fn get_all(tok: &Token, mut url: String) -> Result<Vec<Value>, String> {
+    // a server that keeps sending next links (or the same one again) mustn't hold us forever
+    const MAX_PAGES: usize = 100;
     let mut out = Vec::new();
-    loop {
+    let mut seen = std::collections::HashSet::new();
+    for _ in 0..MAX_PAGES {
+        if !seen.insert(url.clone()) {
+            return Err("Microsoft repeated a page while listing items. Try again later.".into());
+        }
         let v = get(tok, &url)?;
         if let Some(items) = v["value"].as_array() {
             out.extend(items.iter().cloned());
@@ -143,6 +150,7 @@ fn get_all(tok: &Token, mut url: String) -> Result<Vec<Value>, String> {
             None => return Ok(out),
         }
     }
+    Err("Microsoft sent too many pages for this list. Try again later.".into())
 }
 
 fn is_graph(url: &str) -> bool {
@@ -297,15 +305,20 @@ fn site_libraries(tok: &Token, site_id: &str, site_name: &str) -> Result<Vec<Lib
             enc(site_id)
         ),
     )?;
-    Ok(drives
+    drives
         .iter()
-        .map(|d| Library {
-            site: site_name.to_string(),
-            name: d["name"].as_str().unwrap_or("").to_string(),
-            drive_id: d["id"].as_str().unwrap_or("").to_string(),
-            web_url: d["webUrl"].as_str().unwrap_or("").to_string(),
+        .map(|d| {
+            Ok(Library {
+                site: site_name.to_string(),
+                name: d["name"].as_str().unwrap_or("").to_string(),
+                drive_id: d["id"]
+                    .as_str()
+                    .ok_or_else(|| "Microsoft returned a library without an ID.".to_string())?
+                    .to_string(),
+                web_url: d["webUrl"].as_str().unwrap_or("").to_string(),
+            })
         })
-        .collect())
+        .collect()
 }
 
 /// Splits a SharePoint address into (host, site path), e.g.
@@ -453,6 +466,268 @@ pub fn web_url(tok: &Token, drive_id: Option<&str>) -> Result<String, String> {
     item_web_url(tok, drive_id, "")
 }
 
+/// Pages of the OneDrive website the Windows app links to.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WebPage {
+    Home,
+    RecycleBin,
+    /// "Restore your OneDrive": roll everything back to an earlier time (personal accounts)
+    Restore,
+}
+
+/// The SharePoint site a work, school or SharePoint library address belongs to: the address
+/// without its last part (the library). None for a personal account's address.
+fn sharepoint_site(library_url: &str) -> Option<String> {
+    let rest = library_url.strip_prefix("https://")?;
+    let host = rest.split('/').next()?;
+    if !host.contains(".sharepoint.") {
+        return None;
+    }
+    let trimmed = library_url.trim_end_matches('/');
+    let (site, _library) = trimmed.rsplit_once('/')?;
+    (site.len() > "https://".len() + host.len())
+        .then(|| site.to_string())
+        .or_else(|| Some(format!("https://{host}")))
+}
+
+/// The address of a page of the OneDrive website for an account.
+pub fn web_page(tok: &Token, drive_id: Option<&str>, page: WebPage) -> Result<String, String> {
+    let home = web_url(tok, drive_id)?;
+    Ok(web_page_for(&home, page))
+}
+
+fn web_page_for(home: &str, page: WebPage) -> String {
+    match (page, sharepoint_site(home)) {
+        (WebPage::Home, _) => home.to_string(),
+        (WebPage::RecycleBin, Some(site)) => format!("{site}/_layouts/15/RecycleBin.aspx"),
+        // no restore page of its own for work or school: the recycle bin is where to start
+        (WebPage::Restore, Some(site)) => format!("{site}/_layouts/15/RecycleBin.aspx"),
+        (WebPage::RecycleBin, None) => "https://onedrive.live.com/?v=recyclebin".into(),
+        (WebPage::Restore, None) => "https://onedrive.live.com/?v=restore".into(),
+    }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    #[test]
+    fn pages() {
+        let b = "https://contoso-my.sharepoint.com/personal/jo_contoso_com/Documents";
+        assert_eq!(
+            web_page_for(b, WebPage::RecycleBin),
+            "https://contoso-my.sharepoint.com/personal/jo_contoso_com/_layouts/15/RecycleBin.aspx"
+        );
+        let sp = "https://contoso.sharepoint.com/sites/Team/Shared%20Documents";
+        assert_eq!(
+            web_page_for(sp, WebPage::RecycleBin),
+            "https://contoso.sharepoint.com/sites/Team/_layouts/15/RecycleBin.aspx"
+        );
+        let root = "https://contoso.sharepoint.com/Shared%20Documents";
+        assert_eq!(
+            web_page_for(root, WebPage::RecycleBin),
+            "https://contoso.sharepoint.com/_layouts/15/RecycleBin.aspx"
+        );
+        let p = "https://onedrive.live.com/?cid=abc";
+        assert!(web_page_for(p, WebPage::RecycleBin).starts_with("https://onedrive.live.com/"));
+        assert_eq!(web_page_for(p, WebPage::Home), p);
+    }
+}
+
+/// One saved version of a file, newest first in `versions`.
+#[derive(Clone, Debug)]
+pub struct Version {
+    pub id: String,
+    /// RFC 3339
+    pub modified: String,
+    pub size: u64,
+    pub by: String,
+}
+
+/// A file's saved versions, newest (the current one) first.
+pub fn versions(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<Vec<Version>, String> {
+    let items = get_all(
+        tok,
+        format!(
+            "{}/versions?$select=id,lastModifiedDateTime,size,lastModifiedBy",
+            item_url(drive_id, rel)
+        ),
+    )?;
+    let mut out: Vec<Version> = items
+        .iter()
+        .map(|v| Version {
+            id: v["id"].as_str().unwrap_or("").to_string(),
+            modified: v["lastModifiedDateTime"].as_str().unwrap_or("").to_string(),
+            size: v["size"].as_u64().unwrap_or(0),
+            by: v["lastModifiedBy"]["user"]["displayName"]
+                .as_str()
+                .unwrap_or("")
+                .to_string(),
+        })
+        .filter(|v| !v.id.is_empty())
+        .collect();
+    // RFC 3339 times in UTC sort as text
+    out.sort_by(|a, b| b.modified.cmp(&a.modified));
+    Ok(out)
+}
+
+fn version_url(drive_id: Option<&str>, rel: &str, id: &str) -> String {
+    format!("{}/versions/{}", item_url(drive_id, rel), enc(id))
+}
+
+/// Saves an old version of a file to `dest`.
+pub fn download_version(
+    tok: &Token,
+    drive_id: Option<&str>,
+    rel: &str,
+    id: &str,
+    dest: &Path,
+) -> Result<(), String> {
+    if let Ok(meta) = std::fs::symlink_metadata(dest) {
+        if meta.file_type().is_file() {
+            return Ok(()); // a completed cached copy is safe to reuse
+        }
+        return Err(format!(
+            "{} already exists and isn't a regular file.",
+            dest.display()
+        ));
+    }
+    let resp = agent()
+        .get(at(&format!("{}/content", version_url(drive_id, rel, id))))
+        .header("Authorization", &format!("Bearer {}", tok.access))
+        .call()
+        .map_err(unreachable)?;
+    if resp.status().as_u16() >= 400 {
+        return Err(format!(
+            "Microsoft wouldn't send that version ({}).",
+            resp.status()
+        ));
+    }
+    static NEXT_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
+    let parent = dest
+        .parent()
+        .ok_or_else(|| "Couldn't find where to save that version.".to_string())?;
+    let base = dest
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    let mut temp = None;
+    for _ in 0..32 {
+        let n = NEXT_DOWNLOAD.fetch_add(1, Ordering::Relaxed);
+        let path = parent.join(format!(".{base}.download-{}-{n}", std::process::id()));
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => {
+                temp = Some((path, file));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(format!("Couldn't save it: {e}")),
+        }
+    }
+    let (temp_path, mut file) = temp.ok_or_else(|| {
+        "Couldn't allocate a temporary file for that version download.".to_string()
+    })?;
+    let result = (|| {
+        std::io::copy(&mut resp.into_body().into_reader(), &mut file)
+            .map_err(|e| format!("The download stopped: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("Couldn't finish saving that version: {e}"))?;
+        drop(file);
+        match crate::core::rename_noreplace(&temp_path, dest) {
+            Ok(()) => Ok(()),
+            // Another request completed this same version at the same time.
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                if std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_file()) {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "{} already exists and isn't a regular file.",
+                        dest.display()
+                    ))
+                }
+            }
+            Err(e) => Err(format!("Couldn't finish saving that version: {e}")),
+        }
+    })();
+    let _ = std::fs::remove_file(&temp_path);
+    result
+}
+
+/// Sends a POST and reads the reply; an empty reply (204) is fine.
+fn post(tok: &Token, url: &str, body: Option<Value>) -> Result<Value, String> {
+    let req = agent()
+        .post(at(url))
+        .header("Authorization", &format!("Bearer {}", tok.access));
+    let mut resp = match body {
+        Some(b) => req.send_json(b),
+        None => req.header("Content-Length", "0").send_empty(),
+    }
+    .map_err(unreachable)?;
+    let status = resp.status().as_u16();
+    if status == 204 {
+        return Ok(Value::Null);
+    }
+    let v = read_reply(&mut resp).unwrap_or(Value::Null);
+    if status >= 400 {
+        return Err(v["error"]["message"]
+            .as_str()
+            .unwrap_or("Microsoft turned the request down.")
+            .to_string());
+    }
+    Ok(v)
+}
+
+/// Makes an old version the current one again (the current one becomes a version itself).
+pub fn restore_version(
+    tok: &Token,
+    drive_id: Option<&str>,
+    rel: &str,
+    id: &str,
+) -> Result<(), String> {
+    post(
+        tok,
+        &format!("{}/restoreVersion", version_url(drive_id, rel, id)),
+        None,
+    )
+    .map(|_| ())
+}
+
+/// Shares a file or folder with particular people by email: they get an invitation and must
+/// sign in to open it.
+pub fn invite(
+    tok: &Token,
+    drive_id: Option<&str>,
+    rel: &str,
+    emails: &[String],
+    edit: bool,
+    message: &str,
+) -> Result<(), String> {
+    let recipients: Vec<Value> = emails
+        .iter()
+        .map(|e| serde_json::json!({ "email": e }))
+        .collect();
+    let mut body = serde_json::json!({
+        "recipients": recipients,
+        "requireSignIn": true,
+        "sendInvitation": true,
+        "roles": [if edit { "write" } else { "read" }],
+    });
+    if !message.trim().is_empty() {
+        body["message"] = Value::String(message.trim().chars().take(2000).collect());
+    }
+    post(
+        tok,
+        &format!("{}/invite", item_url(drive_id, rel)),
+        Some(body),
+    )
+    .map(|_| ())
+}
+
 /// Who a sharing link works for.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LinkScope {
@@ -460,31 +735,41 @@ pub enum LinkScope {
     Organization,
 }
 
-/// Creates a view-only sharing link. Personal accounts get "anyone with the link"; work, school
-/// and SharePoint accounts only ever get "people in your organization", never a public link. When
-/// the account's kind isn't known yet, organization is tried first: personal accounts can't make
-/// those, so they end up with an anyone link as they should.
+/// Creates a sharing link, view-only or for editing. Personal accounts get "anyone with the
+/// link"; work, school and SharePoint accounts only ever get "people in your organization".
+/// When the account's kind isn't known yet it is looked up first: a failed organization link
+/// doesn't prove an account is personal, so we never fall back to a public link.
 pub fn create_link(
     tok: &Token,
     drive_id: Option<&str>,
     rel: &str,
     account_kind: &str,
+    edit: bool,
 ) -> Result<(String, LinkScope), String> {
     let url = format!("{}/createLink", item_url(drive_id, rel));
+    let looked_up;
+    let account_kind = match account_kind {
+        "personal" | "business" | "sharepoint" => account_kind,
+        _ => {
+            looked_up = crate::graph::account_kind(tok).map_err(|e| {
+                format!("Couldn't check what kind of account this is, so no link was made: {e}")
+            })?;
+            looked_up.as_str()
+        }
+    };
     let scopes: &[(&str, LinkScope)] = match account_kind {
         "personal" => &[("anonymous", LinkScope::Anyone)],
-        "business" | "sharepoint" => &[("organization", LinkScope::Organization)],
-        _ => &[
-            ("organization", LinkScope::Organization),
-            ("anonymous", LinkScope::Anyone),
-        ],
+        _ => &[("organization", LinkScope::Organization)],
     };
     let mut last = String::new();
     for &(scope, kind) in scopes {
         let mut resp = agent()
             .post(at(&url))
             .header("Authorization", &format!("Bearer {}", tok.access))
-            .send_json(serde_json::json!({ "type": "view", "scope": scope }))
+            .send_json(serde_json::json!({
+                "type": if edit { "edit" } else { "view" },
+                "scope": scope
+            }))
             .map_err(unreachable)?;
         let status = resp.status().as_u16();
         let v = read_reply(&mut resp)?;

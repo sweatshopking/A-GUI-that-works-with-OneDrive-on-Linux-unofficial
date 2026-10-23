@@ -1,1 +1,7 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22"><path d="M5.5 17h10a3.5 3.5 0 0 0 .4-7 5 5 0 0 0-9.6-1A4 4 0 0 0 5.5 17z" fill="none" stroke="#8a929c" stroke-width="1.6" stroke-linejoin="round"/><circle cx="16" cy="16" r="5" fill="#d93f3f"/><path d="M16 13.3v3.3" stroke="#fff" stroke-width="1.7" stroke-linecap="round"/><circle cx="16" cy="18.6" r="0.95" fill="#fff"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 22 22"><defs>
+ <linearGradient id="c" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#5aa8ff"/><stop offset="1" stop-color="#2a5fe0"/></linearGradient>
+</defs>
+<path transform="translate(-1.1,-1.9) scale(1.16)" d="M4.6 16.6h9.6a3.4 3.4 0 0 0 .4-6.8 4.9 4.9 0 0 0-9.3-.9A3.9 3.9 0 0 0 4.6 16.6z" fill="url(#c)"/>
+<path transform="translate(-1.1,-1.9) scale(1.16)" d="M4.6 16.6h9.6a3.4 3.4 0 0 0 .4-6.8 4.9 4.9 0 0 0-9.3-.9A3.9 3.9 0 0 0 4.6 16.6z" fill="none" stroke="#fff" stroke-opacity="0.45" stroke-width="0.6"/>
+<circle cx="16.3" cy="16.3" r="5" fill="#e5484d" stroke="#fff" stroke-width="1.2"/>
+<path d="M16.3 13.6v3" stroke="#fff" stroke-width="1.6" stroke-linecap="round"/><circle cx="16.3" cy="18.6" r="0.95" fill="#fff"/></svg>

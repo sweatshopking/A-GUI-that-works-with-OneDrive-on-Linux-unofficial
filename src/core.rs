@@ -1,11 +1,12 @@
 //! Shared plumbing: finding the onedrive client, accounts, config files, systemd units,
 //! app settings and log parsing. Used by both the tray and the settings window.
 
-use std::collections::{BTreeMap, HashMap};
-use std::fs;
-use std::io::Write;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
@@ -32,6 +33,12 @@ pub fn data_home() -> PathBuf {
     std::env::var("XDG_DATA_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home().join(".local/share"))
+}
+
+pub fn cache_home() -> PathBuf {
+    std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home().join(".cache"))
 }
 
 pub fn app_dir() -> PathBuf {
@@ -230,6 +237,10 @@ pub fn parse_hhmm(s: &str) -> Option<chrono::NaiveTime> {
     chrono::NaiveTime::parse_from_str(s.trim(), "%H:%M").ok()
 }
 
+fn is_zero_u8(n: &u8) -> bool {
+    *n == 0
+}
+
 fn is_zero(n: &i64) -> bool {
     *n == 0
 }
@@ -256,18 +267,91 @@ pub struct AccountPrefs {
     /// Unix time until which syncing is paused from the tray.
     #[serde(skip_serializing_if = "is_zero")]
     pub pause_until: i64,
+    /// The tray stopped it for a metered network or battery saver, so it starts it again after.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub device_held: bool,
+    /// Desktop folders (Documents, Pictures…) backed up into this account
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub backups: Vec<crate::backup::Backup>,
+    /// The storage warning already given: 0 none, 90 nearly full, 100 full.
+    #[serde(skip_serializing_if = "is_zero_u8")]
+    pub quota_warned: u8,
 }
 
 impl AccountPrefs {
     pub fn paused(&self) -> bool {
         self.pause_until > Local::now().timestamp()
     }
-    /// Whether the background service should be running right now.
+    /// Whether the background service should be running right now. "Sync now" (the override)
+    /// gets past a schedule and a metered network or battery saver for an hour.
     pub fn sync_allowed(&self) -> bool {
         let now = Local::now();
+        let overridden = self.override_until > now.timestamp();
         !self.paused()
-            && (self.schedule.allows(now.time()) || self.override_until > now.timestamp())
+            && (self.schedule.allows(now.time()) || overridden)
+            && (device_hold().is_none() || overridden)
     }
+}
+
+/// Which storage warning is due for an account using `used` of `total`, given the one already
+/// given: Some(level) to warn now (and remember), None for no change. Back under 85% resets it,
+/// so filling up again warns again.
+pub fn quota_warning(used: u64, total: u64, warned: u8) -> Option<u8> {
+    if total == 0 {
+        return None;
+    }
+    let pct = used as f64 * 100.0 / total as f64;
+    let level = if pct >= 100.0 {
+        100
+    } else if pct >= 90.0 {
+        90
+    } else if pct < 85.0 {
+        0
+    } else {
+        warned // 85-90%: keep what was said, so it doesn't flap around 90%
+    };
+    (level != warned).then_some(level)
+}
+
+/// Why syncing is held back for the whole computer, as Windows does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Hold {
+    /// The network connection is marked as metered (a phone hotspot, a capped plan)
+    Metered,
+    /// The power profile is set to power saving (battery saver)
+    PowerSaver,
+}
+
+impl Hold {
+    pub fn words(self) -> &'static str {
+        match self {
+            Hold::Metered => "metered connection",
+            Hold::PowerSaver => "power saver",
+        }
+    }
+}
+
+/// The current hold, if the user wants syncing to pause for it (both on unless switched off in
+/// App settings). Asked often, so the answer is kept for ten seconds.
+pub fn device_hold() -> Option<Hold> {
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<Hold>)>> =
+        std::sync::Mutex::new(None);
+    let mut c = CACHE.lock().unwrap();
+    if let Some((at, h)) = *c
+        && at.elapsed() < std::time::Duration::from_secs(10)
+    {
+        return h;
+    }
+    let s = AppSettings::load();
+    let h = if s.pause_on_metered.unwrap_or(true) && crate::dbus::network_metered() {
+        Some(Hold::Metered)
+    } else if s.pause_on_power_saver.unwrap_or(true) && crate::dbus::power_saver() {
+        Some(Hold::PowerSaver)
+    } else {
+        None
+    };
+    *c = Some((std::time::Instant::now(), h));
+    h
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -281,6 +365,24 @@ pub struct AppSettings {
     /// The see-through window: None follows the desktop (see ui::glass_wanted).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub glass: Option<bool>,
+    /// Quitting the tray icon also stops syncing (until the app starts again)
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub stop_sync_on_quit: bool,
+    /// Look for new versions once a day (None: yes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check_updates: Option<bool>,
+    /// The newest version the user was already told about
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update_notified: Option<String>,
+    /// Pause syncing on a metered network (None: yes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_on_metered: Option<bool>,
+    /// Pause syncing while battery saver is on (None: yes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pause_on_power_saver: Option<bool>,
+    /// Prevents a fallback/default value from overwriting settings that could not be loaded.
+    #[serde(skip)]
+    load_error: Option<String>,
 }
 
 impl AppSettings {
@@ -288,24 +390,41 @@ impl AppSettings {
         app_dir().join("settings.json")
     }
     pub fn load() -> Self {
-        let Ok(text) = fs::read_to_string(Self::path()) else {
-            return Self::default();
+        let path = Self::path();
+        let text = match fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Self::default(),
+            Err(e) => {
+                return Self {
+                    load_error: Some(format!("Couldn't read {}: {e}", path.display())),
+                    ..Self::default()
+                };
+            }
         };
         serde_json::from_str(&text).unwrap_or_else(|e| {
-            // keep a damaged file rather than overwrite it with defaults on the next save
-            let aside = Self::path().with_extension("json.damaged");
-            if !aside.exists() {
-                let _ = fs::copy(Self::path(), &aside);
+            // keep the damaged file aside, then carry on with defaults; if no copy can be kept,
+            // refuse to save so the only copy isn't overwritten
+            let aside = path.with_extension("json.damaged");
+            let mut settings = Self::default();
+            if aside.exists() || fs::copy(&path, &aside).is_ok() {
                 eprintln!(
                     "{} couldn't be read ({e}); a copy was kept as {}",
-                    Self::path().display(),
+                    path.display(),
                     aside.display()
                 );
+            } else {
+                settings.load_error = Some(format!(
+                    "{} is damaged ({e}) and no copy of it could be kept, so it isn't replaced",
+                    path.display()
+                ));
             }
-            Self::default()
+            settings
         })
     }
     pub fn save(&self) -> std::io::Result<()> {
+        if let Some(error) = &self.load_error {
+            return Err(std::io::Error::other(error.clone()));
+        }
         create_private_dir(&app_dir())?;
         let mut tidy = self.clone();
         tidy.accounts.retain(|_, p| *p != AccountPrefs::default());
@@ -327,18 +446,67 @@ impl AppSettings {
     }
 }
 
+/// Renames `from` to `to` only if nothing is at `to` (fails with AlreadyExists otherwise), so a
+/// file that appears after a name was checked is never replaced.
+pub fn rename_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = |p: &Path| {
+        std::ffi::CString::new(p.as_os_str().as_bytes())
+            .map_err(|_| std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let (from, to) = (c(from)?, c(to)?);
+    // SAFETY: both paths are NUL-terminated and live for the call
+    let rc = unsafe {
+        libc::renameat2(
+            libc::AT_FDCWD,
+            from.as_ptr(),
+            libc::AT_FDCWD,
+            to.as_ptr(),
+            libc::RENAME_NOREPLACE,
+        )
+    };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
 pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    let mut name = path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".tmp-{}", std::process::id()));
-    let tmp = path.with_file_name(name);
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let base = path.file_name().unwrap_or_default().to_string_lossy();
+    let mut created = None;
+    for _ in 0..32 {
+        let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
+        let candidate = parent.join(format!("{base}.tmp-{}-{n}", std::process::id()));
+        match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&candidate)
+        {
+            Ok(f) => {
+                created = Some((candidate, f));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    let (tmp, mut f) = created.ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "couldn't allocate a unique temporary file after 32 attempts",
+        )
+    })?;
     let written = (|| {
-        let mut f = fs::File::create(&tmp)?;
         f.write_all(data)?;
         f.sync_all()?;
+        drop(f);
         fs::rename(&tmp, path)
     })();
     if written.is_err() {
-        let _ = fs::remove_file(&tmp); // e.g. the disk is full: don't leave a half-written copy
+        let _ = fs::remove_file(&tmp);
     }
     written
 }
@@ -362,6 +530,7 @@ pub struct ClientConfig {
     /// False when the file exists but isn't UTF-8 text: we then show what we can but never
     /// write it, since saving our partial view would throw the rest of it away.
     writable: bool,
+    load_error: Option<String>,
 }
 
 /// An error for a file the app can't safely rewrite because it isn't UTF-8 text.
@@ -373,30 +542,33 @@ fn not_text_error(p: &Path) -> std::io::Error {
 }
 
 /// Whether a file exists but can't be read as UTF-8 text.
-fn is_non_text(p: &Path) -> bool {
-    matches!(fs::read_to_string(p), Err(e) if e.kind() == std::io::ErrorKind::InvalidData)
-}
-
 impl ClientConfig {
     pub fn load(confdir: &Path) -> Self {
         let path = confdir.join("config");
-        let (lines, writable) = match fs::read(&path) {
+        let (lines, writable, load_error) = match fs::read(&path) {
             Ok(bytes) => match String::from_utf8(bytes) {
-                Ok(s) => (s.lines().map(String::from).collect(), true),
+                Ok(s) => (s.lines().map(String::from).collect(), true, None),
                 Err(e) => (
                     String::from_utf8_lossy(e.as_bytes())
                         .lines()
                         .map(String::from)
                         .collect(),
                     false,
+                    Some(not_text_error(&path).to_string()),
                 ),
             },
-            Err(_) => (Vec::new(), true),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), true, None),
+            Err(e) => (
+                Vec::new(),
+                false,
+                Some(format!("Couldn't read {}: {e}", path.display())),
+            ),
         };
         ClientConfig {
             path,
             lines,
             writable,
+            load_error,
         }
     }
 
@@ -422,6 +594,25 @@ impl ClientConfig {
             })
     }
 
+    /// Every value of a key that may be given more than once (`skip_dir`), joined with `|` as
+    /// the client joins them; None if it isn't set.
+    pub fn get_joined(&self, key: &str) -> Option<String> {
+        let all: Vec<String> = self
+            .lines
+            .iter()
+            .filter(|l| Self::key_of(l) == Some(key))
+            .map(|l| {
+                let v = l.split_once('=').unwrap().1.trim();
+                v.strip_prefix('"')
+                    .and_then(|v| v.strip_suffix('"'))
+                    .unwrap_or(v)
+                    .to_string()
+            })
+            .filter(|v| !v.is_empty())
+            .collect();
+        (!all.is_empty()).then(|| all.join("|"))
+    }
+
     pub fn get_bool(&self, key: &str) -> bool {
         self.get(key)
             .is_some_and(|v| v.eq_ignore_ascii_case("true"))
@@ -440,7 +631,11 @@ impl ClientConfig {
 
     pub fn save(&self) -> std::io::Result<()> {
         if !self.writable {
-            return Err(not_text_error(&self.path));
+            return Err(std::io::Error::other(
+                self.load_error
+                    .clone()
+                    .unwrap_or_else(|| not_text_error(&self.path).to_string()),
+            ));
         }
         if let Some(d) = self.path.parent().filter(|d| !d.exists()) {
             create_private_dir(d)?;
@@ -467,26 +662,32 @@ pub fn expand_tilde(p: &str) -> PathBuf {
 }
 
 /// The selective-sync list. Empty means "sync everything".
-pub fn read_sync_list(confdir: &Path) -> Vec<String> {
-    let bytes = fs::read(confdir.join("sync_list")).unwrap_or_default();
-    String::from_utf8_lossy(&bytes)
+pub fn read_sync_list(confdir: &Path) -> std::io::Result<Vec<String>> {
+    let path = confdir.join("sync_list");
+    let bytes = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    Ok(String::from_utf8_lossy(&bytes)
         .lines()
         .map(str::trim)
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .map(String::from)
-        .collect()
+        .collect())
 }
 
 pub fn write_sync_list(confdir: &Path, entries: &[String]) -> std::io::Result<()> {
     let p = confdir.join("sync_list");
-    if is_non_text(&p) {
-        return Err(not_text_error(&p));
-    }
+    let existing = match fs::read(&p) {
+        Ok(bytes) => Some(String::from_utf8(bytes).map_err(|_| not_text_error(&p))?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e),
+    };
     if entries.is_empty() {
-        if p.exists() {
+        if let Some(text) = existing {
             // keep any rules the user wrote by hand, which syncing everything can't honour
-            let own_rules = fs::read_to_string(&p)
-                .unwrap_or_default()
+            let own_rules = text
                 .lines()
                 .map(str::trim)
                 .any(|l| !l.is_empty() && !l.starts_with('#') && sync_list_folder(l).is_none());
@@ -645,6 +846,30 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
         )
     })?;
     fs::create_dir_all(user_unit_dir())?;
+    let path = user_unit_dir().join(unit);
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if !meta.file_type().is_file() => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                format!("{} isn't a regular managed unit file", path.display()),
+            ));
+        }
+        Ok(_) => {
+            let text = fs::read_to_string(&path)?;
+            if !text.contains(MANAGED_MARK) || confdir_from_exec(&text).as_deref() != Some(confdir)
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!(
+                        "{} already belongs to another unit or account",
+                        path.display()
+                    ),
+                ));
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
     let body = format!(
         "[Unit]\n\
          Description=OneDrive sync ({})\n\
@@ -668,15 +893,29 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
         systemd_quote(&client.to_string_lossy()),
         systemd_quote(&confdir.to_string_lossy()),
     );
-    atomic_write(&user_unit_dir().join(unit), body.as_bytes())?;
-    systemctl(&["daemon-reload"]);
+    atomic_write(&path, body.as_bytes())?;
+    let (ok, err) = systemctl(&["daemon-reload"]);
+    if !ok {
+        return Err(std::io::Error::other(format!(
+            "systemd couldn't reload the user unit files: {}",
+            err.trim()
+        )));
+    }
     Ok(())
 }
 
 /// Marks an account as in use by the settings window (a preview's dry run, a sign-in), which runs
 /// the client itself with the account's unit stopped. While the marker exists and its window is
 /// alive, nothing else may start that unit: two clients on one account can damage its database.
-pub struct BusyMarker(PathBuf);
+pub struct BusyMarker(PathBuf, String, fs::File);
+
+/// Linux process start time in clock ticks, used with a PID so a recycled PID isn't mistaken for
+/// the process that created a runtime marker.
+pub fn process_start_time(pid: u32) -> Option<u64> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let end = stat.rfind(") ")? + 2;
+    stat[end..].split_whitespace().nth(19)?.parse().ok()
+}
 
 fn busy_path(confdir: &Path) -> PathBuf {
     runtime_dir()
@@ -685,28 +924,126 @@ fn busy_path(confdir: &Path) -> PathBuf {
 }
 
 impl BusyMarker {
-    pub fn new(confdir: &Path) -> Self {
-        let p = busy_path(confdir);
+    pub fn try_new(confdir: &Path) -> std::io::Result<Self> {
+        Self::try_new_at(busy_path(confdir))
+    }
+
+    fn try_new_at(p: PathBuf) -> std::io::Result<Self> {
         if let Some(dir) = p.parent() {
-            let _ = fs::create_dir_all(dir);
+            create_private_dir(dir)?;
         }
-        let _ = fs::write(&p, std::process::id().to_string());
-        BusyMarker(p)
+        let pid = std::process::id();
+        let start = process_start_time(pid).ok_or_else(|| {
+            std::io::Error::other("couldn't identify the current process for the busy marker")
+        })?;
+        let token = format!("{pid}:{start}");
+        let mut file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&p)?;
+        // Hold an advisory lock for the marker's entire lifetime. Checking a stale PID and then
+        // unlinking its path had a race: two contenders could both inspect the stale file, and
+        // the slower one could remove the faster one's newly-created live marker.
+        match file.try_lock() {
+            Ok(()) => {}
+            Err(fs::TryLockError::WouldBlock) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "this account is already in use by another operation",
+                ));
+            }
+            Err(fs::TryLockError::Error(e)) => return Err(e),
+        }
+        let mut existing = String::new();
+        file.read_to_string(&mut existing)?;
+        let owner_is_live = if let Some((old_pid, old_start)) = existing.trim().split_once(':') {
+            old_pid
+                .parse::<u32>()
+                .ok()
+                .zip(old_start.parse::<u64>().ok())
+                .is_some_and(|(pid, start)| {
+                    Path::new(&format!("/proc/{pid}")).exists()
+                        && process_start_time(pid) == Some(start)
+                })
+        } else {
+            existing
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+        };
+        if owner_is_live {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                "this account is already in use by another operation",
+            ));
+        }
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        writeln!(file, "{token}")?;
+        file.sync_all()?;
+        Ok(BusyMarker(p, token, file))
     }
 }
 
 impl Drop for BusyMarker {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.0);
+        if fs::read_to_string(&self.0)
+            .ok()
+            .is_some_and(|token| token.trim() == self.1)
+        {
+            let _ = fs::remove_file(&self.0);
+        }
+        // Keep the lock until after the path check and unlink have completed.
+        let _ = self.2.unlock();
     }
 }
 
 /// Whether the settings window is using this account right now.
 pub fn account_busy(confdir: &Path) -> bool {
-    fs::read_to_string(busy_path(confdir))
-        .ok()
-        .and_then(|pid| pid.trim().parse::<u32>().ok())
-        .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+    let Some(value) = fs::read_to_string(busy_path(confdir)).ok() else {
+        return false;
+    };
+    let value = value.trim();
+    if let Some((pid, start)) = value.split_once(':') {
+        let (Ok(pid), Ok(start)) = (pid.parse::<u32>(), start.parse::<u64>()) else {
+            return false;
+        };
+        Path::new(&format!("/proc/{pid}")).exists() && process_start_time(pid) == Some(start)
+    } else {
+        value
+            .parse::<u32>()
+            .ok()
+            .is_some_and(|pid| Path::new(&format!("/proc/{pid}")).exists())
+    }
+}
+
+fn hold_path(unit: &str) -> PathBuf {
+    runtime_dir().join("hold").join(slug(unit))
+}
+
+/// Stops a unit that keeps restarting into big-delete protection (each run would stop again,
+/// and the client may notify each time), and keeps automatic starts (schedules, the app
+/// starting) from starting it again. Called while systemd waits to restart it. Starting it on
+/// purpose (`unit_action`) lifts the hold. Kept in the runtime folder, so a new login tries
+/// again.
+pub fn hold_for_big_delete(unit: &str) {
+    let p = hold_path(unit);
+    if let Some(dir) = p.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    let _ = fs::write(&p, b"");
+    run_detached("systemctl", &["--user", "stop", unit]);
+}
+
+pub fn unit_held(unit: &str) -> bool {
+    hold_path(unit).exists()
+}
+
+pub fn release_hold(unit: &str) {
+    let _ = fs::remove_file(hold_path(unit));
 }
 
 /// Restarts the sync units that are running, so they pick up a client that was just updated.
@@ -723,6 +1060,21 @@ pub fn restart_active_units(settings: &AppSettings, done: &[String]) {
     }
 }
 
+/// Stops every account's sync service ("Quit and stop syncing"). Doesn't wait: systemd finishes
+/// stopping them after we're gone. A full resync under way is left to finish.
+pub fn stop_all_units(settings: &AppSettings) {
+    let units: Vec<String> = discover(settings)
+        .into_iter()
+        .filter_map(|a| a.unit)
+        .collect();
+    if units.is_empty() {
+        return;
+    }
+    let mut args = vec!["stop", "--no-block"];
+    args.extend(units.iter().map(String::as_str));
+    let _ = systemctl(&args);
+}
+
 /// Starts the enabled sync units that aren't running, e.g. ones skipped while the client was
 /// missing. Pauses and schedules are applied by the tray right after, as usual.
 pub fn start_idle_units(settings: &AppSettings) {
@@ -732,7 +1084,11 @@ pub fn start_idle_units(settings: &AppSettings) {
             continue;
         }
         let st = unit_state(u);
-        if st.enabled && !st.active && acc.signed_in && settings.prefs(&acc.confdir).sync_allowed()
+        if st.enabled
+            && !st.active
+            && acc.signed_in
+            && !unit_held(u)
+            && settings.prefs(&acc.confdir).sync_allowed()
         {
             systemctl(&["start", u]);
         }
@@ -784,9 +1140,19 @@ pub fn unsuitable_sync_folder(folder: &Path) -> Option<String> {
                 .into(),
         );
     }
-    let home = home();
-    if folder == home || home.starts_with(folder) {
-        let what = if folder == home {
+    let Some(checked) = canonicalize_with_missing_tail(folder) else {
+        return Some(
+            "Couldn't safely resolve that folder path. Check its parent directories and try again."
+                .into(),
+        );
+    };
+    let Some(home) = canonicalize_with_missing_tail(&home()) else {
+        return Some(
+            "Couldn't safely resolve your home folder. Check the home-folder configuration.".into(),
+        );
+    };
+    if checked == home || home.starts_with(&checked) {
+        let what = if checked == home {
             "everything in your home folder"
         } else {
             "everything on this computer"
@@ -797,7 +1163,10 @@ pub fn unsuitable_sync_folder(folder: &Path) -> Option<String> {
         ));
     }
     for own in [config_home(), data_home()] {
-        if folder.starts_with(&own) || own.starts_with(folder) {
+        let Some(own) = canonicalize_with_missing_tail(&own) else {
+            return Some("Couldn't safely resolve the application settings folders.".into());
+        };
+        if checked.starts_with(&own) || own.starts_with(&checked) {
             return Some(format!(
                 "{shown} holds your settings. Pick a different folder."
             ));
@@ -808,8 +1177,15 @@ pub fn unsuitable_sync_folder(folder: &Path) -> Option<String> {
         "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/opt", "/proc", "/root", "/run",
         "/sbin", "/srv", "/sys", "/tmp", "/usr", "/var",
     ];
-    let under = |top: &str| folder == Path::new(top) || folder.starts_with(format!("{top}/"));
-    if !user_mounts.iter().any(|m| text.starts_with(m)) && system.iter().any(|t| under(t)) {
+    let under = |top: &str| checked == Path::new(top) || checked.starts_with(format!("{top}/"));
+    // inside the home folder is never a system folder, even where /home is really /var/home
+    // (Fedora Silverblue, Kinoite, Bazzite)
+    if !checked.starts_with(&home)
+        && !user_mounts
+            .iter()
+            .any(|m| checked.to_string_lossy().starts_with(m))
+        && system.iter().any(|t| under(t))
+    {
         return Some(format!(
             "{shown} is a system folder. Pick a folder in your home folder or on a drive of your own."
         ));
@@ -818,6 +1194,49 @@ pub fn unsuitable_sync_folder(folder: &Path) -> Option<String> {
         return Some(format!("{shown} is a file, not a folder."));
     }
     None
+}
+
+/// Resolve symlinked existing ancestors and normalize a not-yet-created suffix.
+fn canonicalize_with_missing_tail(path: &Path) -> Option<PathBuf> {
+    if !path.is_absolute() {
+        return None;
+    }
+    let mut resolved = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir => resolved = PathBuf::from("/"),
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::Normal(name) => {
+                resolved.push(name);
+                match fs::symlink_metadata(&resolved) {
+                    Ok(_) => resolved = fs::canonicalize(&resolved).ok()?,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(_) => return None,
+                }
+            }
+            std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(resolved)
+}
+
+/// Resolves existing symlinks and normalizes any missing suffix of an absolute path.
+pub fn resolve_path(path: &Path) -> Option<PathBuf> {
+    canonicalize_with_missing_tail(path)
+}
+
+/// Whether two paths overlap after resolving symlinked existing ancestors.
+pub fn paths_overlap(a: &Path, b: &Path) -> bool {
+    let Some(a) = canonicalize_with_missing_tail(a) else {
+        return true;
+    };
+    let Some(b) = canonicalize_with_missing_tail(b) else {
+        return true;
+    };
+    a.starts_with(&b) || b.starts_with(&a)
 }
 
 /// Makes a unit skip quietly, instead of failing every few seconds, if the client is uninstalled.
@@ -1125,18 +1544,51 @@ fn is_client_file(name: &str) -> bool {
         || name.starts_with("resume_download.")
 }
 
+/// An account's settings folder must be a folder (a link to one is fine: dotfile managers make
+/// those).
+pub fn validate_confdir(confdir: &Path) -> std::io::Result<()> {
+    let meta = fs::metadata(confdir)?;
+    if !meta.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} isn't a folder",
+            confdir.display()
+        )));
+    }
+    Ok(())
+}
+
 /// Deletes an account's configuration (its settings, sign-in and database). Only the client's
 /// own files are deleted, and then the folder if that left it empty: a unit written by hand can
 /// point the client at any folder, even the home folder or the one with the synced files, and
 /// nothing else in it may go. Returns true when the folder itself is gone.
 pub fn delete_confdir(confdir: &Path) -> std::io::Result<bool> {
-    for e in fs::read_dir(confdir)?.flatten() {
-        let is_file = e.file_type().is_ok_and(|t| !t.is_dir());
+    match validate_confdir(confdir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(true),
+        Err(e) => return Err(e),
+    }
+    for entry in fs::read_dir(confdir)? {
+        let e = entry?;
+        let is_file = !e.file_type()?.is_dir();
         if is_file && is_client_file(&e.file_name().to_string_lossy()) {
             fs::remove_file(e.path())?;
         }
     }
-    Ok(fs::remove_dir(confdir).is_ok())
+    // a linked folder (dotfile managers) keeps the link and what it points at
+    if fs::symlink_metadata(confdir)?.file_type().is_symlink() {
+        return Ok(false);
+    }
+    match fs::remove_dir(confdir) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(true),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                || e.raw_os_error() == Some(libc::ENOTEMPTY) =>
+        {
+            Ok(false)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Makes sure an account has a background service, creating a managed one if needed.
@@ -1150,21 +1602,48 @@ pub fn ensure_unit(acc: &AccountInfo) -> std::io::Result<String> {
         .unwrap_or_default()
         .to_string_lossy()
         .to_string();
-    let unit = if base == "onedrive" {
-        "onedrive.service".into()
+    let stem = if base == "onedrive" {
+        "onedrive".to_string()
     } else {
-        format!(
-            "onedrive-{}.service",
-            slug(base.trim_start_matches("onedrive"))
-        )
+        format!("onedrive-{}", slug(base.trim_start_matches("onedrive")))
     };
-    write_managed_unit(&unit, &acc.name, &acc.confdir)?;
-    Ok(unit)
+    for n in 1..=1000 {
+        let unit = if n == 1 {
+            format!("{stem}.service")
+        } else {
+            format!("{stem}-{n}.service")
+        };
+        let path = user_unit_dir().join(&unit);
+        match fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match write_managed_unit(&unit, &acc.name, &acc.confdir) {
+                    Ok(()) => return Ok(unit),
+                    Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(e) => return Err(e),
+                }
+            }
+            Ok(_) => {
+                let belongs_here = fs::read_to_string(&path).is_ok_and(|text| {
+                    text.contains(MANAGED_MARK)
+                        && confdir_from_exec(&text).as_deref() == Some(acc.confdir.as_path())
+                });
+                if belongs_here {
+                    write_managed_unit(&unit, &acc.name, &acc.confdir)?;
+                    return Ok(unit);
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "couldn't find an unused service name after 1,000 attempts",
+    ))
 }
 
 // ---------------------------------------------------------------- log parsing
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LogEvent {
     Syncing,
     Complete,
@@ -1181,6 +1660,17 @@ pub enum LogEvent {
     /// A new client run: it re-checks every pending file, so old blocks are re-reported if
     /// they still apply.
     ClientStart,
+    /// The client stopped rather than delete many items online ("big delete" protection)
+    BigDelete,
+    /// How far a large file's transfer has got (the client reports these every 5% or so)
+    Progress {
+        up: bool,
+        path: String,
+        percent: u8,
+        /// "hh:mm:ss" left, when the client could tell
+        eta: Option<String>,
+        done: bool,
+    },
     NeedsResync,
     NeedsLogin,
 }
@@ -1243,6 +1733,16 @@ pub fn track_blocked(list: &mut Vec<Blocked>, ev: &LogEvent) {
 }
 
 impl BlockReason {
+    /// A few words on why, for a list
+    pub fn short(self) -> &'static str {
+        match self {
+            BlockReason::Locked => "Didn't upload: open for editing elsewhere",
+            BlockReason::ReadOnly => "Didn't upload: shared with you read-only",
+            BlockReason::NoDownload => "Not downloaded: view-only",
+            BlockReason::NotNow => "Didn't upload: OneDrive turned it away for now",
+        }
+    }
+
     /// Changes the user made that aren't online. A view-only file is the sharer's choice, not
     /// something to keep flagging.
     pub fn needs_attention(self) -> bool {
@@ -1292,6 +1792,242 @@ pub fn blocked_text(list: &[Blocked]) -> String {
     out.join("\n")
 }
 
+/// A large file's progress line: `Uploading: <path> ... 62%  |  ETA    00:01:20`, or
+/// `... 100% | DONE in 00:00:03` at the end (`Downloading: ` likewise).
+fn parse_progress(msg: &str) -> Option<LogEvent> {
+    let (up, rest) = if let Some(r) = msg.strip_prefix("Uploading: ") {
+        (true, r)
+    } else {
+        (false, msg.strip_prefix("Downloading: ")?)
+    };
+    // the path can hold " ... " itself; the progress is after the last one
+    let (path, tail) = rest.rsplit_once(" ... ")?;
+    let (pct, after) = tail.trim_start().split_once('%')?;
+    let percent: u8 = pct.trim().parse().ok().filter(|p| *p <= 100)?;
+    let after = after.trim_start().strip_prefix('|')?.trim();
+    let done = after.starts_with("DONE");
+    let eta = after
+        .strip_prefix("ETA")
+        .map(str::trim)
+        .filter(|e| !e.is_empty() && e.chars().all(|c| c.is_ascii_digit() || c == ':'))
+        .map(String::from);
+    let path = path.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some(LogEvent::Progress {
+        up,
+        path: path.strip_prefix("./").unwrap_or(path).to_string(),
+        percent,
+        eta,
+        done,
+    })
+}
+
+/// One finished upload, download, deletion or new folder.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileActivity {
+    pub when: DateTime<Local>,
+    /// "↑", "↓", "✕" or "+", as in LogEvent::File
+    pub kind: &'static str,
+    pub path: String,
+}
+
+/// A large file on its way up or down.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Transfer {
+    pub up: bool,
+    pub path: String,
+    pub percent: u8,
+    pub eta: Option<String>,
+    pub when: DateTime<Local>,
+}
+
+/// A transfer with no news for this long is taken to have stopped (the client was stopped, or
+/// gave up on it without saying).
+const TRANSFER_STALE_SECS: i64 = 600;
+
+/// Recent file activity (newest first, at most `max`) and the transfers still under way, from
+/// `journalctl` lines oldest first.
+pub fn files_from(
+    lines: &[String],
+    now: DateTime<Local>,
+    max: usize,
+) -> (Vec<FileActivity>, Vec<Transfer>) {
+    let mut recent: VecDeque<FileActivity> = VecDeque::new();
+    let mut transfers: Vec<Transfer> = Vec::new();
+    for line in lines {
+        let Some((when, msg)) = split_journal_line(line) else {
+            continue;
+        };
+        match parse_log(msg) {
+            Some(LogEvent::Progress {
+                up,
+                path,
+                percent,
+                eta,
+                done,
+            }) => {
+                transfers.retain(|t| t.path != path);
+                if !done {
+                    transfers.push(Transfer {
+                        up,
+                        path,
+                        percent,
+                        eta,
+                        when,
+                    });
+                }
+            }
+            Some(LogEvent::File { kind, path }) => {
+                transfers.retain(|t| t.path != path);
+                recent.retain(|r| r.path != path);
+                recent.push_front(FileActivity { when, kind, path });
+                recent.truncate(max);
+            }
+            // a new run: whatever was under way was cut off
+            Some(LogEvent::ClientStart) => transfers.clear(),
+            _ => {}
+        }
+    }
+    transfers.retain(|t| (now - t.when).num_seconds() < TRANSFER_STALE_SECS);
+    (recent.into(), transfers)
+}
+
+/// The log lines `files_from` reads.
+const FILE_LINE_PREFIXES: [&str; 10] = [
+    "Uploading new file: ",
+    "Uploading modified file: ",
+    "Downloading file: ",
+    "Deleting local file: ",
+    "Successfully deleted item from Microsoft OneDrive: ",
+    "Created local directory: ",
+    "Creating local directory: ",
+    "Uploading: ",
+    "Downloading: ",
+    "Reading configuration file: ",
+];
+
+/// Recent file activity and transfers under way for one unit.
+pub fn account_files(unit: &str, max: usize) -> (Vec<FileActivity>, Vec<Transfer>) {
+    let pattern = FILE_LINE_PREFIXES
+        .iter()
+        .map(|p| regex_escape(p.trim_end()))
+        .collect::<Vec<_>>()
+        .join("|");
+    // newest first with -n, then turned around; plenty more than `max`, as transfers and
+    // repeated files take lines too
+    let lines = journal_grep(unit, &pattern, &["-n", "1500", "--reverse"])
+        .map(oldest_first)
+        .unwrap_or_else(|| journal_tail(unit, 1500));
+    files_from(&lines, Local::now(), max)
+}
+
+/// The kind of file, for its icon: 0 other, 1 folder, 2 document, 3 spreadsheet, 4
+/// presentation, 5 PDF, 6 picture, 7 video, 8 audio, 9 archive, 10 code, 11 text.
+pub fn file_kind(path: &str, folder: bool) -> i32 {
+    if folder {
+        return 1;
+    }
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let Some((_, ext)) = name.rsplit_once('.') else {
+        return 0;
+    };
+    match ext.to_ascii_lowercase().as_str() {
+        "doc" | "docx" | "docm" | "odt" | "rtf" | "pages" | "dot" | "dotx" => 2,
+        "xls" | "xlsx" | "xlsm" | "ods" | "csv" | "tsv" | "numbers" => 3,
+        "ppt" | "pptx" | "pptm" | "odp" | "key" | "pps" | "ppsx" => 4,
+        "pdf" => 5,
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "heic" | "heif" | "bmp" | "tif" | "tiff"
+        | "svg" | "avif" | "raw" | "dng" | "cr2" | "cr3" | "nef" | "arw" | "orf" | "rw2"
+        | "ico" => 6,
+        "mp4" | "mov" | "mkv" | "avi" | "webm" | "m4v" | "wmv" | "mpg" | "mpeg" | "3gp" => 7,
+        "mp3" | "wav" | "flac" | "m4a" | "aac" | "ogg" | "opus" | "wma" | "aiff" | "mid" => 8,
+        "zip" | "7z" | "rar" | "tar" | "gz" | "tgz" | "bz2" | "xz" | "zst" | "iso" => 9,
+        "rs" | "py" | "js" | "ts" | "html" | "htm" | "css" | "json" | "xml" | "sh" | "c"
+        | "cpp" | "h" | "hpp" | "java" | "go" | "rb" | "php" | "yaml" | "yml" | "toml" | "sql"
+        | "kt" | "swift" | "cs" => 10,
+        "txt" | "md" | "log" | "ini" | "cfg" | "conf" => 11,
+        _ => 0,
+    }
+}
+
+const BIG_DELETE_COUNT: &str = "ERROR: The total number of items being deleted is: ";
+const DELETING_ONLINE: &str = "Deleting item from Microsoft OneDrive: ";
+
+/// What a big delete the client stopped for would have removed: the item it was deleting
+/// online (a folder, usually) and how many items that is in all.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BigDelete {
+    pub path: Option<String>,
+    pub count: Option<u64>,
+}
+
+/// Reads the newest big delete's details from `journalctl --reverse` lines (newest first).
+fn big_delete_from(newest_first: &[String]) -> BigDelete {
+    let mut out = BigDelete::default();
+    for line in newest_first {
+        let Some((_, msg)) = split_journal_line(line) else {
+            continue;
+        };
+        let msg = msg.trim();
+        if out.count.is_none() {
+            if let Some(n) = msg.strip_prefix(BIG_DELETE_COUNT) {
+                out.count = n.trim().parse().ok();
+            }
+        } else if let Some(p) = msg.strip_prefix(DELETING_ONLINE) {
+            // the item it was about to delete, logged just before the count
+            let p = p.trim();
+            out.path = Some(p.strip_prefix("./").unwrap_or(p).to_string());
+            break;
+        }
+    }
+    out
+}
+
+/// Details of the newest big delete in the unit's log.
+pub fn big_delete(unit: &str) -> BigDelete {
+    let pattern = format!(
+        "{}|{}",
+        regex_escape(BIG_DELETE_COUNT.trim_end()),
+        regex_escape(DELETING_ONLINE.trim_end())
+    );
+    journal_grep(unit, &pattern, &["-n", "20", "--reverse"])
+        .map(|lines| big_delete_from(&lines))
+        .unwrap_or_default()
+}
+
+/// Plain words for a big delete the client stopped for.
+pub fn big_delete_text(b: &BigDelete) -> String {
+    // the client names what it was deleting (a folder, usually) and counts it with its contents
+    let what = match (&b.path, b.count) {
+        (Some(p), Some(n)) => format!(
+            "\u{201c}{}\u{201d} and what was in it ({n} items in all)",
+            shown_path(p)
+        ),
+        (Some(p), None) => format!("\u{201c}{}\u{201d} and what was in it", shown_path(p)),
+        (None, Some(n)) => format!("{n} items"),
+        (None, None) => "Many items".to_string(),
+    };
+    format!(
+        "{what} were deleted on this computer. Syncing stopped before deleting them online too, in case that was a mistake.\nIf it was a mistake, put them back (for example from the Trash) and press \u{201c}Sync now\u{201d}. Otherwise choose what to do below."
+    )
+}
+
+/// A relative path, safe to show: no control characters, and shortened from the front.
+pub fn shown_path(path: &str) -> String {
+    let p: Vec<char> = path
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    if p.len() > 80 {
+        let tail: String = p[p.len() - 77..].iter().collect();
+        format!("\u{2026}{tail}")
+    } else {
+        p.into_iter().collect()
+    }
+}
+
 pub fn parse_log(msg: &str) -> Option<LogEvent> {
     let msg = msg.trim();
     if msg.starts_with("Starting a sync with Microsoft OneDrive") {
@@ -1311,6 +2047,16 @@ pub fn parse_log(msg: &str) -> Option<LogEvent> {
         || msg.contains("invalid_grant")
     {
         return Some(LogEvent::NeedsLogin);
+    }
+    // the client's three lines before it exits; checked before the general ERROR rule
+    if msg.contains("An attempt to remove a large volume of data from OneDrive has been detected")
+        || msg.starts_with(BIG_DELETE_COUNT)
+        || msg.starts_with("ERROR: To delete a large volume of data use --force")
+    {
+        return Some(LogEvent::BigDelete);
+    }
+    if let Some(p) = parse_progress(msg) {
+        return Some(p);
     }
     for (prefix, reason) in BLOCKED_MESSAGES {
         if let Some(path) = msg.strip_prefix(prefix) {
@@ -1385,7 +2131,7 @@ pub fn icon_theme_path() -> Option<PathBuf> {
 /// Only the log lines that matter for status, however busy the log is, oldest first.
 /// Falls back to a plain tail on systems whose journalctl lacks --grep.
 pub fn journal_status_lines(unit: &str) -> Vec<String> {
-    let pattern = "Starting a sync|Sync with Microsoft OneDrive is complete|ERROR|Unable to |--resync|--reauth|requires authentication|re-authenticate|re-authorise|invalid_grant";
+    let pattern = "Reading configuration file: |Starting a sync|Sync with Microsoft OneDrive is complete|ERROR|Unable to |--resync|--reauth|requires authentication|re-authenticate|re-authorise|invalid_grant";
     let out = Command::new("journalctl")
         .args([
             "--user",
@@ -1547,6 +2293,8 @@ pub enum Phase {
     Resyncing,
     SignedOut,
     NeedsResync,
+    /// Stopped rather than delete many items online; the user decides
+    BigDelete,
 }
 
 impl Phase {
@@ -1555,7 +2303,9 @@ impl Phase {
         match self {
             Phase::Syncing | Phase::Unknown | Phase::Resyncing => "linux-onedrive-gui-sync",
             Phase::UpToDate => "linux-onedrive-gui-ok",
-            Phase::Error | Phase::NeedsResync | Phase::SignedOut => "linux-onedrive-gui-error",
+            Phase::Error | Phase::NeedsResync | Phase::SignedOut | Phase::BigDelete => {
+                "linux-onedrive-gui-error"
+            }
             Phase::Stopped | Phase::Off | Phase::Paused => "linux-onedrive-gui-off",
         }
     }
@@ -1577,6 +2327,8 @@ pub struct Status {
     pub last_error: Option<String>,
     /// Files the client left unsynced while the account itself is fine
     pub blocked: Vec<Blocked>,
+    /// What the big delete would remove (read only while the phase is BigDelete)
+    pub big_delete: Option<BigDelete>,
     pub unit: UnitState,
 }
 
@@ -1610,10 +2362,17 @@ impl Status {
                     None => "Paused".into(),
                 }
             }
-            Phase::Paused => format!("Paused by schedule until {}", prefs.schedule.from),
-            Phase::Resyncing => "Full resync running…".into(),
+            Phase::Paused => match device_hold() {
+                Some(h) if prefs.schedule.allows(Local::now().time()) => {
+                    format!("Paused: {}", h.words())
+                }
+                _ => format!("Paused by schedule until {}", prefs.schedule.from),
+            },
+            // a full resync, or the deletions the user approved after a big delete
+            Phase::Resyncing => "Applying changes…".into(),
             Phase::SignedOut => "Signed out".into(),
             Phase::NeedsResync => "Needs a full resync".into(),
+            Phase::BigDelete => "Stopped to protect your files".into(),
             Phase::Unknown => "Waiting for first sync".into(),
         }
     }
@@ -1638,7 +2397,7 @@ pub fn compose_phase(
     }
     let problem = matches!(
         log_phase,
-        Phase::Error | Phase::NeedsResync | Phase::SignedOut
+        Phase::Error | Phase::NeedsResync | Phase::SignedOut | Phase::BigDelete
     );
     if unit.retrying {
         // it failed and systemd will try again; say what went wrong rather than "Starting…"
@@ -1648,7 +2407,10 @@ pub fn compose_phase(
         if unit.failed && matches!(unit.exit_status, Some(126) | Some(78)) {
             return Phase::NeedsResync;
         }
-        if matches!(log_phase, Phase::NeedsResync | Phase::SignedOut) {
+        if matches!(
+            log_phase,
+            Phase::NeedsResync | Phase::SignedOut | Phase::BigDelete
+        ) {
             return log_phase;
         }
         if unit.enabled && !prefs.sync_allowed() {
@@ -1672,6 +2434,10 @@ pub fn compose_phase(
 /// one unit within a few seconds, from the tray or the window, are dropped: the first one
 /// already starts a fresh sync.
 pub fn unit_action(verb: &'static str, unit: &str) {
+    if verb != "stop" {
+        // started on purpose: if it was held after a big delete, the user wants another try
+        release_hold(unit);
+    }
     if verb == "restart" && restarted_recently(unit) {
         return;
     }
@@ -1684,20 +2450,109 @@ pub fn unit_action(verb: &'static str, unit: &str) {
     });
 }
 
-fn restarted_recently(unit: &str) -> bool {
-    let mark = runtime_dir().join("restarted").join(slug(unit));
-    let recent = fs::metadata(&mark)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .is_some_and(|age| age < std::time::Duration::from_secs(5));
-    if !recent {
-        if let Some(dir) = mark.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        let _ = fs::write(&mark, b"");
+/// "Sync now": a fresh sync right away. Outside the schedule it's allowed for an hour, and a
+/// pause is lifted. Returns the unit (made now if the account had none).
+pub fn sync_now(info: &AccountInfo) -> Result<String, String> {
+    let mut s = AppSettings::load();
+    if !s.prefs(&info.confdir).sync_allowed() {
+        let p = s.prefs_mut(&info.confdir);
+        p.override_until = Local::now().timestamp() + 3600;
+        p.pause_until = 0;
+        s.save()
+            .map_err(|e| format!("Couldn't save the sync override: {e}"))?;
     }
-    recent
+    match &info.unit {
+        Some(u) => {
+            unit_action("restart", u);
+            Ok(u.clone())
+        }
+        None => {
+            let u = ensure_unit(info).map_err(|e| e.to_string())?;
+            unit_action("start", &u);
+            Ok(u)
+        }
+    }
+}
+
+/// Pauses for `secs` seconds (-1 = until 06:00 tomorrow, 0 = resume). Returns when it ends
+/// (0 for resumed).
+/// "Until tomorrow morning": the next 06:00 at least two hours away, so a pause chosen after
+/// midnight lasts until that morning rather than the one after.
+pub fn next_morning(now: DateTime<Local>) -> i64 {
+    [0u64, 1, 2]
+        .iter()
+        .filter_map(|d| {
+            (now.date_naive() + chrono::Days::new(*d))
+                .and_hms_opt(6, 0, 0)?
+                .and_local_timezone(Local)
+                .earliest()
+        })
+        .map(|t| t.timestamp())
+        .find(|t| *t >= now.timestamp() + 2 * 3600)
+        .unwrap_or(now.timestamp() + 12 * 3600)
+}
+
+pub fn pause(info: &AccountInfo, secs: i64) -> Result<i64, String> {
+    let now = Local::now();
+    let until = match secs {
+        0 => 0,
+        -1 => next_morning(now),
+        s => now.timestamp() + s,
+    };
+    let mut s = AppSettings::load();
+    let p = s.prefs_mut(&info.confdir);
+    p.pause_until = until;
+    p.override_until = 0;
+    let allowed = p.sync_allowed();
+    s.save()
+        .map_err(|e| format!("Couldn't save the pause setting: {e}"))?;
+    if let Some(u) = &info.unit {
+        if until != 0 {
+            unit_action("stop", u);
+        } else if allowed && unit_state(u).enabled {
+            // resuming doesn't start an account whose background sync is off, or whose
+            // schedule says not now (the tray would only stop it again)
+            unit_action("start", u);
+        }
+    }
+    Ok(until)
+}
+
+fn restarted_recently(unit: &str) -> bool {
+    restart_guard_at(&runtime_dir().join("restarted").join(slug(unit)))
+        // the throttle only stops duplicates; if its marker can't be used, restart anyway
+        .unwrap_or(false)
+}
+
+fn restart_guard_at(mark: &Path) -> std::io::Result<bool> {
+    if let Some(dir) = mark.parent() {
+        create_private_dir(dir)?;
+    }
+    let mut file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(mark)?;
+    match file.try_lock() {
+        Ok(()) => {}
+        Err(std::fs::TryLockError::WouldBlock) => return Ok(true),
+        Err(std::fs::TryLockError::Error(e)) => return Err(e),
+    }
+    let metadata = file.metadata()?;
+    let recent = metadata.len() > 0
+        && metadata
+            .modified()
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age < std::time::Duration::from_secs(5));
+    if !recent {
+        file.set_len(0)?;
+        file.seek(SeekFrom::Start(0))?;
+        file.write_all(b"restart")?;
+        file.sync_all()?;
+    }
+    Ok(recent)
 }
 
 /// The desktop's permission for the next program the window starts to come to the front
@@ -1707,6 +2562,18 @@ static ACTIVATION_TOKEN: std::sync::Mutex<Option<String>> = std::sync::Mutex::ne
 
 pub fn set_activation_token(token: String) {
     *ACTIVATION_TOKEN.lock().unwrap() = Some(token);
+}
+
+pub fn current_activation_token() -> Option<String> {
+    ACTIVATION_TOKEN.lock().unwrap().clone()
+}
+
+/// The token this process was started with to show its window in front (from the program that
+/// started it, after a click there), if any.
+pub fn startup_token() -> Option<String> {
+    ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"]
+        .iter()
+        .find_map(|v| std::env::var(v).ok().filter(|t| !t.is_empty()))
 }
 
 /// Lets a program started from the window (a browser, a file manager) show up in front of it.
@@ -1930,6 +2797,31 @@ mod tests {
     }
 
     #[test]
+    fn busy_marker_lock_has_one_owner_and_releases_cleanly() {
+        let dir = std::env::temp_dir().join(format!("lodg-busy-{}", std::process::id()));
+        let path = dir.join("marker");
+        let _ = fs::remove_dir_all(&dir);
+        let first = BusyMarker::try_new_at(path.clone()).unwrap();
+        assert!(BusyMarker::try_new_at(path.clone()).is_err());
+        drop(first);
+        assert!(!path.exists());
+        let second = BusyMarker::try_new_at(path.clone()).unwrap();
+        drop(second);
+        assert!(!path.exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn restart_throttle_is_written_and_checked_under_one_lock() {
+        let dir = std::env::temp_dir().join(format!("lodg-restart-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let mark = dir.join("unit");
+        assert!(!restart_guard_at(&mark).unwrap());
+        assert!(restart_guard_at(&mark).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn files_that_are_not_utf8_are_never_rewritten() {
         let dir = std::env::temp_dir().join(format!("lodg-nt-{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
@@ -1944,11 +2836,32 @@ mod tests {
         assert_eq!(fs::read(dir.join("config")).unwrap(), config);
         let list = b"/B\xfccher\n".to_vec();
         fs::write(dir.join("sync_list"), &list).unwrap();
-        assert_eq!(read_sync_list(&dir).len(), 1);
+        assert_eq!(read_sync_list(&dir).unwrap().len(), 1);
         assert!(write_sync_list(&dir, &["/Documents".into()]).is_err());
         assert!(write_sync_list(&dir, &[]).is_err());
         assert_eq!(fs::read(dir.join("sync_list")).unwrap(), list);
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn unreadable_client_config_is_not_replaced() {
+        let dir = std::env::temp_dir().join(format!("lodg-unreadable-cfg-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("config")).unwrap();
+        let mut config = ClientConfig::load(&dir);
+        config.set("sync_dir", Some("~/OneDrive"));
+        assert!(config.save().is_err());
+        assert!(dir.join("config").is_dir());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn settings_with_load_errors_cannot_be_saved() {
+        let settings = AppSettings {
+            load_error: Some("simulated settings read failure".into()),
+            ..AppSettings::default()
+        };
+        assert!(settings.save().is_err());
     }
 
     #[test]
@@ -2108,6 +3021,7 @@ mod tests {
             phase: Phase::UpToDate,
             last_complete: None,
             last_error: None,
+            big_delete: None,
             blocked: vec![one("a.txt", BlockReason::Locked)],
             unit: UnitState::default(),
         };
@@ -2139,6 +3053,7 @@ mod tests {
             phase: Phase::UpToDate,
             last_complete: None,
             last_error: None,
+            big_delete: None,
             blocked: vec![Blocked {
                 path: "v.pdf".into(),
                 reason: BlockReason::NoDownload,
@@ -2152,6 +3067,223 @@ mod tests {
             reason: BlockReason::ReadOnly,
         });
         assert_eq!(st.text(&AccountPrefs::default()), "1 file not synced");
+    }
+
+    #[test]
+    fn quota_levels() {
+        assert_eq!(quota_warning(50, 100, 0), None);
+        assert_eq!(quota_warning(91, 100, 0), Some(90));
+        assert_eq!(quota_warning(91, 100, 90), None);
+        assert_eq!(quota_warning(87, 100, 90), None);
+        assert_eq!(quota_warning(100, 100, 90), Some(100));
+        assert_eq!(quota_warning(80, 100, 100), Some(0));
+        assert_eq!(quota_warning(5, 0, 0), None);
+    }
+
+    #[test]
+    fn big_delete() {
+        // the client's lines, as in sync.d
+        for l in [
+            "ERROR: An attempt to remove a large volume of data from OneDrive has been detected. Exiting client to preserve your data on Microsoft OneDrive",
+            "ERROR: The total number of items being deleted is: 1532",
+            "ERROR: To delete a large volume of data use --force or increase the config value 'classify_as_big_delete' to a larger value",
+        ] {
+            assert!(matches!(parse_log(l), Some(LogEvent::BigDelete)), "{l}");
+        }
+        // newest first, as journalctl --reverse gives them; an older ordinary delete is ignored
+        let lines: Vec<String> = [
+            "1700000010.0 h onedrive[1]: ERROR: The total number of items being deleted is: 1532",
+            "1700000009.0 h onedrive[1]: Deleting item from Microsoft OneDrive: ./Documents/Old projects",
+            "1700000001.0 h onedrive[1]: Deleting item from Microsoft OneDrive: other.txt",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let b = big_delete_from(&lines);
+        assert_eq!(b.count, Some(1532));
+        assert_eq!(b.path.as_deref(), Some("Documents/Old projects"));
+        let t = big_delete_text(&b);
+        assert!(t.starts_with(
+            "\u{201c}Documents/Old projects\u{201d} and what was in it (1532 items in all) were deleted"
+        ));
+        let t = big_delete_text(&BigDelete {
+            path: None,
+            count: Some(1532),
+        });
+        assert!(t.starts_with("1532 items were deleted"));
+        // nothing found: still says something sensible
+        let t = big_delete_text(&BigDelete::default());
+        assert!(t.starts_with("Many items were deleted"));
+        assert_eq!(big_delete_from(&[]), BigDelete::default());
+        // long or hostile paths stay on one short line
+        let long = format!("{}/end", "d".repeat(200));
+        let p = shown_path(&long);
+        assert_eq!(p.chars().count(), 78);
+        assert!(p.starts_with('…') && p.ends_with("/end"));
+        assert_eq!(shown_path("a\nb"), "a b");
+
+        // the phase: shown while stopped or waiting to restart, not while a new run starts
+        let acc = AccountInfo {
+            name: "x".into(),
+            confdir: "/c".into(),
+            unit: Some("u".into()),
+            managed: true,
+            sync_dir: "/s".into(),
+            drive_id: None,
+            kind: "personal".into(),
+            signed_in: true,
+        };
+        let prefs = AccountPrefs::default();
+        let stopped = UnitState {
+            exists: true,
+            enabled: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            compose_phase(&acc, &prefs, &stopped, false, Phase::BigDelete),
+            Phase::BigDelete
+        );
+        let retrying = UnitState {
+            retrying: true,
+            active: true,
+            ..stopped.clone()
+        };
+        assert_eq!(
+            compose_phase(&acc, &prefs, &retrying, false, Phase::BigDelete),
+            Phase::BigDelete
+        );
+        let starting = UnitState {
+            starting: true,
+            active: true,
+            ..stopped.clone()
+        };
+        assert_eq!(
+            compose_phase(&acc, &prefs, &starting, false, Phase::BigDelete),
+            Phase::Syncing
+        );
+        // the approved deletions running
+        assert_eq!(
+            compose_phase(&acc, &prefs, &stopped, true, Phase::BigDelete),
+            Phase::Resyncing
+        );
+    }
+
+    #[test]
+    fn transfers_and_recent_files() {
+        // as the client writes them (two spaces after a short percentage, one after 100%)
+        let p = |l: &str| parse_log(l);
+        assert_eq!(
+            p("Uploading: Music/a ... b.mp3 ... 62%  |  ETA    00:01:20"),
+            Some(LogEvent::Progress {
+                up: true,
+                path: "Music/a ... b.mp3".into(),
+                percent: 62,
+                eta: Some("00:01:20".into()),
+                done: false
+            })
+        );
+        assert!(matches!(
+            p("Uploading: x.mp3 ... 0%   |  ETA    --:--:--"),
+            Some(LogEvent::Progress {
+                percent: 0,
+                eta: None,
+                done: false,
+                ..
+            })
+        ));
+        assert!(matches!(
+            p("Downloading: ./d/x.iso ... 100% | DONE in 00:00:03"),
+            Some(LogEvent::Progress { up: false, percent: 100, done: true, ref path, .. }) if path == "d/x.iso"
+        ));
+        // not progress: still the usual file lines
+        assert!(matches!(
+            p("Uploading modified file: x.mp3 ... done"),
+            Some(LogEvent::File { .. })
+        ));
+        assert!(p("Uploading: x.mp3 ... 250%  |  ETA 00:00:01").is_none());
+        assert!(p("Uploading: x.mp3 ... soon").is_none());
+
+        let t0 = 1_700_000_000i64;
+        let line = |dt: i64, m: &str| format!("{}.0 h onedrive[1]: {m}", t0 + dt);
+        let now = Local.timestamp_opt(t0 + 30, 0).unwrap();
+        let lines = vec![
+            line(0, "Downloading file: a.txt ... done"),
+            line(1, "Uploading: big.mp4 ... 0%   |  ETA    --:--:--"),
+            line(2, "Uploading: big.mp4 ... 40%  |  ETA    00:00:09"),
+            line(3, "Downloading: done.iso ... 95%  |  ETA    00:00:01"),
+            line(4, "Downloading: done.iso ... 100% | DONE in 00:00:20"),
+            line(5, "Downloading file: done.iso ... done"),
+            line(6, "Uploading new file: ./b.docx ... done"),
+            line(7, "Downloading file: a.txt ... done"),
+        ];
+        let (recent, transfers) = files_from(&lines, now, 10);
+        assert_eq!(
+            recent.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+            ["a.txt", "b.docx", "done.iso"]
+        );
+        assert_eq!(transfers.len(), 1);
+        assert_eq!(
+            (transfers[0].path.as_str(), transfers[0].percent),
+            ("big.mp4", 40)
+        );
+        // the client restarting cuts transfers off; so does a long silence
+        let mut cut = lines.clone();
+        cut.push(line(8, "Reading configuration file: /c/config"));
+        assert!(files_from(&cut, now, 10).1.is_empty());
+        let later = Local
+            .timestamp_opt(t0 + 2 + TRANSFER_STALE_SECS, 0)
+            .unwrap();
+        assert!(files_from(&lines, later, 10).1.is_empty());
+        // at most `max`, newest kept
+        assert_eq!(files_from(&lines, now, 1).0[0].path, "a.txt");
+
+        assert_eq!(file_kind("a/Report.DOCX", false), 2);
+        assert_eq!(file_kind("x.tar.gz", false), 9);
+        assert_eq!(file_kind("Makefile", false), 0);
+        assert_eq!(file_kind(".bashrc", false), 0);
+        assert_eq!(file_kind("Photos", true), 1);
+    }
+
+    #[test]
+    fn pause_until_morning() {
+        let at = |d: u32, h: u32, m: u32| {
+            Local
+                .with_ymd_and_hms(2026, 10, d, h, m, 0)
+                .single()
+                .unwrap()
+        };
+        let hours = |from: DateTime<Local>| (next_morning(from) - from.timestamp()) / 3600;
+        // after midnight: this morning
+        assert_eq!(next_morning(at(21, 1, 0)), at(21, 6, 0).timestamp());
+        // in the evening: tomorrow morning
+        assert_eq!(next_morning(at(20, 22, 0)), at(21, 6, 0).timestamp());
+        // just before six: not a few minutes, the next morning
+        assert_eq!(next_morning(at(21, 5, 30)), at(22, 6, 0).timestamp());
+        assert!((2..=26).contains(&hours(at(21, 12, 0))));
+    }
+
+    #[test]
+    fn repeated_keys_are_joined() {
+        let dir = std::env::temp_dir().join(format!("lodg-cfg-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("config"),
+            "skip_dir = \"Temp\"\n# skip_dir = \"commented\"\nskip_dir = \"Projects/Old\"\nsync_dir = \"~/x\"\n",
+        )
+        .unwrap();
+        let mut c = ClientConfig::load(&dir);
+        assert_eq!(
+            c.get_joined("skip_dir").as_deref(),
+            Some("Temp|Projects/Old")
+        );
+        assert_eq!(c.get_joined("skip_file"), None);
+        // writing it back makes one line in place of the first
+        c.set("skip_dir", Some("Temp|Projects/Old|Cache"));
+        assert_eq!(
+            c.get_joined("skip_dir").as_deref(),
+            Some("Temp|Projects/Old|Cache")
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

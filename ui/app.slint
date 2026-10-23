@@ -1,4 +1,4 @@
-import { Button, CheckBox, ComboBox, LineEdit, ListView, StandardTableView, Switch, Spinner, ScrollView, Palette } from "std-widgets.slint";
+import { Button, CheckBox, ComboBox, LineEdit, ListView, StandardTableView, Switch, Spinner, ScrollView, Palette, TextEdit } from "std-widgets.slint";
 
 export struct AccountRow {
     name: string,
@@ -6,6 +6,60 @@ export struct AccountRow {
     kind: string,
     status: string,
     tone: int, // 0 ok, 1 busy, 2 problem, 3 off
+}
+
+// One of the advanced client options (advanced.rs)
+export struct AdvRow {
+    group: string,
+    label: string,
+    hint: string,
+    kind: int, // 0 on/off, 1 number, 2 text, 3 choice
+    checked: bool,
+    text: string,
+    unit: string,
+    placeholder: string,
+    choices: [string],
+    choice: int,
+    // the client's defaults, for "Reset to default" and the changed dot
+    default-checked: bool,
+    default-text: string,
+    default-choice: int,
+    risky: bool,
+    effect: int, // 0 restart, 1 needs a full resync, 2 needs signing in again
+    needs: int, // row that must be on for this one to matter; -1 none, -2 the Trash option
+    matched: bool, // matches the search
+    error: string,
+}
+
+// A desktop folder that can be backed up into OneDrive (backup.rs)
+export struct BackupRow {
+    label: string,
+    detail: string, // where it is, or why it can't be backed up
+    state: int, // 0 can be backed up, 1 backed up here, 2 backed up by another account, 3 unavailable
+}
+
+// A file changed both here and online (conflict.rs)
+export struct ConflictRow {
+    name: string,
+    detail: string, // folder, and when this computer's copy was saved
+}
+
+// A small coloured label: "Can lose data", "Full resync"…
+component Badge inherits Rectangle {
+    in property <string> text;
+    in property <brush> tone;
+    height: 20px;
+    width: badge-text.preferred-width + 14px;
+    border-radius: 10px;
+    background: tone.with-alpha(Theme.dark ? 0.22 : 0.14);
+    badge-text := Text {
+        text: root.text;
+        font-size: 11px;
+        font-weight: 600;
+        color: tone;
+        vertical-alignment: center;
+        horizontal-alignment: center;
+    }
 }
 
 export struct FolderRow {
@@ -447,12 +501,35 @@ export component AppWindow inherits Window {
     in-out property <string> s-name;
     callback rename();
     callback open-folder();
-    callback open-online();
+    callback move-folder(); // after the explanation: pick where
+    // conflicting copies
+    in property <[ConflictRow]> c-rows;
+    callback c-open(int);
+    callback c-settle(int, int); // 0 keep this computer's, 1 keep OneDrive's, 2 keep both
+    // backing up desktop folders
+    in property <[BackupRow]> b-rows;
+    in property <bool> b-busy;
+    callback b-start(int);
+    callback b-stop(int);
+    in-out property <bool> bk-visible;
+    in property <string> bk-title;
+    in property <string> bk-text;
+    in property <string> bk-warn;
+    in property <string> bk-action;
+    callback bk-confirm();
+    callback open-online-page(int); // 0 website, 1 recycle bin, 2 restore
+    in property <bool> s-personal;
+    in-out property <bool> mv-visible;
+    in property <string> mv-from;
     callback sync-now();
     callback set-background(bool);
     callback sign-in();
     callback sign-out();
     callback remove-account();
+    in property <bool> s-big-delete;
+    in property <bool> s-allow-resync;
+    callback big-delete-online();
+    callback big-delete-restore();
 
     // ---------------- sign-in dialog
     in property <bool> si-visible;
@@ -492,8 +569,32 @@ export component AppWindow inherits Window {
     in-out property <bool> o-skip-hidden;
     in-out property <string> o-skip-files;
     in-out property <bool> o-allow-resync;
+    // 0 both ways, 1 download only, 2 upload only
+    in-out property <int> o-direction;
+    in-out property <bool> o-cleanup;
+    in-out property <bool> o-keep-online;
+    in-out property <string> o-skip-dirs;
+    in-out property <bool> o-skip-symlinks;
+    in-out property <bool> o-nosync;
+    in property <bool> o-is-business;
+    in-out property <bool> o-shared;
+    in-out property <bool> o-ipv4;
     in property <string> o-msg;
+    in-out property <string> o-big-delete;
+    in-out property <bool> o-adv-open;
+    in-out property <[AdvRow]> o-adv;
+    in property <[string]> o-adv-groups;
+    in-out property <int> o-adv-tab;
+    in-out property <string> o-adv-query;
+    in property <bool> o-adv-any-match;
+    callback o-adv-search(string);
     callback o-save();
+    callback o-show-config();
+    callback o-open-logs();
+    // the client's full running settings (--display-config)
+    in-out property <bool> cfg-visible;
+    in property <string> cfg-text;
+    in property <bool> cfg-busy;
 
     // ---------------- activity tab
     in property <[[StandardListViewItem]]> a-rows;
@@ -523,6 +624,8 @@ export component AppWindow inherits Window {
     in-out property <int> add-mode: 0; // 0 choose, 1 onedrive, 2 sharepoint
     in-out property <string> add-name;
     in-out property <string> add-folder;
+    in-out property <int> add-cloud;
+    in-out property <string> add-tenant;
     in property <string> add-msg;
     in property <bool> add-busy;
     in property <[string]> add-from;
@@ -547,6 +650,16 @@ export component AppWindow inherits Window {
     in property <string> app-glass-note;
     callback app-glass-changed();
     callback app-autostart-toggled();
+    in-out property <bool> app-stop-on-quit;
+    callback app-stop-on-quit-toggled();
+    in-out property <bool> app-check-updates;
+    callback app-check-updates-toggled();
+    in-out property <bool> app-pause-metered;
+    in-out property <bool> app-pause-saver;
+    callback app-pause-toggled();
+    // a newer version that's out, or ""
+    in property <string> app-update;
+    callback app-get-update();
     callback app-add-to-menu();
     callback open-url(string);
 
@@ -897,10 +1010,41 @@ export component AppWindow inherits Window {
                                                     root.open-folder();
                                                 }
                                             }
-                                            if root.s-signed-in: Button {
-                                                text: "Open online";
+                                            Button {
+                                                text: "Move…";
+                                                enabled: !root.p-visible;
                                                 clicked => {
-                                                    root.open-online();
+                                                    root.mv-visible = true;
+                                                }
+                                            }
+                                            if root.s-signed-in: Button {
+                                                text: "Online ▾";
+                                                clicked => {
+                                                    online-pages.show({ x: self.absolute-position.x, y: self.absolute-position.y + self.height });
+                                                }
+                                            }
+                                            online-pages := ContextMenuArea {
+                                                enabled: false;
+                                                width: 0;
+                                                Menu {
+                                                    MenuItem {
+                                                        title: "OneDrive website";
+                                                        activated => {
+                                                            root.open-online-page(0);
+                                                        }
+                                                    }
+                                                    MenuItem {
+                                                        title: "Recycle bin";
+                                                        activated => {
+                                                            root.open-online-page(1);
+                                                        }
+                                                    }
+                                                    if root.s-personal: MenuItem {
+                                                        title: "Restore your OneDrive";
+                                                        activated => {
+                                                            root.open-online-page(2);
+                                                        }
+                                                    }
                                                 }
                                             }
                                         }
@@ -937,7 +1081,7 @@ export component AppWindow inherits Window {
                                                     width: parent.width * clamp(root.s-quota-frac, 0, 1);
                                                     border-radius: 3px;
                                                     // nearly full shows as a warning
-                                                    background: root.s-quota-frac > 0.9 ? Theme.problem : Theme.accent;
+                                                    background: root.s-quota-frac >= 1 ? Theme.problem : root.s-quota-frac >= 0.9 ? Theme.warn : Theme.accent;
                                                 }
                                             }
                                         }
@@ -945,6 +1089,27 @@ export component AppWindow inherits Window {
                                             text: root.s-error;
                                             color: Theme.problem;
                                             wrap: word-wrap;
+                                        }
+                                        if root.s-big-delete: HorizontalLayout {
+                                            spacing: 8px;
+                                            alignment: start;
+                                            Button {
+                                                text: "Delete them online too…";
+                                                enabled: !root.s-busy;
+                                                clicked => {
+                                                    root.big-delete-online();
+                                                }
+                                            }
+                                            Button {
+                                                text: "Download them again…";
+                                                enabled: !root.s-busy && root.s-allow-resync;
+                                                clicked => {
+                                                    root.big-delete-restore();
+                                                }
+                                            }
+                                        }
+                                        if root.s-big-delete && !root.s-allow-resync: Hint {
+                                            text: "Downloading them again needs a full resync, which is turned off for this account in Options.";
                                         }
                                     }
                                 }
@@ -987,6 +1152,191 @@ export component AppWindow inherits Window {
                                                 enabled: !root.s-busy;
                                                 clicked => {
                                                     root.sign-out();
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.c-rows.length > 0: Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 6px;
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Heading {
+                                                text: "Files changed in two places";
+                                            }
+                                            Badge {
+                                                text: root.c-rows.length;
+                                                tone: Theme.warn;
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        Hint {
+                                            text: "These files were changed here and online before they could sync, so both versions were kept. Compare them, then choose which to keep.";
+                                        }
+                                        for c[i] in root.c-rows: Rectangle {
+                                            height: 52px;
+                                            border-radius: 10px;
+                                            background: c-touch.has-hover ? Theme.hover : transparent;
+                                            animate background { duration: Theme.quick; }
+                                            c-touch := TouchArea { }
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 10px;
+                                                Rectangle {
+                                                    width: 34px;
+                                                    height: 34px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    border-radius: 9px;
+                                                    background: Theme.warn.with-alpha(0.18);
+                                                    Image {
+                                                        width: 18px;
+                                                        height: 18px;
+                                                        source: @image-url("../assets/ui/file-other.svg");
+                                                        colorize: Theme.warn;
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: center;
+                                                    spacing: 1px;
+                                                    Text {
+                                                        text: c.name;
+                                                        font-weight: 600;
+                                                        overflow: elide;
+                                                    }
+                                                    Text {
+                                                        text: c.detail;
+                                                        font-size: 12px;
+                                                        color: Theme.subtle-text;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                                // centred, not stretched to the row's height
+                                                VerticalLayout {
+                                                    alignment: center;
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        Button {
+                                                            text: "Compare";
+                                                            clicked => {
+                                                                root.c-open(i);
+                                                            }
+                                                        }
+                                                        Button {
+                                                            text: "Keep… ▾";
+                                                            primary: true;
+                                                            clicked => {
+                                                                keep-menu.show({ x: self.absolute-position.x - 120px, y: self.absolute-position.y + self.height });
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                                keep-menu := ContextMenuArea {
+                                                    enabled: false;
+                                                    width: 0;
+                                                    Menu {
+                                                        MenuItem {
+                                                            title: "Keep this computer's version";
+                                                            activated => {
+                                                                root.c-settle(i, 0);
+                                                            }
+                                                        }
+                                                        MenuItem {
+                                                            title: "Keep the OneDrive version";
+                                                            activated => {
+                                                                root.c-settle(i, 1);
+                                                            }
+                                                        }
+                                                        MenuItem {
+                                                            title: "Keep both";
+                                                            activated => {
+                                                                root.c-settle(i, 2);
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+
+                                if root.s-signed-in && root.b-rows.length > 0: Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 6px;
+                                        Heading {
+                                            text: "Back up this computer's folders";
+                                        }
+                                        Hint {
+                                            text: "Keep your important folders in OneDrive, so they're backed up and on your other devices. They stay where your apps expect them.";
+                                        }
+                                        for b[i] in root.b-rows: Rectangle {
+                                            height: 52px;
+                                            border-radius: 10px;
+                                            background: b-touch.has-hover ? Theme.hover : transparent;
+                                            animate background { duration: Theme.quick; }
+                                            b-touch := TouchArea { }
+                                            HorizontalLayout {
+                                                padding-left: 8px;
+                                                padding-right: 8px;
+                                                spacing: 12px;
+                                                Rectangle {
+                                                    width: 34px;
+                                                    height: 34px;
+                                                    y: (parent.height - self.height) / 2;
+                                                    border-radius: 9px;
+                                                    background: b.state == 1 ? Theme.ok.with-alpha(0.18) : Theme.track;
+                                                    Image {
+                                                        width: 18px;
+                                                        height: 18px;
+                                                        source: @image-url("../assets/ui/folder.svg");
+                                                        colorize: b.state == 1 ? Theme.ok : Theme.subtle-text;
+                                                    }
+                                                }
+                                                VerticalLayout {
+                                                    horizontal-stretch: 1;
+                                                    alignment: center;
+                                                    spacing: 1px;
+                                                    HorizontalLayout {
+                                                        spacing: 8px;
+                                                        Text {
+                                                            text: b.label;
+                                                            font-weight: 600;
+                                                        }
+                                                        if b.state == 1: Badge {
+                                                            text: "✓ Backed up";
+                                                            tone: Theme.ok;
+                                                        }
+                                                        Rectangle {
+                                                            horizontal-stretch: 1;
+                                                        }
+                                                    }
+                                                    Text {
+                                                        text: b.detail;
+                                                        font-size: 12px;
+                                                        color: Theme.subtle-text;
+                                                        overflow: elide;
+                                                    }
+                                                }
+                                                if b.state == 0: Button {
+                                                    text: "Back up…";
+                                                    enabled: !root.b-busy;
+                                                    clicked => {
+                                                        root.b-start(i);
+                                                    }
+                                                }
+                                                if b.state == 1: Button {
+                                                    text: "Stop…";
+                                                    enabled: !root.b-busy;
+                                                    clicked => {
+                                                        root.b-stop(i);
+                                                    }
                                                 }
                                             }
                                         }
@@ -1180,6 +1530,54 @@ export component AppWindow inherits Window {
                                         Hint {
                                             text: "Applies to each file being transferred.";
                                         }
+                                        CheckBox {
+                                            text: "Connect over IPv4 only";
+                                            checked <=> root.o-ipv4;
+                                        }
+                                        Hint {
+                                            text: "Can fix syncing that's slow to start or keeps timing out on some networks.";
+                                        }
+                                    }
+                                }
+
+                                Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 8px;
+                                        Heading {
+                                            text: "Direction";
+                                        }
+                                        ComboBox {
+                                            model: ["Both ways (normal)", "Download only", "Upload only"];
+                                            current-index <=> root.o-direction;
+                                            // chosen by the user (not loaded): a backup should survive
+                                            // tidying up this computer, so keep online copies by default
+                                            selected => {
+                                                if (self.current-index == 2) {
+                                                    root.o-keep-online = true;
+                                                }
+                                            }
+                                        }
+                                        Hint {
+                                            text: root.o-direction == 1 ? "Keeps this computer a copy of what's online. Changes you make here aren't sent to OneDrive." : root.o-direction == 2 ? "Sends what you change here to OneDrive, but doesn't download changes made online. Good for backing up this computer." : "Changes made here go to OneDrive, and changes made online come here.";
+                                        }
+                                        if root.o-direction == 1: CheckBox {
+                                            text: "Also delete files here that aren't online";
+                                            checked <=> root.o-cleanup;
+                                        }
+                                        if root.o-direction == 1 && root.o-cleanup: Text {
+                                            text: "This deletes files you put in this folder yourself, since they aren't online. You'll see exactly what would be deleted before anything happens.";
+                                            color: Theme.problem;
+                                            wrap: word-wrap;
+                                            font-size: 12px;
+                                        }
+                                        if root.o-direction == 2: CheckBox {
+                                            text: "Keep files online when I delete them here";
+                                            checked <=> root.o-keep-online;
+                                        }
+                                        Hint {
+                                            text: "Changing the direction is checked first with a dry run, so you can see what would happen.";
+                                        }
                                     }
                                 }
 
@@ -1216,6 +1614,32 @@ export component AppWindow inherits Window {
                                         Hint {
                                             text: "Separate patterns with | — for example  *.tmp|~*|Thumbs.db";
                                         }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Never sync folders named *";
+                                                vertical-alignment: center;
+                                            }
+                                            LineEdit {
+                                                text <=> root.o-skip-dirs;
+                                                placeholder-text: "node_modules|Temp|Cache";
+                                            }
+                                        }
+                                        Hint {
+                                            text: "A name skips every folder called that; a path like Projects/Old skips that folder.";
+                                        }
+                                        CheckBox {
+                                            text: "Don't sync symbolic links *";
+                                            checked <=> root.o-skip-symlinks;
+                                        }
+                                        CheckBox {
+                                            text: "Skip any folder that holds a file named .nosync *";
+                                            checked <=> root.o-nosync;
+                                        }
+                                        if root.o-is-business: CheckBox {
+                                            text: "Sync shared folders I've added to My files *";
+                                            checked <=> root.o-shared;
+                                        }
                                     }
                                 }
 
@@ -1232,6 +1656,226 @@ export component AppWindow inherits Window {
                                         }
                                         Hint {
                                             text: "Changing which folders sync, or the settings marked *, makes the sync engine rebuild its view of everything (a full resync). You always get a preview of what would be downloaded, uploaded or deleted before anything happens. Turn this off to lock those settings.";
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Text {
+                                                text: "Stop and ask when more than";
+                                                vertical-alignment: center;
+                                            }
+                                            LineEdit {
+                                                text <=> root.o-big-delete;
+                                                width: 90px;
+                                                placeholder-text: "1000";
+                                                input-type: number;
+                                            }
+                                            Text {
+                                                text: "items are deleted at once";
+                                                vertical-alignment: center;
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
+                                        }
+                                        Hint {
+                                            text: "Protects against deleting a lot online by accident, for example when a folder is moved out of OneDrive or a drive goes missing. Items inside deleted folders count too. The client's default is 1000.";
+                                        }
+                                    }
+                                }
+
+                                Card {
+                                    VerticalLayout {
+                                        padding: 14px;
+                                        spacing: 10px;
+                                        HorizontalLayout {
+                                            spacing: 10px;
+                                            VerticalLayout {
+                                                horizontal-stretch: 1;
+                                                spacing: 2px;
+                                                Heading {
+                                                    text: "Advanced";
+                                                }
+                                                Hint {
+                                                    text: "Fine-tune the sync engine. Most people never need these.";
+                                                }
+                                            }
+                                            Switch {
+                                                text: root.o-adv-open ? "Shown" : "Hidden";
+                                                checked <=> root.o-adv-open;
+                                            }
+                                        }
+                                        if root.o-adv-open: VerticalLayout {
+                                            spacing: 10px;
+                                            HorizontalLayout {
+                                                spacing: 8px;
+                                                LineEdit {
+                                                    placeholder-text: "Search settings (threads, timeout, log…)";
+                                                    text <=> root.o-adv-query;
+                                                    edited(t) => {
+                                                        root.o-adv-search(t);
+                                                    }
+                                                }
+                                            }
+                                            if root.o-adv-query == "": Segmented {
+                                                labels: root.o-adv-groups;
+                                                current <=> root.o-adv-tab;
+                                            }
+                                            VerticalLayout {
+                                                spacing: 0px;
+                                                for row[i] in root.o-adv: VerticalLayout {
+                                                    property <bool> shown: root.o-adv-query == "" ? row.group == root.o-adv-groups[root.o-adv-tab] : row.matched;
+                                                    // turned on only through another setting that's off
+                                                    property <bool> active: row.needs == -1 || (row.needs == -2 ? root.o-recycle : root.o-adv[row.needs].checked);
+                                                    property <bool> changed: row.kind == 0 ? row.checked != row.default-checked : row.kind == 3 ? row.choice != row.default-choice : row.text != row.default-text;
+                                                    if shown: Rectangle {
+                                                        border-radius: 10px;
+                                                        background: tile-touch.has-hover ? Theme.hover : transparent;
+                                                        animate background { duration: Theme.quick; }
+                                                        tile-touch := TouchArea { }
+                                                        HorizontalLayout {
+                                                            padding: 10px;
+                                                            padding-left: row.needs == -1 ? 10px : 26px;
+                                                            spacing: 12px;
+                                                            // a slim bar ties a dependent setting to the one above it
+                                                            if row.needs != -1: Rectangle {
+                                                                width: 2px;
+                                                                border-radius: 1px;
+                                                                background: active ? Theme.accent : Theme.track;
+                                                            }
+                                                            VerticalLayout {
+                                                                horizontal-stretch: 1;
+                                                                spacing: 3px;
+                                                                alignment: center;
+                                                                HorizontalLayout {
+                                                                    spacing: 6px;
+                                                                    Rectangle {
+                                                                        width: 7px;
+                                                                        height: 7px;
+                                                                        y: (parent.height - self.height) / 2;
+                                                                        border-radius: 3.5px;
+                                                                        background: Theme.accent;
+                                                                        visible: changed;
+                                                                    }
+                                                                    Text {
+                                                                        text: row.label;
+                                                                        font-weight: 600;
+                                                                        wrap: word-wrap;
+                                                                        horizontal-stretch: 1;
+                                                                        opacity: active ? 1 : 0.5;
+                                                                    }
+                                                                }
+                                                                if row.hint != "": Hint {
+                                                                    text: row.hint;
+                                                                    opacity: active ? 1 : 0.5;
+                                                                }
+                                                                HorizontalLayout {
+                                                                    spacing: 6px;
+                                                                    alignment: start;
+                                                                    if root.o-adv-query != "": Badge {
+                                                                        text: row.group;
+                                                                        tone: Theme.off;
+                                                                    }
+                                                                    if row.risky: Badge {
+                                                                        text: "⚠ Can lose data";
+                                                                        tone: Theme.warn;
+                                                                    }
+                                                                    if row.effect == 1: Badge {
+                                                                        text: "Full resync";
+                                                                        tone: Theme.accent;
+                                                                    }
+                                                                    if row.effect == 2: Badge {
+                                                                        text: "Sign in again";
+                                                                        tone: Theme.accent;
+                                                                    }
+                                                                    if changed: Rectangle {
+                                                                        width: reset-text.preferred-width + 12px;
+                                                                        height: 20px;
+                                                                        border-radius: 10px;
+                                                                        background: reset-touch.has-hover ? Theme.hover : transparent;
+                                                                        accessible-role: button;
+                                                                        accessible-label: "Reset " + row.label + " to the default";
+                                                                        accessible-action-default => {
+                                                                            reset-touch.clicked();
+                                                                        }
+                                                                        reset-text := Text {
+                                                                            text: "↺ Reset to default";
+                                                                            font-size: 11px;
+                                                                            color: Theme.accent;
+                                                                            vertical-alignment: center;
+                                                                        }
+                                                                        reset-touch := TouchArea {
+                                                                            mouse-cursor: pointer;
+                                                                            clicked => {
+                                                                                row.checked = row.default-checked;
+                                                                                row.text = row.default-text;
+                                                                                row.choice = row.default-choice;
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+                                                                if row.error != "": Text {
+                                                                    text: row.error;
+                                                                    color: Theme.problem;
+                                                                    wrap: word-wrap;
+                                                                    font-size: 12px;
+                                                                }
+                                                            }
+                                                            if row.kind == 0: Switch {
+                                                                checked <=> row.checked;
+                                                                enabled: active;
+                                                                accessible-label: row.label;
+                                                            }
+                                                            if row.kind == 1 || row.kind == 2: HorizontalLayout {
+                                                                spacing: 6px;
+                                                                alignment: end;
+                                                                LineEdit {
+                                                                    text <=> row.text;
+                                                                    enabled: active;
+                                                                    placeholder-text: row.placeholder;
+                                                                    width: row.kind == 1 ? 96px : 260px;
+                                                                    input-type: row.kind == 1 ? InputType.number : InputType.text;
+                                                                    horizontal-alignment: row.kind == 1 ? right : left;
+                                                                    accessible-label: row.label;
+                                                                }
+                                                                if row.unit != "": Text {
+                                                                    text: row.unit;
+                                                                    color: Theme.subtle-text;
+                                                                    vertical-alignment: center;
+                                                                    min-width: 52px;
+                                                                }
+                                                            }
+                                                            if row.kind == 3: ComboBox {
+                                                                model: row.choices;
+                                                                current-index <=> row.choice;
+                                                                enabled: active;
+                                                                width: 220px;
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if root.o-adv-query != "" && !root.o-adv-any-match: Hint {
+                                                text: "No setting matches \"" + root.o-adv-query + "\".";
+                                                horizontal-alignment: center;
+                                            }
+                                        }
+                                        HorizontalLayout {
+                                            spacing: 8px;
+                                            Button {
+                                                text: "Show all settings in use";
+                                                clicked => {
+                                                    root.o-show-config();
+                                                }
+                                            }
+                                            Button {
+                                                text: "Open log folder";
+                                                clicked => {
+                                                    root.o-open-logs();
+                                                }
+                                            }
+                                            Rectangle {
+                                                horizontal-stretch: 1;
+                                            }
                                         }
                                     }
                                 }
@@ -1454,6 +2098,36 @@ export component AppWindow inherits Window {
                                 Hint {
                                     text: "Best to pick an empty or new folder. Anything already in it will be uploaded.";
                                 }
+                                if root.add-mode == 1: HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Microsoft cloud";
+                                        width: 120px;
+                                        vertical-alignment: center;
+                                    }
+                                    ComboBox {
+                                        model: ["Worldwide (normal)", "US Government (GCC High)", "US Government (DoD)", "Germany", "China (21Vianet)"];
+                                        current-index <=> root.add-cloud;
+                                    }
+                                    Rectangle {
+                                        horizontal-stretch: 1;
+                                    }
+                                }
+                                if root.add-mode == 1 && root.add-cloud > 0: HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: "Tenant";
+                                        width: 120px;
+                                        vertical-alignment: center;
+                                    }
+                                    LineEdit {
+                                        text <=> root.add-tenant;
+                                        placeholder-text: "contoso.onmicrosoft.us";
+                                    }
+                                }
+                                if root.add-mode == 1 && root.add-cloud > 0: Hint {
+                                    text: "Only for government and national cloud accounts. Your IT team can tell you the tenant.";
+                                }
                             }
                         }
                         HorizontalLayout {
@@ -1509,6 +2183,62 @@ export component AppWindow inherits Window {
                             }
                             Hint {
                                 text: "Syncing itself keeps running in the background either way. The tray icon shows status and runs sync schedules.";
+                            }
+                            CheckBox {
+                                text: "Stop syncing when I quit the tray icon";
+                                checked <=> root.app-stop-on-quit;
+                                toggled => {
+                                    root.app-stop-on-quit-toggled();
+                                }
+                            }
+                            Hint {
+                                text: "\"Quit\" in the tray icon's menu then stops syncing too. It starts again the next time the app opens or you log in.";
+                            }
+                            CheckBox {
+                                text: "Pause syncing on a metered network";
+                                checked <=> root.app-pause-metered;
+                                toggled => {
+                                    root.app-pause-toggled();
+                                }
+                            }
+                            Hint {
+                                text: "Saves your data allowance on a phone hotspot or a connection you've marked as metered in your network settings.";
+                            }
+                            CheckBox {
+                                text: "Pause syncing while power saver is on";
+                                checked <=> root.app-pause-saver;
+                                toggled => {
+                                    root.app-pause-toggled();
+                                }
+                            }
+                            Hint {
+                                text: "Syncing carries on by itself afterwards. \"Sync now\" still syncs for an hour if you need it to.";
+                            }
+                            CheckBox {
+                                text: "Tell me when a new version is out";
+                                checked <=> root.app-check-updates;
+                                toggled => {
+                                    root.app-check-updates-toggled();
+                                }
+                            }
+                            Hint {
+                                text: "Looks at this app's page on GitHub once a day. Nothing is downloaded or installed by itself.";
+                            }
+                            if root.app-update != "": HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                Text {
+                                    text: "Version " + root.app-update + " is out.";
+                                    vertical-alignment: center;
+                                    font-weight: 600;
+                                }
+                                Button {
+                                    text: "Get it";
+                                    primary: true;
+                                    clicked => {
+                                        root.app-get-update();
+                                    }
+                                }
                             }
                             if root.app-is-appimage: HorizontalLayout {
                                 alignment: start;
@@ -1839,6 +2569,171 @@ export component AppWindow inherits Window {
         }
     }
 
+    if root.mv-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(600px, root.width - 40px);
+            height: mv-layout.preferred-height;
+            background: Theme.dialog;
+            border-radius: 14px;
+            drop-shadow-blur: 30px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000059;
+            mv-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: "Move your OneDrive folder";
+                    font-size: 16px;
+                }
+                Text {
+                    text: "This moves the folder that holds this account's files, now " + root.mv-from + ", to a new place — for example another hard drive with more space. Your files stay in OneDrive the whole time, and nothing is downloaded again.";
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "What happens after you choose the new place:";
+                    wrap: word-wrap;
+                    font-weight: 600;
+                }
+                Text {
+                    text: "1. Syncing for this account pauses.\n2. The files go to the new place. On the same drive they're simply moved, which is instant. To another drive they're copied, which can take a while for a big folder.\n3. A check runs to confirm everything matches online (a dry run, nothing changes). Press Apply and syncing carries on from the new place.";
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: "Moving to another drive leaves your old folder exactly as it was: nothing is ever deleted for you, so no files can be lost if the copy goes wrong. Once you've checked your files are in the new place, delete the old folder yourself to free up the space. Until then, it isn't synced any more and changes made in it won't reach OneDrive.";
+                    wrap: word-wrap;
+                    color: Theme.warn;
+                }
+                Hint {
+                    text: "Pick an empty folder to use it as the new OneDrive folder. Pick a folder that already has things in it (like the top of a drive) and a folder named like the current one is made inside it. Make sure the new drive has enough free space and is always connected (mounted automatically).";
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.mv-visible = false;
+                        }
+                    }
+                    Button {
+                        text: "Choose new location…";
+                        primary: true;
+                        clicked => {
+                            root.mv-visible = false;
+                            root.move-folder();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.bk-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(580px, root.width - 40px);
+            height: bk-layout.preferred-height;
+            background: Theme.dialog;
+            border-radius: 14px;
+            drop-shadow-blur: 30px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000059;
+            bk-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: root.bk-title;
+                    font-size: 16px;
+                }
+                Text {
+                    text: root.bk-text;
+                    wrap: word-wrap;
+                }
+                if root.bk-warn != "": Text {
+                    text: root.bk-warn;
+                    wrap: word-wrap;
+                    color: Theme.warn;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    if root.b-busy: Spinner {
+                        indeterminate: true;
+                        width: 22px;
+                        height: 22px;
+                    }
+                    Button {
+                        text: "Cancel";
+                        enabled: !root.b-busy;
+                        clicked => {
+                            root.bk-visible = false;
+                        }
+                    }
+                    Button {
+                        text: root.bk-action;
+                        primary: true;
+                        enabled: !root.b-busy;
+                        clicked => {
+                            root.bk-confirm();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if root.cfg-visible: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(720px, root.width - 40px);
+            height: min(560px, root.height - 40px);
+            background: Theme.dialog;
+            border-radius: 14px;
+            drop-shadow-blur: 30px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000059;
+            VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: "All settings in use";
+                    font-size: 16px;
+                }
+                Hint {
+                    text: "What the sync engine reads from this account's config file, including the defaults for anything not set.";
+                }
+                if root.cfg-busy: Spinner {
+                    indeterminate: true;
+                    width: 22px;
+                    height: 22px;
+                }
+                ScrollView {
+                    vertical-stretch: 1;
+                    Text {
+                        text: root.cfg-text;
+                        font-family: "monospace";
+                        font-size: 12px;
+                        wrap: no-wrap;
+                    }
+                }
+                HorizontalLayout {
+                    alignment: end;
+                    Button {
+                        text: "Close";
+                        primary: true;
+                        clicked => {
+                            root.cfg-visible = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     if root.r-visible: Overlay {
         width: root.width;
         height: root.height;
@@ -1931,6 +2826,986 @@ export component AppWindow inherits Window {
                         primary: true;
                         clicked => {
                             root.ci-confirm();
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ================================================================ tray popup
+// What a click on the tray icon opens: each account's status, files syncing now and recent
+// files, each list with its own scroll bar and keyboard use (arrows, Home/End, Enter).
+
+export struct PanelAccount {
+    name: string,
+    status: string,
+    tone: int, // as in AccountRow
+    personal: bool, // has "Restore your OneDrive"
+}
+
+export struct PanelFile {
+    name: string,
+    // folder, what happened and when (or how far a transfer has got), and the account
+    detail: string,
+    kind: int, // core::file_kind
+    percent: int, // a transfer's progress; -1 for finished items
+    can-open: bool, // still there to open (not deleted)
+}
+
+component IconButton inherits Rectangle {
+    in property <image> icon;
+    in property <string> label; // for screen readers
+    in property <bool> enabled: true;
+    callback clicked();
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    background: ta.pressed ? Theme.selected : ta.has-hover && enabled ? Theme.hover : transparent;
+    opacity: enabled ? 1 : 0.4;
+    accessible-role: button;
+    accessible-label: label;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
+    ta := TouchArea {
+        enabled: root.enabled;
+        clicked => {
+            fs.focus();
+            root.clicked();
+        }
+    }
+    fs := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    if fs.has-focus: Rectangle {
+        border-radius: root.border-radius;
+        border-width: 2px;
+        border-color: Theme.accent;
+    }
+    Image {
+        width: 18px;
+        height: 18px;
+        source: root.icon;
+        colorize: Palette.foreground.with-alpha(0.8);
+    }
+}
+
+// Arrow keys, Home/End and Enter for a list whose rows are all `row-height` tall; keeps the
+// current row in view.
+component ListKeys inherits FocusScope {
+    in property <int> count;
+    in property <length> row-height;
+    in property <length> visible-height;
+    in-out property <int> current: -1;
+    in-out property <length> content-y;
+    callback activated(int);
+    x: 0;
+    width: 0;
+    function go(i: int) {
+        if (root.count == 0) {
+            return;
+        }
+        root.current = max(0, min(root.count - 1, i));
+        if (root.current * root.row-height < -root.content-y) {
+            root.content-y = -root.current * root.row-height;
+        } else if ((root.current + 1) * root.row-height > -root.content-y + root.visible-height) {
+            root.content-y = -((root.current + 1) * root.row-height - root.visible-height);
+        }
+    }
+    key-pressed(event) => {
+        if (event.text == Key.DownArrow) {
+            go(root.current + 1);
+            return accept;
+        }
+        if (event.text == Key.UpArrow) {
+            go(root.current - 1);
+            return accept;
+        }
+        if (event.text == Key.Home) {
+            go(0);
+            return accept;
+        }
+        if (event.text == Key.End) {
+            go(root.count - 1);
+            return accept;
+        }
+        if (event.text == Key.Return || event.text == Key.Space) {
+            if (root.current >= 0 && root.current < root.count) {
+                root.activated(root.current);
+            }
+            return accept;
+        }
+        return reject;
+    }
+    focus-changed-event => {
+        if (self.has-focus && root.current < 0 && root.count > 0) {
+            go(0);
+        }
+    }
+}
+
+component SectionTitle inherits Text {
+    font-size: 12px;
+    font-weight: 600;
+    color: Theme.subtle-text;
+}
+
+component FileList inherits Rectangle {
+    in property <[PanelFile]> rows;
+    in property <string> empty-text;
+    in-out property <int> current: -1;
+    property <length> row-h: 50px;
+    callback open(int);
+    callback reveal(int);
+    forward-focus: keys;
+    border-radius: 10px;
+    background: Theme.card;
+    border-width: keys.has-focus ? 2px : 1px;
+    border-color: keys.has-focus ? Theme.accent : Theme.card-border;
+    accessible-role: list;
+    if root.rows.length == 0: Hint {
+        x: 12px;
+        width: parent.width - 24px;
+        text: root.empty-text;
+        vertical-alignment: center;
+    }
+    lv := ListView {
+        x: 1px;
+        y: 1px;
+        width: parent.width - 2px;
+        height: parent.height - 2px;
+        for row[i] in root.rows: Rectangle {
+            height: root.row-h;
+            background: i == root.current && keys.has-focus ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
+            accessible-role: list-item;
+            accessible-label: row.name + ", " + row.detail;
+            accessible-item-index: i;
+            accessible-action-default => {
+                root.open(i);
+            }
+            ta := TouchArea {
+                mouse-cursor: row.can-open ? pointer : default;
+                clicked => {
+                    root.current = i;
+                    keys.focus();
+                    root.open(i);
+                }
+            }
+            HorizontalLayout {
+                padding-left: 10px;
+                padding-right: 6px;
+                spacing: 10px;
+                Image {
+                    width: 28px;
+                    height: 28px;
+                    y: (parent.height - self.height) / 2;
+                    source: [
+                        @image-url("../assets/ui/file-other.svg"),
+                        @image-url("../assets/ui/file-folder.svg"),
+                        @image-url("../assets/ui/file-document.svg"),
+                        @image-url("../assets/ui/file-spreadsheet.svg"),
+                        @image-url("../assets/ui/file-presentation.svg"),
+                        @image-url("../assets/ui/file-pdf.svg"),
+                        @image-url("../assets/ui/file-picture.svg"),
+                        @image-url("../assets/ui/file-video.svg"),
+                        @image-url("../assets/ui/file-audio.svg"),
+                        @image-url("../assets/ui/file-archive.svg"),
+                        @image-url("../assets/ui/file-code.svg"),
+                        @image-url("../assets/ui/file-text.svg"),
+                    ][max(0, min(11, row.kind))];
+                }
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 3px;
+                    Text {
+                        text: row.name;
+                        overflow: elide;
+                        font-size: 13px;
+                        font-weight: 500;
+                    }
+                    Text {
+                        text: row.detail;
+                        overflow: elide;
+                        font-size: 11px;
+                        color: Theme.subtle-text;
+                    }
+                    if row.percent >= 0: Rectangle {
+                        height: 4px;
+                        border-radius: 2px;
+                        background: Theme.track;
+                        Rectangle {
+                            x: 0;
+                            width: parent.width * max(0, min(100, row.percent)) / 100;
+                            border-radius: 2px;
+                            background: Theme.accent;
+                            animate width { duration: Theme.slide; }
+                        }
+                    }
+                }
+                // "show in folder", on the row under the mouse or picked with the keyboard
+                IconButton {
+                    y: (parent.height - self.height) / 2;
+                    icon: @image-url("../assets/ui/reveal.svg");
+                    label: "Show " + row.name + " in its folder";
+                    opacity: ta.has-hover || (i == root.current && keys.has-focus) ? 1 : 0;
+                    clicked => {
+                        root.reveal(i);
+                    }
+                }
+            }
+        }
+    }
+    keys := ListKeys {
+        count: root.rows.length;
+        row-height: root.row-h;
+        visible-height: lv.visible-height;
+        current <=> root.current;
+        content-y <=> lv.content-y;
+        activated(i) => {
+            root.open(i);
+        }
+    }
+}
+
+export component PopupPanel inherits Window {
+    title: "OneDrive";
+    icon: @image-url("../assets/linux-onedrive-gui.svg");
+    no-frame: true;
+    width: 380px;
+    height: 600px;
+    // rounded corners only where the window can be see-through (a compositor; always on Wayland)
+    in property <bool> rounded;
+    background: rounded ? transparent : Theme.dialog;
+    in property <bool> dark;
+    // the app's own colours (Theme) follow along with the standard widgets' (Palette)
+    changed dark => {
+        Palette.color-scheme = self.dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.dark = self.dark;
+    }
+    init => {
+        Palette.color-scheme = self.dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.dark = self.dark;
+    }
+
+    in property <string> summary;
+    in property <int> summary-tone;
+    in property <[PanelAccount]> accounts;
+    in property <[PanelFile]> transfers;
+    in property <[PanelFile]> recent;
+    // files that didn't sync, and why
+    in property <[PanelFile]> blocked;
+    in-out property <int> bl-current: -1;
+    callback reveal-blocked(int);
+    // the account picker above the recent files: 0 all, then each account
+    in property <[string]> filters;
+    in-out property <int> filter;
+    in property <bool> any-paused;
+    // a newer version that's out, or ""
+    in property <string> update;
+    callback get-update();
+    // some account can sync now (signed in, no resync running, the client installed)
+    in property <bool> can-sync;
+    in-out property <int> acc-current: -1;
+    in-out property <int> tr-current: -1;
+    in-out property <int> rec-current: -1;
+
+    callback close-panel();
+    callback sync-now();
+    callback settings(int); // -1: no particular account
+    callback pause(int); // seconds; -1 until tomorrow, 0 resume
+    callback open-file(bool, int); // transfer list?, row
+    callback reveal-file(bool, int);
+    callback open-folder(int); // account index
+    callback view-online(int, int); // account, page: 0 website, 1 recycle bin, 2 restore
+    callback filter-changed();
+
+    property <length> acc-row-h: 38px;
+
+    forward-focus: rec;
+
+    Rectangle {
+        border-radius: root.rounded ? 14px : 0;
+        background: Theme.dialog;
+        border-width: 1px;
+        border-color: Theme.card-border;
+        clip: true;
+
+        // Esc closes; arrow keys etc. go to the focused list first
+        FocusScope {
+            key-pressed(event) => {
+                if (event.text == Key.Escape) {
+                    root.close-panel();
+                    return accept;
+                }
+                return reject;
+            }
+
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+
+                // ---- header
+                HorizontalLayout {
+                    spacing: 10px;
+                    Image {
+                        width: 30px;
+                        height: 30px;
+                        y: (parent.height - self.height) / 2;
+                        source: @image-url("../assets/linux-onedrive-gui.svg");
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 1px;
+                        Text {
+                            text: "OneDrive";
+                            font-size: 15px;
+                            font-weight: 700;
+                        }
+                        HorizontalLayout {
+                            spacing: 6px;
+                            alignment: start;
+                            ToneDot {
+                                tone: root.summary-tone;
+                                width: 8px;
+                                height: 8px;
+                                y: (parent.height - self.height) / 2;
+                            }
+                            Text {
+                                text: root.summary;
+                                font-size: 12px;
+                                color: Theme.subtle-text;
+                                overflow: elide;
+                            }
+                        }
+                    }
+                    IconButton {
+                        y: (parent.height - self.height) / 2;
+                        icon: @image-url("../assets/ui/sync.svg");
+                        label: "Sync now";
+                        enabled: root.can-sync;
+                        clicked => {
+                            root.sync-now();
+                        }
+                    }
+                    pause-btn := IconButton {
+                        y: (parent.height - self.height) / 2;
+                        icon: @image-url("../assets/ui/pause.svg");
+                        label: "Pause syncing";
+                        clicked => {
+                            pause-menu.show({ x: self.absolute-position.x - 160px, y: self.absolute-position.y + self.height + 4px });
+                        }
+                    }
+                    IconButton {
+                        y: (parent.height - self.height) / 2;
+                        icon: @image-url("../assets/ui/settings.svg");
+                        label: "Settings and accounts";
+                        clicked => {
+                            root.settings(-1);
+                        }
+                    }
+                }
+
+                if root.update != "": Rectangle {
+                    height: update-row.preferred-height;
+                    border-radius: 10px;
+                    background: Theme.accent.with-alpha(0.12);
+                    update-row := HorizontalLayout {
+                        padding: 8px;
+                        padding-left: 12px;
+                        spacing: 8px;
+                        Text {
+                            text: "Version " + root.update + " of this app is out.";
+                            vertical-alignment: center;
+                            overflow: elide;
+                            horizontal-stretch: 1;
+                        }
+                        Button {
+                            text: "Get it";
+                            primary: true;
+                            clicked => {
+                                root.get-update();
+                            }
+                        }
+                    }
+                }
+
+                // ---- accounts
+                Rectangle {
+                    height: max(1, min(3, root.accounts.length)) * root.acc-row-h + 2px;
+                    border-radius: 10px;
+                    background: Theme.card;
+                    border-width: acc-keys.has-focus ? 2px : 1px;
+                    border-color: acc-keys.has-focus ? Theme.accent : Theme.card-border;
+                    accessible-role: list;
+                    accessible-label: "Accounts";
+                    acc-lv := ListView {
+                        x: 1px;
+                        y: 1px;
+                        width: parent.width - 2px;
+                        height: parent.height - 2px;
+                        for a[i] in root.accounts: Rectangle {
+                            height: root.acc-row-h;
+                            background: i == root.acc-current && acc-keys.has-focus ? Theme.selected : ata.has-hover ? Theme.hover : transparent;
+                            accessible-role: list-item;
+                            accessible-label: a.name + ": " + a.status;
+                            accessible-item-index: i;
+                            accessible-action-default => {
+                                root.settings(i);
+                            }
+                            ata := TouchArea {
+                                mouse-cursor: pointer;
+                                clicked => {
+                                    root.settings(i);
+                                }
+                            }
+                            HorizontalLayout {
+                                padding-left: 12px;
+                                padding-right: 12px;
+                                spacing: 10px;
+                                ToneDot {
+                                    tone: a.tone;
+                                    y: (parent.height - self.height) / 2;
+                                }
+                                Text {
+                                    text: a.name;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                    font-weight: 500;
+                                    horizontal-stretch: 1;
+                                }
+                                Text {
+                                    text: a.status;
+                                    vertical-alignment: center;
+                                    horizontal-alignment: right;
+                                    overflow: elide;
+                                    font-size: 12px;
+                                    color: a.tone == 2 ? Theme.problem : Theme.subtle-text;
+                                    horizontal-stretch: 1;
+                                }
+                            }
+                        }
+                    }
+                    acc-keys := ListKeys {
+                        count: root.accounts.length;
+                        row-height: root.acc-row-h;
+                        visible-height: acc-lv.visible-height;
+                        current <=> root.acc-current;
+                        content-y <=> acc-lv.content-y;
+                        activated(i) => {
+                            root.settings(i);
+                        }
+                    }
+                }
+
+                // ---- not synced (only when there are any)
+                if root.blocked.length > 0: SectionTitle {
+                    text: "Not synced (" + root.blocked.length + ")";
+                    color: Theme.problem;
+                }
+                if root.blocked.length > 0: FileList {
+                    height: min(2, root.blocked.length) * 50px + 2px;
+                    rows: root.blocked;
+                    empty-text: "";
+                    current <=> root.bl-current;
+                    open(i) => {
+                        root.reveal-blocked(i);
+                    }
+                    reveal(i) => {
+                        root.reveal-blocked(i);
+                    }
+                }
+
+                // ---- syncing now
+                SectionTitle {
+                    text: root.transfers.length == 0 ? "Syncing now" : "Syncing now (" + root.transfers.length + ")";
+                }
+                tr := FileList {
+                    height: root.transfers.length == 0 ? 40px : min(3, root.transfers.length) * 50px + 2px;
+                    rows: root.transfers;
+                    empty-text: "No large files are transferring right now.";
+                    current <=> root.tr-current;
+                    open(i) => {
+                        root.open-file(true, i);
+                    }
+                    reveal(i) => {
+                        root.reveal-file(true, i);
+                    }
+                }
+
+                // ---- recent
+                HorizontalLayout {
+                    spacing: 8px;
+                    SectionTitle {
+                        text: "Recent files";
+                        vertical-alignment: center;
+                        horizontal-stretch: 1;
+                    }
+                    if root.filters.length > 2: ComboBox {
+                        width: 170px;
+                        model: root.filters;
+                        current-index <=> root.filter;
+                        selected => {
+                            root.filter-changed();
+                        }
+                    }
+                }
+                rec := FileList {
+                    vertical-stretch: 1;
+                    rows: root.recent;
+                    empty-text: "Nothing has synced recently.";
+                    current <=> root.rec-current;
+                    open(i) => {
+                        root.open-file(false, i);
+                    }
+                    reveal(i) => {
+                        root.reveal-file(false, i);
+                    }
+                }
+
+                // ---- footer
+                HorizontalLayout {
+                    spacing: 8px;
+                    folder-btn := Button {
+                        text: "Open folder";
+                        icon: @image-url("../assets/ui/folder.svg");
+                        colorize-icon: true;
+                        horizontal-stretch: 1;
+                        enabled: root.accounts.length > 0;
+                        clicked => {
+                            if (root.accounts.length == 1) {
+                                root.open-folder(0);
+                            } else {
+                                folder-menu.show({ x: self.absolute-position.x, y: max(8px, self.absolute-position.y - root.accounts.length * 32px - 12px) });
+                            }
+                        }
+                    }
+                    online-btn := Button {
+                        text: "View online";
+                        icon: @image-url("../assets/ui/globe.svg");
+                        colorize-icon: true;
+                        horizontal-stretch: 1;
+                        enabled: root.accounts.length > 0;
+                        clicked => {
+                            online-menu.show({ x: self.absolute-position.x, y: max(8px, self.absolute-position.y - (root.accounts.length == 1 ? 3 : root.accounts.length) * 32px - 12px) });
+                        }
+                    }
+                }
+            }
+        }
+
+        pause-menu := ContextMenuArea {
+            enabled: false; // shown by the pause button only
+            Menu {
+                MenuItem {
+                    title: "Pause for 1 hour";
+                    activated => {
+                        root.pause(3600);
+                    }
+                }
+                MenuItem {
+                    title: "Pause for 4 hours";
+                    activated => {
+                        root.pause(4 * 3600);
+                    }
+                }
+                MenuItem {
+                    title: "Pause until tomorrow morning";
+                    activated => {
+                        root.pause(-1);
+                    }
+                }
+                if root.any-paused: MenuSeparator { }
+                if root.any-paused: MenuItem {
+                    title: "Resume syncing";
+                    activated => {
+                        root.pause(0);
+                    }
+                }
+            }
+        }
+        folder-menu := ContextMenuArea {
+            enabled: false;
+            Menu {
+                for a[i] in root.accounts: MenuItem {
+                    title: a.name;
+                    activated => {
+                        root.open-folder(i);
+                    }
+                }
+            }
+        }
+        online-menu := ContextMenuArea {
+            enabled: false;
+            Menu {
+                // one account: its pages; several: a menu per account
+                if root.accounts.length == 1: MenuItem {
+                    title: "OneDrive website";
+                    activated => {
+                        root.view-online(0, 0);
+                    }
+                }
+                if root.accounts.length == 1: MenuItem {
+                    title: "Recycle bin";
+                    activated => {
+                        root.view-online(0, 1);
+                    }
+                }
+                if root.accounts.length == 1 && root.accounts[0].personal: MenuItem {
+                    title: "Restore your OneDrive";
+                    activated => {
+                        root.view-online(0, 2);
+                    }
+                }
+                if root.accounts.length > 1: Menu {
+                    title: "OneDrive website";
+                    for a[i] in root.accounts: MenuItem {
+                        title: a.name;
+                        activated => {
+                            root.view-online(i, 0);
+                        }
+                    }
+                }
+                if root.accounts.length > 1: Menu {
+                    title: "Recycle bin";
+                    for a[i] in root.accounts: MenuItem {
+                        title: a.name;
+                        activated => {
+                            root.view-online(i, 1);
+                        }
+                    }
+                }
+                if root.accounts.length > 1: Menu {
+                    title: "Restore your OneDrive";
+                    for a[i] in root.accounts: MenuItem {
+                        title: a.name;
+                        enabled: a.personal;
+                        activated => {
+                            root.view-online(i, 2);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ======== a file's own window, opened from the file manager: version history, or sharing
+// with particular people (filewin.rs)
+
+export struct VersionRow {
+    when: string,
+    detail: string, // size and who saved it
+}
+
+export component FileWindow inherits Window {
+    title: root.mode == 0 ? "Version history — " + root.file-name : "Share — " + root.file-name;
+    icon: @image-url("../assets/linux-onedrive-gui.svg");
+    preferred-width: 520px;
+    preferred-height: root.mode == 0 ? 560px : 500px;
+    min-width: 380px;
+    background: Theme.window;
+    in property <bool> dark;
+    changed dark => {
+        Palette.color-scheme = self.dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.dark = self.dark;
+    }
+    init => {
+        Palette.color-scheme = self.dark ? ColorScheme.dark : ColorScheme.light;
+        Theme.dark = self.dark;
+    }
+
+    in property <int> mode; // 0 version history, 1 share with people
+    in property <string> file-name;
+    in property <string> account;
+    in property <bool> busy;
+    in property <string> msg;
+    in property <int> msg-tone; // 0 ok, 2 problem, 3 plain
+    // version history
+    in property <[VersionRow]> versions;
+    in-out property <int> confirm: -1; // the version being restored, asking first
+    callback open-version(int);
+    callback restore-version(int);
+    // sharing
+    in property <bool> is-work; // only people in the organization (or as the admin allows)
+    in-out property <string> emails;
+    in-out property <bool> can-edit;
+    in-out property <string> message;
+    callback send();
+    callback close-window();
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+        HorizontalLayout {
+            spacing: 12px;
+            Rectangle {
+                width: 44px;
+                height: 44px;
+                border-radius: 12px;
+                background: Theme.accent.with-alpha(Theme.dark ? 0.25 : 0.14);
+                Image {
+                    width: 24px;
+                    height: 24px;
+                    source: root.mode == 0 ? @image-url("../assets/ui/sync.svg") : @image-url("../assets/ui/globe.svg");
+                    colorize: Theme.accent;
+                }
+            }
+            VerticalLayout {
+                alignment: center;
+                spacing: 2px;
+                Text {
+                    text: root.mode == 0 ? "Version history" : "Share with people";
+                    font-size: 18px;
+                    font-weight: 700;
+                }
+                Text {
+                    text: root.file-name + "  ·  " + root.account;
+                    color: Theme.subtle-text;
+                    overflow: elide;
+                }
+            }
+        }
+
+        // ---- version history
+        if root.mode == 0: Card {
+            vertical-stretch: 1;
+            VerticalLayout {
+                padding: 6px;
+                if root.busy && root.versions.length == 0: HorizontalLayout {
+                    padding: 14px;
+                    spacing: 10px;
+                    Spinner {
+                        indeterminate: true;
+                        width: 20px;
+                        height: 20px;
+                    }
+                    Text {
+                        text: "Getting the saved versions…";
+                        vertical-alignment: center;
+                    }
+                }
+                ListView {
+                    vertical-stretch: 1;
+                    for v[i] in root.versions: Rectangle {
+                        height: 58px;
+                        border-radius: 10px;
+                        background: row-touch.has-hover ? Theme.hover : transparent;
+                        animate background { duration: Theme.quick; }
+                        row-touch := TouchArea { }
+                        HorizontalLayout {
+                            padding-left: 12px;
+                            padding-right: 8px;
+                            spacing: 10px;
+                            // a timeline: a dot per version, the newest filled
+                            Rectangle {
+                                width: 12px;
+                                Rectangle {
+                                    x: (parent.width - self.width) / 2;
+                                    width: 2px;
+                                    y: i == 0 ? parent.height / 2 : 0;
+                                    height: i == 0 ? parent.height / 2 : (i == root.versions.length - 1 ? parent.height / 2 : parent.height);
+                                    background: Theme.track;
+                                    visible: root.versions.length > 1;
+                                }
+                                Rectangle {
+                                    width: 12px;
+                                    height: 12px;
+                                    y: (parent.height - self.height) / 2;
+                                    border-radius: 6px;
+                                    background: i == 0 ? Theme.accent : Theme.card;
+                                    border-width: 2px;
+                                    border-color: Theme.accent;
+                                }
+                            }
+                            VerticalLayout {
+                                horizontal-stretch: 1;
+                                alignment: center;
+                                spacing: 2px;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Text {
+                                        text: v.when;
+                                        font-weight: 600;
+                                        overflow: elide;
+                                    }
+                                    if i == 0: Badge {
+                                        text: "Current";
+                                        tone: Theme.ok;
+                                    }
+                                }
+                                Text {
+                                    text: v.detail;
+                                    font-size: 12px;
+                                    color: Theme.subtle-text;
+                                    overflow: elide;
+                                }
+                            }
+                            // centred, not stretched to the row's height
+                            VerticalLayout {
+                                alignment: center;
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    Button {
+                                        text: "Open";
+                                        enabled: !root.busy;
+                                        clicked => {
+                                            root.open-version(i);
+                                        }
+                                    }
+                                    if i > 0: Button {
+                                        text: "Restore";
+                                        enabled: !root.busy;
+                                        clicked => {
+                                            root.confirm = i;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if root.mode == 0: Hint {
+            text: "\"Open\" saves a copy of that version and opens it, without changing anything. \"Restore\" makes it the current version everywhere; the version it replaces is kept here too, so nothing is lost.";
+        }
+
+        // ---- share with people
+        if root.mode == 1: Card {
+            VerticalLayout {
+                padding: 14px;
+                spacing: 10px;
+                Text {
+                    text: "Invite people by email";
+                    font-weight: 600;
+                }
+                LineEdit {
+                    text <=> root.emails;
+                    placeholder-text: "name@example.com, another@example.com";
+                    input-type: text;
+                    enabled: !root.busy;
+                }
+                Hint {
+                    text: root.is-work ? "Separate addresses with commas. Each person gets an email and signs in to open it. People outside your organization can only be added if your IT team allows it." : "Separate addresses with commas. Each person gets an email and signs in with a Microsoft account to open it.";
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    VerticalLayout {
+                        horizontal-stretch: 1;
+                        alignment: center;
+                        Text {
+                            text: "Can edit";
+                            font-weight: 600;
+                        }
+                        Hint {
+                            text: root.can-edit ? "They can change it (and add or delete files in a folder)." : "They can view and download it, but not change it.";
+                        }
+                    }
+                    Switch {
+                        checked <=> root.can-edit;
+                        enabled: !root.busy;
+                        accessible-label: "Can edit";
+                    }
+                }
+                Text {
+                    text: "Message (optional)";
+                    font-weight: 600;
+                }
+                TextEdit {
+                    text <=> root.message;
+                    height: 90px;
+                    wrap: word-wrap;
+                    enabled: !root.busy;
+                }
+            }
+        }
+        if root.mode == 1: Rectangle {
+            vertical-stretch: 1;
+        }
+
+        // ---- status and buttons
+        HorizontalLayout {
+            spacing: 10px;
+            if root.busy: Spinner {
+                indeterminate: true;
+                width: 20px;
+                height: 20px;
+            }
+            Text {
+                text: root.msg;
+                wrap: word-wrap;
+                horizontal-stretch: 1;
+                vertical-alignment: center;
+                color: root.msg-tone == 0 ? Theme.ok : root.msg-tone == 2 ? Theme.problem : Theme.subtle-text;
+            }
+            if root.mode == 1: Button {
+                text: "Send invitation";
+                primary: true;
+                enabled: !root.busy && root.emails != "";
+                clicked => {
+                    root.send();
+                }
+            }
+            Button {
+                text: "Close";
+                clicked => {
+                    root.close-window();
+                }
+            }
+        }
+    }
+
+    // asking before restoring
+    if root.confirm >= 0: Overlay {
+        width: root.width;
+        height: root.height;
+        Card {
+            width: min(420px, root.width - 40px);
+            height: cf-layout.preferred-height;
+            background: Theme.dialog;
+            border-radius: 14px;
+            drop-shadow-blur: 30px;
+            drop-shadow-offset-y: 8px;
+            drop-shadow-color: #00000059;
+            cf-layout := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+                Heading {
+                    text: "Restore this version?";
+                    font-size: 16px;
+                }
+                Text {
+                    text: "The version from " + root.versions[root.confirm].when + " becomes the current one, online and on this computer. The current version is kept in the history, so you can switch back.";
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => {
+                            root.confirm = -1;
+                        }
+                    }
+                    Button {
+                        text: "Restore";
+                        primary: true;
+                        clicked => {
+                            root.restore-version(root.confirm);
+                            root.confirm = -1;
                         }
                     }
                 }

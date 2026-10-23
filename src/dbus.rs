@@ -8,6 +8,66 @@ use std::time::Duration;
 use zbus::blocking::Connection;
 use zbus::zvariant::{OwnedValue, Value};
 
+fn system() -> Option<&'static Connection> {
+    static CONN: OnceLock<Option<Connection>> = OnceLock::new();
+    CONN.get_or_init(|| {
+        zbus::blocking::connection::Builder::system()
+            .ok()?
+            .method_timeout(Duration::from_secs(5))
+            .build()
+            .ok()
+    })
+    .as_ref()
+}
+
+/// A property of a system service, or None where the service isn't running.
+fn system_property(dest: &str, path: &str, iface: &str, name: &str) -> Option<OwnedValue> {
+    let c = system()?;
+    c.call_method(
+        Some(dest),
+        path,
+        Some("org.freedesktop.DBus.Properties"),
+        "Get",
+        &(iface, name),
+    )
+    .ok()
+    .and_then(|m| m.body().deserialize::<OwnedValue>().ok())
+}
+
+/// Whether NetworkManager says the connection is metered (set by the user, or guessed from a
+/// phone hotspot).
+pub fn network_metered() -> bool {
+    // 1 yes, 3 guess-yes; 0 unknown, 2 no, 4 guess-no
+    system_property(
+        "org.freedesktop.NetworkManager",
+        "/org/freedesktop/NetworkManager",
+        "org.freedesktop.NetworkManager",
+        "Metered",
+    )
+    .and_then(as_u32)
+    .is_some_and(|m| m == 1 || m == 3)
+}
+
+/// Whether the power profile is "power-saver" (what Plasma and GNOME call battery saver).
+pub fn power_saver() -> bool {
+    [
+        (
+            "org.freedesktop.UPower.PowerProfiles",
+            "/org/freedesktop/UPower/PowerProfiles",
+        ),
+        ("net.hadess.PowerProfiles", "/net/hadess/PowerProfiles"),
+    ]
+    .iter()
+    .find_map(|(dest, path)| {
+        let v = system_property(dest, path, dest, "ActiveProfile")?;
+        match unwrapped(&v) {
+            Value::Str(s) => Some(s.as_str() == "power-saver"),
+            _ => None,
+        }
+    })
+    .unwrap_or(false)
+}
+
 fn session() -> Option<&'static Connection> {
     static CONN: OnceLock<Option<Connection>> = OnceLock::new();
     CONN.get_or_init(|| {
@@ -51,6 +111,60 @@ pub fn notify(app_name: &str, icon: &str, summary: &str, body: &str) -> bool {
         ),
     )
     .is_ok()
+}
+
+/// Whether KWin (KDE Plasma's window manager) is on the session bus.
+pub fn kwin_present() -> bool {
+    let Some(c) = session() else { return false };
+    c.call_method(
+        Some("org.freedesktop.DBus"),
+        "/org/freedesktop/DBus",
+        Some("org.freedesktop.DBus"),
+        "NameHasOwner",
+        &("org.kde.KWin",),
+    )
+    .ok()
+    .and_then(|m| m.body().deserialize::<bool>().ok())
+    .unwrap_or(false)
+}
+
+/// Loads and runs a KWin script file under `name`.
+pub fn kwin_run_script(file: &std::path::Path, name: &str) -> bool {
+    let Some(c) = session() else { return false };
+    let Some(id) = c
+        .call_method(
+            Some("org.kde.KWin"),
+            "/Scripting",
+            Some("org.kde.kwin.Scripting"),
+            "loadScript",
+            &(file.to_string_lossy().as_ref(), name),
+        )
+        .ok()
+        .and_then(|m| m.body().deserialize::<i32>().ok())
+        .filter(|id| *id >= 0)
+    else {
+        return false;
+    };
+    c.call_method(
+        Some("org.kde.KWin"),
+        format!("/Scripting/Script{id}").as_str(),
+        Some("org.kde.kwin.Script"),
+        "run",
+        &(),
+    )
+    .is_ok()
+}
+
+pub fn kwin_unload_script(name: &str) {
+    if let Some(c) = session() {
+        let _ = c.call_method(
+            Some("org.kde.KWin"),
+            "/Scripting",
+            Some("org.kde.kwin.Scripting"),
+            "unloadScript",
+            &(name,),
+        );
+    }
 }
 
 /// Whether the notification server reads bodies as markup (KDE and GNOME do).
@@ -189,12 +303,14 @@ fn as_f64(v: OwnedValue) -> Option<f64> {
 /// Opens the file manager with `uri` selected (org.freedesktop.FileManager1).
 pub fn show_items(uri: &str) -> bool {
     let Some(c) = session() else { return false };
+    // the file manager comes to the front with the token from the user's click, if there is one
+    let startup_id = crate::core::current_activation_token().unwrap_or_default();
     c.call_method(
         Some("org.freedesktop.FileManager1"),
         "/org/freedesktop/FileManager1",
         Some("org.freedesktop.FileManager1"),
         "ShowItems",
-        &(vec![uri], ""),
+        &(vec![uri], startup_id.as_str()),
     )
     .is_ok()
 }
@@ -266,7 +382,28 @@ pub fn choose_folder(title: &str, start: &std::path::Path) -> Option<Option<std:
 
 /// The process id of whoever owns a well-known bus name, if anyone does.
 pub fn name_owner_pid(name: &str) -> Option<u32> {
-    let c = session()?;
+    name_owner_pid_checked(name).ok().flatten()
+}
+
+/// Looks up a bus-name owner while distinguishing “no owner” from a failed bus query. Cleanup
+/// code must not assume the tray is absent merely because the session bus could not be reached.
+pub fn name_owner_pid_checked(name: &str) -> Result<Option<u32>, String> {
+    let c = session().ok_or_else(|| "Couldn't connect to the session bus.".to_string())?;
+    let names = c
+        .call_method(
+            Some("org.freedesktop.DBus"),
+            "/org/freedesktop/DBus",
+            Some("org.freedesktop.DBus"),
+            "ListNames",
+            &(),
+        )
+        .map_err(|e| format!("Couldn't inspect session-bus names: {e}"))?
+        .body()
+        .deserialize::<Vec<String>>()
+        .map_err(|e| format!("Couldn't read session-bus names: {e}"))?;
+    if !names.iter().any(|owned| owned == name) {
+        return Ok(None);
+    }
     let reply = c
         .call_method(
             Some("org.freedesktop.DBus"),
@@ -275,8 +412,12 @@ pub fn name_owner_pid(name: &str) -> Option<u32> {
             "GetConnectionUnixProcessID",
             &(name,),
         )
-        .ok()?;
-    reply.body().deserialize::<u32>().ok()
+        .map_err(|e| format!("Couldn't inspect the tray process: {e}"))?;
+    reply
+        .body()
+        .deserialize::<u32>()
+        .map(Some)
+        .map_err(|e| format!("Couldn't read the tray process ID: {e}"))
 }
 
 /// Result of [`claim_name`].

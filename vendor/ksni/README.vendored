@@ -1,0 +1,5 @@
+This is ksni 0.3.6 (https://github.com/iovxw/ksni, public domain under the Unlicense, see
+UNLICENSE) with one addition: the StatusNotifierItem method ProvideXdgActivationToken, which
+KDE Plasma 6 and GNOME's AppIndicator extension call just before Activate. With it the tray's
+panel window gets the token it needs to open in front and receive focus (GNOME otherwise opens
+it in the background). Search for "provide_xdg_activation_token" for the change.

@@ -9,7 +9,8 @@
 //!   dump <property>                print a property's value
 //!   selectname <text>              open the first account whose name contains text
 //!   demo                           fill the window with made-up accounts (run with LODG_DEMO=1)
-//!   key <name>                     press and release a key: tab, backtab, space, return, left, right, home, end
+//!   key <name>                     press and release a key: tab, backtab, space, return, left,
+//!                                  right, up, down, home, end, escape
 //!   quit                           close the window
 //! Results go to stdout as `STEP …`, `DUMP …` and `FAIL …` lines.
 
@@ -21,7 +22,247 @@ use std::time::{Duration, Instant};
 
 use slint::{ComponentHandle, SharedString};
 
-use crate::ui::AppWindow;
+use crate::ui::{AppWindow, FileWindow, PanelAccount, PanelFile, PopupPanel, VersionRow};
+
+/// A window the script can drive.
+pub trait Driven: ComponentHandle + 'static {
+    fn get(&self, k: &str) -> Option<String>;
+    fn set(&self, k: &str, v: &str) -> bool;
+    fn call(&self, name: &str, n: Option<i32>) -> bool;
+    /// `selectname`: the settings window only
+    fn select_name(&self, _name: &str) -> Option<i32> {
+        None
+    }
+    fn demo(&self) {
+        println!("FAIL demo isn't available here");
+    }
+}
+
+impl Driven for AppWindow {
+    fn get(&self, k: &str) -> Option<String> {
+        get_str(self, k)
+    }
+    fn set(&self, k: &str, v: &str) -> bool {
+        set(self, k, v)
+    }
+    fn call(&self, name: &str, n: Option<i32>) -> bool {
+        call(self, name, n)
+    }
+    fn select_name(&self, name: &str) -> Option<i32> {
+        use slint::Model;
+        let i = self
+            .get_accounts()
+            .iter()
+            .position(|a| a.name.contains(name))? as i32;
+        self.invoke_select(i);
+        Some(i)
+    }
+    fn demo(&self) {
+        fill_demo(self)
+    }
+}
+
+impl Driven for FileWindow {
+    fn get(&self, k: &str) -> Option<String> {
+        Some(match k {
+            "msg" => self.get_msg().to_string(),
+            "mode" => self.get_mode().to_string(),
+            _ => return None,
+        })
+    }
+    fn set(&self, k: &str, v: &str) -> bool {
+        match k {
+            "dark" => self.set_dark(v == "true"),
+            "mode" => self.set_mode(v.parse().unwrap_or(0)),
+            "emails" => self.set_emails(v.into()),
+            "message" => self.set_message(v.into()),
+            "confirm" => self.set_confirm(v.parse().unwrap_or(-1)),
+            _ => return false,
+        }
+        true
+    }
+    fn call(&self, _name: &str, _n: Option<i32>) -> bool {
+        false
+    }
+    /// A made-up file's history, for README screenshots.
+    fn demo(&self) {
+        use slint::{ModelRc, VecModel};
+        self.set_file_name("Budget 2027.ods".into());
+        self.set_account("Personal".into());
+        self.set_is_work(false);
+        self.set_busy(false);
+        self.set_msg("".into());
+        let v = |when: &str, detail: &str| VersionRow {
+            when: when.into(),
+            detail: detail.into(),
+        };
+        self.set_versions(ModelRc::new(VecModel::from(vec![
+            v("Today, 09:41", "48 KB  ·  saved by Alex Rivera"),
+            v("Today, 08:15", "47 KB  ·  saved by Alex Rivera"),
+            v("Yesterday, 17:02", "45 KB  ·  saved by Sam Lee"),
+            v("21 Oct 2026, 11:30", "44 KB  ·  saved by Alex Rivera"),
+            v("14 Oct 2026, 16:48", "39 KB  ·  saved by Alex Rivera"),
+            v("2 Oct 2026, 10:05", "31 KB  ·  saved by Alex Rivera"),
+        ])));
+        println!("STEP demo");
+    }
+}
+
+impl Driven for PopupPanel {
+    fn get(&self, k: &str) -> Option<String> {
+        use slint::Model;
+        let files = |m: slint::ModelRc<PanelFile>| {
+            m.iter()
+                .map(|f| format!("[{}|{}|kind {}|{}%]", f.name, f.detail, f.kind, f.percent))
+                .collect::<Vec<_>>()
+                .join(" ")
+        };
+        Some(match k {
+            "summary" => self.get_summary().to_string(),
+            "summary_tone" => self.get_summary_tone().to_string(),
+            "accounts" => self
+                .get_accounts()
+                .iter()
+                .map(|a: PanelAccount| format!("[{}|{}|tone {}]", a.name, a.status, a.tone))
+                .collect::<Vec<_>>()
+                .join(" "),
+            "transfers" => files(self.get_transfers()),
+            "blocked" => files(self.get_blocked()),
+            "recent" => files(self.get_recent()),
+            "recent_count" => self.get_recent().row_count().to_string(),
+            "filters" => self
+                .get_filters()
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join("|"),
+            "filter" => self.get_filter().to_string(),
+            "any_paused" => self.get_any_paused().to_string(),
+            "update" => self.get_update().to_string(),
+            "can_sync" => self.get_can_sync().to_string(),
+            "rec_current" => self.get_rec_current().to_string(),
+            "tr_current" => self.get_tr_current().to_string(),
+            "acc_current" => self.get_acc_current().to_string(),
+            _ => return None,
+        })
+    }
+    fn set(&self, k: &str, v: &str) -> bool {
+        let i = v.parse::<i32>().unwrap_or(0);
+        match k {
+            "filter" => self.set_filter(i),
+            "rec_current" => self.set_rec_current(i),
+            "dark" => self.set_dark(v == "true"),
+            _ => return false,
+        }
+        true
+    }
+    fn call(&self, name: &str, n: Option<i32>) -> bool {
+        let n = n.unwrap_or(0);
+        match name {
+            "sync_now" => self.invoke_sync_now(),
+            "settings" => self.invoke_settings(n),
+            "pause" => self.invoke_pause(n),
+            "open_recent" => self.invoke_open_file(false, n),
+            "reveal_recent" => self.invoke_reveal_file(false, n),
+            "open_transfer" => self.invoke_open_file(true, n),
+            "open_folder" => self.invoke_open_folder(n),
+            "reveal_blocked" => self.invoke_reveal_blocked(n),
+            "filter_changed" => self.invoke_filter_changed(),
+            "close_panel" => self.invoke_close_panel(),
+            _ => return false,
+        }
+        true
+    }
+    /// Made-up accounts and files for README screenshots.
+    fn demo(&self) {
+        use slint::{ModelRc, VecModel};
+        let acc = |name: &str, status: &str, tone| PanelAccount {
+            name: name.into(),
+            status: status.into(),
+            tone,
+            personal: name == "Personal",
+        };
+        self.set_accounts(ModelRc::new(VecModel::from(vec![
+            acc("Personal", "Up to date (09:41)", 0),
+            acc("Contoso", "Syncing…", 1),
+            acc("Marketing team", "Up to date (09:38)", 0),
+        ])));
+        self.set_summary("Syncing 2 large files".into());
+        self.set_summary_tone(1);
+        let file = |name: &str, detail: &str, kind, percent| PanelFile {
+            name: name.into(),
+            detail: detail.into(),
+            kind,
+            percent,
+            can_open: percent < 0,
+        };
+        self.set_transfers(ModelRc::new(VecModel::from(vec![
+            file(
+                "Lisbon trip.mp4",
+                "Uploading · 62% · 2 min left · Personal",
+                7,
+                62,
+            ),
+            file(
+                "Q3 forecast.xlsx",
+                "Downloading · 35% · less than a minute left · Contoso",
+                3,
+                35,
+            ),
+        ])));
+        self.set_recent(ModelRc::new(VecModel::from(vec![
+            file(
+                "Budget 2027.ods",
+                "Uploaded 09:41 · in Documents/Finances · Personal",
+                3,
+                -1,
+            ),
+            file(
+                "IMG_2041.jpg",
+                "Downloaded 09:40 · in Pictures/Camera Roll · Personal",
+                6,
+                -1,
+            ),
+            file(
+                "Launch plan.docx",
+                "Uploaded 09:38 · in Campaigns/Spring · Marketing team",
+                2,
+                -1,
+            ),
+            file(
+                "Brand guide.pdf",
+                "Downloaded 09:31 · in Brand · Marketing team",
+                5,
+                -1,
+            ),
+            file(
+                "Pitch deck.pptx",
+                "Uploaded 09:12 · in Sales · Contoso",
+                4,
+                -1,
+            ),
+            file(
+                "notes.md",
+                "Uploaded 08:55 · in Projects/garden-planner · Personal",
+                11,
+                -1,
+            ),
+            file(
+                "Essay - final.odt",
+                "Uploaded Oct 17, 22:03 · in Documents/School · Personal",
+                2,
+                -1,
+            ),
+        ])));
+        self.set_filters(ModelRc::new(VecModel::from(vec![
+            "All accounts".into(),
+            "Personal".into(),
+            "Contoso".into(),
+            "Marketing team".into(),
+        ])));
+        self.set_filter(0);
+    }
+}
 
 enum Step {
     Wait(f64),
@@ -82,6 +323,7 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
         "si_text" => get_si_text, "f_msg" => get_f_msg, "o_msg" => get_o_msg, "p_text" => get_p_text, "p_warn" => get_p_warn,
         "p_live" => get_p_live, "p_title" => get_p_title, "add_msg" => get_add_msg, "app_client" => get_app_client, "app_msg" => get_app_msg, "app_glass_note" => get_app_glass_note,
         "r_text" => get_r_text, "o_skip_files" => get_o_skip_files, "o_from" => get_o_from, "o_to" => get_o_to,
+        "o_skip_dirs" => get_o_skip_dirs,
         "add_name" => get_add_name, "add_folder" => get_add_folder,
         "u_result" => get_u_result, "u_remove_app_label" => get_u_remove_app_label,
         "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg,
@@ -111,6 +353,14 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "o_rate" => ui.get_o_rate().to_string(),
             "o_allow_resync" => ui.get_o_allow_resync().to_string(),
             "o_skip_hidden" => ui.get_o_skip_hidden().to_string(),
+            "o_direction" => ui.get_o_direction().to_string(),
+            "o_cleanup" => ui.get_o_cleanup().to_string(),
+            "o_keep_online" => ui.get_o_keep_online().to_string(),
+            "o_skip_symlinks" => ui.get_o_skip_symlinks().to_string(),
+            "o_nosync" => ui.get_o_nosync().to_string(),
+            "o_shared" => ui.get_o_shared().to_string(),
+            "o_is_business" => ui.get_o_is_business().to_string(),
+            "o_ipv4" => ui.get_o_ipv4().to_string(),
             "r_visible" => ui.get_r_visible().to_string(),
             "tab" => ui.get_tab().to_string(),
             "u_visible" => ui.get_u_visible().to_string(),
@@ -121,11 +371,15 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "u_busy" => ui.get_u_busy().to_string(),
             "a_current" => ui.get_a_current().to_string(),
             "app_autostart" => ui.get_app_autostart().to_string(),
+            "app_stop_on_quit" => ui.get_app_stop_on_quit().to_string(),
+            "app_check_updates" => ui.get_app_check_updates().to_string(),
+            "app_update" => ui.get_app_update().to_string(),
             "app_version" => ui.get_app_version().to_string(),
             "o_sched_on" => ui.get_o_sched_on().to_string(),
             "o_recycle" => ui.get_o_recycle().to_string(),
             "o_notify" => ui.get_o_notify().to_string(),
             "s_tone" => ui.get_s_tone().to_string(),
+            "s_big_delete" => ui.get_s_big_delete().to_string(),
             "accounts" => {
                 use slint::Model;
                 ui.get_accounts()
@@ -196,6 +450,14 @@ fn set(ui: &AppWindow, k: &str, v: &str) -> bool {
         "o_recycle" => ui.set_o_recycle(b),
         "o_notify" => ui.set_o_notify(b),
         "o_skip_hidden" => ui.set_o_skip_hidden(b),
+        "o_direction" => ui.set_o_direction(i),
+        "o_cleanup" => ui.set_o_cleanup(b),
+        "o_keep_online" => ui.set_o_keep_online(b),
+        "o_skip_dirs" => ui.set_o_skip_dirs(s),
+        "o_skip_symlinks" => ui.set_o_skip_symlinks(b),
+        "o_nosync" => ui.set_o_nosync(b),
+        "o_shared" => ui.set_o_shared(b),
+        "o_ipv4" => ui.set_o_ipv4(b),
         "o_skip_files" => ui.set_o_skip_files(s),
         "o_allow_resync" => ui.set_o_allow_resync(b),
         "f_sync_all" => ui.set_f_sync_all(b),
@@ -203,6 +465,7 @@ fn set(ui: &AppWindow, k: &str, v: &str) -> bool {
         "r_delete_config" => ui.set_r_delete_config(b),
         "u_keep_setup" => ui.set_u_keep_setup(b),
         "app_autostart" => ui.set_app_autostart(b),
+        "app_stop_on_quit" => ui.set_app_stop_on_quit(b),
         "app_glass" => ui.set_app_glass(i),
         "dark" => ui.set_dark(b),
         "glass" => ui.global::<crate::ui::Theme>().set_glass(b),
@@ -219,7 +482,7 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "select" => ui.invoke_select(n),
         "rename" => ui.invoke_rename(),
         "open_folder" => ui.invoke_open_folder(),
-        "open_online" => ui.invoke_open_online(),
+        "open_online" => ui.invoke_open_online_page(0),
         "si_open_url" => ui.invoke_si_open_url(),
         "a_show" => ui.invoke_a_show(n),
         "open_url_project" => ui.invoke_open_url(
@@ -227,6 +490,8 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
                 .into(),
         ),
         "sync_now" => ui.invoke_sync_now(),
+        "big_delete_online" => ui.invoke_big_delete_online(),
+        "big_delete_restore" => ui.invoke_big_delete_restore(),
         "set_background" => ui.invoke_set_background(n != 0),
         "app_glass_changed" => ui.invoke_app_glass_changed(),
         "sign_in" => ui.invoke_sign_in(),
@@ -253,6 +518,7 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "add_lib_picked" => ui.invoke_add_lib_picked(n),
         "add_create" => ui.invoke_add_create(),
         "app_autostart_toggled" => ui.invoke_app_autostart_toggled(),
+        "app_stop_on_quit_toggled" => ui.invoke_app_stop_on_quit_toggled(),
         "app_add_to_menu" => ui.invoke_app_add_to_menu(),
         "app_uninstall" => ui.invoke_app_uninstall(),
         "client_recheck" => ui.invoke_client_recheck(),
@@ -270,7 +536,7 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
     true
 }
 
-fn shot(ui: &AppWindow, dir: &Path, name: &str) {
+fn shot<T: Driven>(ui: &T, dir: &Path, name: &str) {
     match ui.window().take_snapshot() {
         Ok(buf) => {
             let (w, h) = (buf.width(), buf.height());
@@ -309,7 +575,7 @@ pub fn take_env() {
 }
 
 /// Starts the script if `LODG_TEST_SCRIPT` was set. The returned timer must be kept alive.
-pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
+pub fn start<T: Driven>(ui: &T) -> Option<slint::Timer> {
     let (script, out) = SETTINGS.get()?;
     let script = fs::read_to_string(script.as_ref()?).ok()?;
     let out = PathBuf::from(out.clone().unwrap_or_else(|| ".".into()));
@@ -338,7 +604,7 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                 Step::Wait(s) => next_at.set(Instant::now() + Duration::from_secs_f64(*s)),
                 Step::Shot(n) => shot(&ui, &out, n),
                 Step::Call(name, n) => {
-                    if call(&ui, name, *n) {
+                    if ui.call(name, *n) {
                         println!(
                             "STEP call {name} {}",
                             n.map(|n| n.to_string()).unwrap_or_default()
@@ -349,7 +615,7 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                     next_at.set(Instant::now() + Duration::from_millis(300));
                 }
                 Step::Set(k, v) => {
-                    if !set(&ui, k, v) {
+                    if !ui.set(k, v) {
                         println!("FAIL unknown property {k}");
                     }
                 }
@@ -359,7 +625,7 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                         until_deadline.set(Some(d));
                         d
                     });
-                    let val = get_str(&ui, k).unwrap_or_default();
+                    let val = ui.get(k).unwrap_or_default();
                     if val.contains(text.as_str()) {
                         println!("STEP until {k} ~ {text:?} ok");
                         until_deadline.set(None);
@@ -370,26 +636,18 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                         advance = false;
                     }
                 }
-                Step::Dump(k) => match get_str(&ui, k) {
+                Step::Dump(k) => match ui.get(k) {
                     Some(v) => println!("DUMP {k} = {}", v.replace('\n', " ⏎ ")),
                     None => println!("FAIL unknown property {k}"),
                 },
                 Step::SelectName(n) => {
-                    use slint::Model;
-                    match ui
-                        .get_accounts()
-                        .iter()
-                        .position(|a| a.name.contains(n.as_str()))
-                    {
-                        Some(i) => {
-                            ui.invoke_select(i as i32);
-                            println!("STEP selectname {n} -> {i}");
-                        }
+                    match ui.select_name(n) {
+                        Some(i) => println!("STEP selectname {n} -> {i}"),
                         None => println!("FAIL selectname {n}: no such account"),
                     }
                     next_at.set(Instant::now() + Duration::from_millis(300));
                 }
-                Step::Demo => fill_demo(&ui),
+                Step::Demo => ui.demo(),
                 Step::Key(name) => {
                     use slint::platform::{Key, WindowEvent};
                     let key: Option<SharedString> = match name.as_str() {
@@ -401,6 +659,9 @@ pub fn start(ui: &AppWindow) -> Option<slint::Timer> {
                         "right" => Some(Key::RightArrow.into()),
                         "home" => Some(Key::Home.into()),
                         "end" => Some(Key::End.into()),
+                        "up" => Some(Key::UpArrow.into()),
+                        "down" => Some(Key::DownArrow.into()),
+                        "escape" => Some(Key::Escape.into()),
                         _ => None,
                     };
                     match key {
@@ -541,5 +802,28 @@ fn fill_demo(ui: &AppWindow) {
     ui.set_p_warn("".into());
     ui.set_p_busy(false);
     ui.set_p_can_apply(true);
+    use crate::ui::{BackupRow, ConflictRow};
+    ui.set_c_rows(ModelRc::new(VecModel::from(vec![
+        ConflictRow {
+            name: "Trip budget.xlsx".into(),
+            detail: "Documents/Travel  ·  this computer's copy from 22 Oct, 18:40".into(),
+        },
+        ConflictRow {
+            name: "Reading list.docx".into(),
+            detail: "Documents/School  ·  this computer's copy from 21 Oct, 09:12".into(),
+        },
+    ])));
+    let backup = |label: &str, detail: &str, state| BackupRow {
+        label: label.into(),
+        detail: detail.into(),
+        state,
+    };
+    ui.set_b_rows(ModelRc::new(VecModel::from(vec![
+        backup("Desktop", "/home/alex/Desktop", 0),
+        backup("Documents", "Backed up to OneDrive/Documents", 1),
+        backup("Pictures", "Backed up to OneDrive/Pictures", 1),
+        backup("Music", "/home/alex/Music", 0),
+        backup("Videos", "/home/alex/Videos", 0),
+    ])));
     println!("STEP demo");
 }

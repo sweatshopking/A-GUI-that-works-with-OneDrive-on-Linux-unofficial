@@ -94,6 +94,12 @@ apt_install() {
 # admin typing the password), can change it in between. Where systemd can't do that, "nobody"
 # builds it.
 aur_install() {
+    # a repository that already has it built (Chaotic-AUR and the like): signed, and much faster
+    if pacman -Si onedrive-abraunegg >/dev/null 2>&1; then
+        step "Installing the OneDrive client…"
+        pacman -S --needed --noconfirm onedrive-abraunegg
+        return
+    fi
     step "Installing the tools needed to build the client…"
     if ! pacman -S --needed --noconfirm base-devel ldc libnotify sqlite dbus curl; then
         echo "Couldn't install the build tools. Update your system (pacman -Syu, or your update app) and try again." >&2

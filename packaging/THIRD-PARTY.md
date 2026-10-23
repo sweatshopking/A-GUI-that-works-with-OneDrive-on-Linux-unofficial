@@ -12,6 +12,10 @@ The app itself is built from the Rust crates listed in `Cargo.lock`, under their
 MIT, Apache-2.0, BSD-2/3-Clause, Zlib, ISC, Unicode-3.0, Unlicense, CC0-1.0 and CDLA-Permissive-2.0,
 all compatible with the GPL-3.0. Slint is used under its GPL-3.0 option.
 
+One of them, ksni (the tray icon, public domain under the Unlicense), is built from a copy in
+`vendor/ksni` with one small addition: it accepts the activation token desktops hand over when
+the icon is clicked, so the panel opens in front. `vendor/ksni/README.vendored` describes it.
+
 ## System libraries in the AppImage
 
 So that one AppImage runs on many distributions, it also carries a few small unmodified libraries

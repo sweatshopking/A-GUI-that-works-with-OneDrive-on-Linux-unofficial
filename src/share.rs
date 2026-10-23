@@ -46,7 +46,7 @@ pub fn copy_to_clipboard(text: &str) -> bool {
 }
 
 /// Finds which account a local path belongs to, and its path inside that account.
-fn locate(path: &Path) -> Result<(core::AccountInfo, String), String> {
+pub(crate) fn locate(path: &Path) -> Result<(core::AccountInfo, String), String> {
     let path = path
         .canonicalize()
         .map_err(|_| format!("{} doesn't exist.", path.display()))?;
@@ -71,7 +71,9 @@ fn locate(path: &Path) -> Result<(core::AccountInfo, String), String> {
     best.ok_or_else(|| "That isn't inside any of your OneDrive folders.".into())
 }
 
-pub fn share_link(path: &Path) {
+/// Copies a sharing link to `path`: view-only, or one that lets people edit (change, add or
+/// delete what's in a folder).
+pub fn share_link(path: &Path, edit: bool) {
     let result = locate(path).and_then(|(acc, rel)| {
         // a link to the top of an account would expose everything in it
         if rel.is_empty() {
@@ -81,7 +83,7 @@ pub fn share_link(path: &Path) {
             ));
         }
         let t = graph::token(&acc.confdir)?;
-        graph::create_link(&t, acc.drive_id.as_deref(), &rel, &acc.kind)
+        graph::create_link(&t, acc.drive_id.as_deref(), &rel, &acc.kind, edit)
     });
     let name = path
         .file_name()
@@ -98,7 +100,12 @@ pub fn share_link(path: &Path) {
             } else {
                 "Sharing link"
             };
-            notify(title, &format!("{who} can view \"{name}\".\n{link}"));
+            let can = match (edit, path.is_dir()) {
+                (false, _) => "can view",
+                (true, false) => "can edit",
+                (true, true) => "can change, add and delete files in",
+            };
+            notify(title, &format!("{who} {can} \"{name}\".\n{link}"));
         }
         Err(e) => notify("Couldn't create a link", &format!("{name}: {e}")),
     }
@@ -115,16 +122,32 @@ pub fn view_online(path: &Path) {
     }
 }
 
+fn service_menu_body() -> String {
+    include_str!("../packaging/linux-onedrive-gui-servicemenu.desktop").replace(
+        "Exec=linux-onedrive-gui",
+        &format!("Exec={}", core::desktop_exec()),
+    )
+}
+
+/// Brings a user's own copy of the Dolphin actions (added from an AppImage) up to date with this
+/// version. Does nothing if there's no copy, or it's current.
+pub fn refresh_service_menu() {
+    let data = core::data_home();
+    let file = data.join(format!("kio/servicemenus/{}.desktop", core::APP_ID));
+    match fs::read_to_string(&file) {
+        Ok(old) if old != service_menu_body() => {
+            let _ = install_service_menu(&data);
+        }
+        _ => {}
+    }
+}
+
 /// Installs the Dolphin right-click actions for this user (packages ship their own copy).
 pub fn install_service_menu(data_dir: &Path) -> std::io::Result<PathBuf> {
     let dir = data_dir.join("kio/servicemenus");
     fs::create_dir_all(&dir)?;
-    let body = include_str!("../packaging/linux-onedrive-gui-servicemenu.desktop").replace(
-        "Exec=linux-onedrive-gui",
-        &format!("Exec={}", core::desktop_exec()),
-    );
     let file = dir.join(format!("{}.desktop", core::APP_ID));
-    fs::write(&file, body)?;
+    core::atomic_write(&file, service_menu_body().as_bytes())?;
     // KDE only runs user service menus that are marked executable
     use std::os::unix::fs::PermissionsExt;
     fs::set_permissions(&file, fs::Permissions::from_mode(0o755))?;

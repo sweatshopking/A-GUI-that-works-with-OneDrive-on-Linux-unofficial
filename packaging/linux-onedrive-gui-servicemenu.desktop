@@ -1,15 +1,30 @@
 [Desktop Entry]
 Type=Service
 MimeType=application/octet-stream;inode/directory;
-Actions=copyLink;viewOnline;
+Actions=sharePeople;copyLink;copyEditLink;versions;viewOnline;
 X-KDE-Submenu=OneDrive
 X-KDE-Priority=TopLevel
 Icon=linux-onedrive-gui
 
+[Desktop Action sharePeople]
+Name=Share with people…
+Icon=document-share
+Exec=linux-onedrive-gui --share-people %f
+
 [Desktop Action copyLink]
-Name=Copy sharing link
+Name=Copy view-only link
 Icon=edit-link
 Exec=linux-onedrive-gui --share-link %f
+
+[Desktop Action copyEditLink]
+Name=Copy editing link
+Icon=document-edit
+Exec=linux-onedrive-gui --share-edit-link %f
+
+[Desktop Action versions]
+Name=Version history
+Icon=view-history
+Exec=linux-onedrive-gui --versions %f
 
 [Desktop Action viewOnline]
 Name=View on the OneDrive website

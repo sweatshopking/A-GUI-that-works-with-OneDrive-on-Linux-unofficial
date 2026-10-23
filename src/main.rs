@@ -2,20 +2,28 @@
 //!
 //!   linux-onedrive-gui              open the window (and start the tray icon if it isn't running)
 //!   linux-onedrive-gui --tray       tray icon only (used at login)
+//!   linux-onedrive-gui --popup [x y] the panel a click on the tray icon opens (x, y: where)
 //!   linux-onedrive-gui --client …   run the installed onedrive client (kept for units written by
 //!                                   older versions, which ran the client through the app)
 
+mod activation;
+mod advanced;
+mod backup;
 mod clientinstall;
+mod conflict;
 mod core;
 mod dbus;
+mod filewin;
 mod glass;
 mod graph;
+mod popup;
 mod share;
 #[cfg(feature = "test-driver")]
 mod testdrive;
 mod tray;
 mod ui;
 mod uninstall;
+mod update;
 
 use std::os::unix::process::CommandExt;
 
@@ -96,10 +104,29 @@ fn main() {
             };
             tray::run()
         }
+        Some("--popup") => {
+            let at = match (args.get(1), args.get(2)) {
+                (Some(x), Some(y)) => x.parse().ok().zip(y.parse().ok()),
+                _ => None,
+            };
+            popup::run(at)
+        }
         Some("--share-link") => args
             .get(1)
             .iter()
-            .for_each(|p| share::share_link(std::path::Path::new(p))),
+            .for_each(|p| share::share_link(std::path::Path::new(p), false)),
+        Some("--share-edit-link") => args
+            .get(1)
+            .iter()
+            .for_each(|p| share::share_link(std::path::Path::new(p), true)),
+        Some("--versions") => args
+            .get(1)
+            .iter()
+            .for_each(|p| filewin::run(filewin::Mode::Versions, std::path::Path::new(p))),
+        Some("--share-people") => args
+            .get(1)
+            .iter()
+            .for_each(|p| filewin::run(filewin::Mode::Share, std::path::Path::new(p))),
         Some("--view-online") => args
             .get(1)
             .iter()
@@ -107,9 +134,12 @@ fn main() {
         Some("--version") => println!("{} {}", core::APP_NAME, env!("CARGO_PKG_VERSION")),
         Some("--help") | Some("-h") => {
             println!(
-                "{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --share-link <file>\n  {} --view-online <file>",
+                "{} {}\n\nUsage:\n  {} [--settings] [--account <config dir>]\n  {} --tray\n  {} --share-link <file>\n  {} --share-edit-link <file>\n  {} --share-people <file>\n  {} --versions <file>\n  {} --view-online <file>",
                 core::APP_NAME,
                 env!("CARGO_PKG_VERSION"),
+                core::APP_ID,
+                core::APP_ID,
+                core::APP_ID,
                 core::APP_ID,
                 core::APP_ID,
                 core::APP_ID,
@@ -117,11 +147,12 @@ fn main() {
             )
         }
         _ => {
+            // (a window of an older version, handed "account\ntoken", passes it all on here)
             let account = args
                 .iter()
                 .position(|a| a == "--account")
                 .and_then(|i| args.get(i + 1))
-                .cloned();
+                .map(|a| a.split('\n').next().unwrap_or_default().to_string());
             ui::run(account)
         }
     }
