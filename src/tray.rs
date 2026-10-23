@@ -35,6 +35,8 @@ struct Acc {
     told_blocked: HashSet<String>,
     /// Told about the current big delete; a finished sync means it's over
     told_big_delete: bool,
+    /// Large files being uploaded or downloaded right now (file manager badges)
+    moving: HashSet<String>,
 }
 
 impl Acc {
@@ -51,6 +53,7 @@ impl Acc {
             fresh_blocked: Vec::new(),
             told_blocked: HashSet::new(),
             told_big_delete: false,
+            moving: HashSet::new(),
         }
     }
     fn status(&self) -> Status {
@@ -569,8 +572,25 @@ fn apply_events(
         for (when, ev) in events {
             apply_one(a, when, ev);
         }
+        publish_badges(t);
         true
     })
+}
+
+/// Hands the file manager badges the accounts' current state.
+fn publish_badges(t: &Tray) {
+    crate::badges::publish(
+        t.accs
+            .iter()
+            .filter(|a| a.info.signed_in)
+            .map(|a| crate::badges::AccState {
+                root: a.info.sync_dir.clone(),
+                phase: a.status().phase,
+                moving: a.moving.clone(),
+                blocked: a.blocked.iter().map(|b| b.path.clone()).collect(),
+            })
+            .collect(),
+    );
 }
 
 /// When the tray started: log lines from before then were already there, not news.
@@ -581,6 +601,17 @@ fn tray_started() -> DateTime<Local> {
 
 fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
     core::track_blocked(&mut a.blocked, &ev);
+    match &ev {
+        LogEvent::Progress { path, done, .. } if !done => {
+            a.moving.insert(path.clone());
+        }
+        LogEvent::Progress { path, .. } | LogEvent::File { path, .. } => {
+            a.moving.remove(path);
+        }
+        // a finished run or a new one: nothing is half-moved any more
+        LogEvent::Complete | LogEvent::ClientStart | LogEvent::Error(_) => a.moving.clear(),
+        _ => {}
+    }
     match &ev {
         LogEvent::Blocked { path, reason }
             if reason.needs_attention()
@@ -937,6 +968,8 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         } else {
             replaced_seen = false;
         }
+        // pauses, schedules and stopped services change badges without any log line
+        handle.update(|t: &mut Tray| publish_badges(t));
         thread::sleep(Duration::from_secs(3));
     }
 }
@@ -1066,6 +1099,7 @@ pub fn run() {
             std::process::exit(1);
         }
     };
+    crate::badges::serve();
     let h = handle.clone();
     thread::spawn(move || poll(h));
     loop {

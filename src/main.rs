@@ -9,6 +9,7 @@
 mod activation;
 mod advanced;
 mod backup;
+mod badges;
 mod clientinstall;
 mod conflict;
 mod core;
