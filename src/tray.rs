@@ -1100,6 +1100,7 @@ pub fn run() {
         }
     };
     crate::badges::serve();
+    crate::badges::install_user_files();
     let h = handle.clone();
     thread::spawn(move || poll(h));
     loop {

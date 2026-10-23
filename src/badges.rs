@@ -81,6 +81,65 @@ pub fn status_of(accs: &[AccState], path: &Path) -> &'static str {
     }
 }
 
+const EXTENSION: &str = include_str!("../plugins/nemo-caja/linux-onedrive-gui-badges.py");
+pub const EMBLEMS: [(&str, &str); 4] = [
+    (
+        "emblem-linux-onedrive-gui-synced.svg",
+        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-synced.svg"),
+    ),
+    (
+        "emblem-linux-onedrive-gui-syncing.svg",
+        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-syncing.svg"),
+    ),
+    (
+        "emblem-linux-onedrive-gui-error.svg",
+        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-error.svg"),
+    ),
+    (
+        "emblem-linux-onedrive-gui-paused.svg",
+        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-paused.svg"),
+    ),
+];
+
+/// The per-user files: the badge pictures, and the Nemo / Caja extension for whichever of them
+/// is installed. Written only when missing or out of date; returns every path (for uninstall).
+pub fn user_files() -> Vec<(std::path::PathBuf, Option<&'static str>)> {
+    let data = crate::core::data_home();
+    let mut out: Vec<_> = EMBLEMS
+        .iter()
+        .map(|(name, body)| {
+            (
+                data.join("icons/hicolor/scalable/emblems").join(name),
+                Some(*body),
+            )
+        })
+        .collect();
+    for fm in ["nemo", "caja"] {
+        let file = data
+            .join(format!("{fm}-python/extensions"))
+            .join("linux-onedrive-gui-badges.py");
+        let present = crate::core::which(fm).is_some();
+        out.push((file, present.then_some(EXTENSION)));
+    }
+    out
+}
+
+/// Called when the tray starts.
+pub fn install_user_files() {
+    for (path, body) in user_files() {
+        let Some(body) = body else { continue };
+        if std::fs::read_to_string(&path).ok().as_deref() == Some(body) {
+            continue;
+        }
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = crate::core::atomic_write(&path, body.as_bytes()) {
+            eprintln!("couldn't write {}: {e}", path.display());
+        }
+    }
+}
+
 struct Badges;
 
 #[zbus::interface(name = "io.github.sweatshopking.LinuxOnedriveGui.Badges")]

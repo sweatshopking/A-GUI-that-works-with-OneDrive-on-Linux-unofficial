@@ -210,6 +210,8 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
     .into_iter()
     .chain(crate::share::user_icon_files())
     .chain(crate::rename::old_user_files())
+    // file manager badges: the pictures and the Nemo / Caja extension
+    .chain(crate::badges::user_files().into_iter().map(|(p, _)| p))
     {
         let result = if f.is_dir() {
             fs::remove_dir_all(&f)

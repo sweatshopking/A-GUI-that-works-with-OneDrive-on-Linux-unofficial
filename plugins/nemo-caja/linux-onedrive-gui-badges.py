@@ -51,6 +51,8 @@ class Badges(GObject.GObject, FM.InfoProvider):
             return FM.OperationResult.COMPLETE
         state = self.ask([path])[0]
         self.shown[file.get_uri()] = file
+        if len(self.shown) > 5000:  # forget the oldest; they're refreshed when shown again
+            del self.shown[next(iter(self.shown))]
         emblem = EMBLEMS.get(state)
         if emblem:
             file.add_emblem(emblem)
