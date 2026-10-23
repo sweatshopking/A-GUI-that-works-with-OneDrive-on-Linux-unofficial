@@ -40,6 +40,10 @@ sync client, syncing issues should go to the original app, which is linked above
     <td><img src="docs/screenshots/panel-light.png" alt="The panel a click on the tray icon opens" width="380"></td>
     <td><img src="docs/screenshots/panel-dark.png" alt="The panel in dark mode" width="380"></td>
   </tr>
+  <tr>
+    <td><img src="docs/screenshots/versions-light.png" alt="Version history of a file"></td>
+    <td><img src="docs/screenshots/share-dark.png" alt="Sharing a file with people"></td>
+  </tr>
 </table>
 
 ## New in 0.4.0
