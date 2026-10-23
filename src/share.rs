@@ -129,6 +129,68 @@ fn service_menu_body() -> String {
     )
 }
 
+/// The tray's status pictures. Plasma looks a tray icon's name up in the icon theme before the
+/// folder the app points it to, and without a match falls back to the plain app icon (no badge);
+/// packages install these system-wide, an AppImage keeps a copy in the user's icons.
+const STATUS_ICONS: [(&str, &str); 4] = [
+    (
+        "linux-onedrive-gui-ok.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-ok.svg"),
+    ),
+    (
+        "linux-onedrive-gui-sync.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-sync.svg"),
+    ),
+    (
+        "linux-onedrive-gui-error.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-error.svg"),
+    ),
+    (
+        "linux-onedrive-gui-off.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-off.svg"),
+    ),
+];
+const APP_ICON: &str = include_str!("../assets/linux-onedrive-gui.svg");
+
+/// The status icons an AppImage keeps in the user's icons (for uninstall; the menu icon is
+/// removed with the menu entry).
+pub fn user_icon_files() -> Vec<PathBuf> {
+    let status = core::data_home().join("icons/hicolor/scalable/status");
+    STATUS_ICONS
+        .iter()
+        .map(|(name, _)| status.join(name))
+        .collect()
+}
+
+/// For an AppImage: writes the tray's status icons, and updates the menu icon if the user added
+/// one, so both match this version. Only writes what's missing or different.
+pub fn refresh_user_icons() {
+    if std::env::var_os("APPIMAGE").is_none() {
+        return;
+    }
+    let icons = core::data_home().join("icons/hicolor/scalable");
+    let app = icons.join("apps").join(format!("{}.svg", core::APP_ID));
+    let mut files: Vec<(PathBuf, &str)> = STATUS_ICONS
+        .iter()
+        .map(|(name, body)| (icons.join("status").join(name), *body))
+        .collect();
+    if app.exists() {
+        files.push((app, APP_ICON));
+    }
+    for (path, body) in files {
+        if fs::read_to_string(&path).ok().as_deref() == Some(body) {
+            continue;
+        }
+        let r = path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| core::atomic_write(&path, body.as_bytes()));
+        if let Err(e) = r {
+            eprintln!("couldn't write {}: {e}", path.display());
+        }
+    }
+}
+
 /// Brings a user's own copy of the Dolphin actions (added from an AppImage) up to date with this
 /// version. Does nothing if there's no copy, or it's current.
 pub fn refresh_service_menu() {

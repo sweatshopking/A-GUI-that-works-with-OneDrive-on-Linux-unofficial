@@ -206,7 +206,10 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
             .join(format!("{}.svg", core::APP_ID)),
         data.join("kio/servicemenus")
             .join(format!("{}.desktop", core::APP_ID)),
-    ] {
+    ]
+    .into_iter()
+    .chain(crate::share::user_icon_files())
+    {
         let result = if f.is_dir() {
             fs::remove_dir_all(&f)
         } else {
