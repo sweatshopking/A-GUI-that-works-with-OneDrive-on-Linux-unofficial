@@ -4,25 +4,14 @@
 
 **Entirely unofficial — not endorsed by Microsoft at all.**
 
-**Sync OneDrive and SharePoint on Linux without the command line.** A settings window and tray icon for
-the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg, which does
-the actual syncing. Install this app (it sets up the client for you), sign in, pick your folders, done. The goal was to build a
-full featured GUI based program which any person can install and use without needing the CLI at all or deep knowledge of Linux.
-Basically, I wanted my mom to be able to setup Onedrive on Linux and be able to use it without needing my help. 
-I also wanted it to be light and fast without the need for installing additional python libraries, hence the choice to use Rust.
-
-I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code is safe, does what it says, or won't harm
-your PC in some way. You are welcome and encouraged to review the source code 
-prior to installing. Again, to be clear, this app is not endorsed by Microsoft
-and I'm not affiliated with Microsoft in any way. Since it's a Rust GUI for the existing OneDrive
-sync client, syncing issues should go to the original app, which is linked above.
-
 ## Why this app
 
 - **The easiest way to get OneDrive on Linux.** Download one file for your system (.deb, .rpm or
   AppImage) and open it. If the OneDrive client isn't installed yet, the app installs it for you on
   most distributions. You never need a terminal or a configuration file: sign in with your browser,
-  tick your folders, done.
+  tick your folders, done. Basically, I wanted my mom to be able to setup Onedrive on Linux and be able
+  to use it without needing my help. I also wanted it to be light and fast without the need for installing
+  additional python libraries, hence the choice to use Rust.
 - **Quick and light.** It's a small native program written in Rust, with no Python, Java or built-in
   web browser to load. The tray icon uses about 10 MB of memory, the panel opens in about half a
   second, and the settings window closes completely when you're done with it.
@@ -30,6 +19,21 @@ sync client, syncing issues should go to the original app, which is linked above
   with the app closed, after a restart, and even if you never open the app again.
 - **Careful with your files.** Big changes are shown as a dry run first, syncing stops instead of
   deleting a large number of files online, and nothing in the app runs a program you didn't ask for.
+
+**Sync OneDrive and SharePoint on Linux without the command line.** A settings window and tray icon for
+the excellent [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg, which does
+the actual syncing. Install this app (it sets up the client for you), sign in, pick your folders, done. 
+The goal was to build a full featured GUI based program which any person can install and use without 
+needing the CLI at all or deep knowledge of Linux.
+
+
+I make ZERO, NONE, ABSOLUTELY NO SUGGESTION OR GUARANTEE this code is safe, does what it says, or won't harm
+your PC in some way. You are welcome and encouraged to review the source code 
+prior to installing. Again, to be clear, this app is not endorsed by Microsoft
+and I'm not affiliated with Microsoft in any way. Since it's a Rust GUI for the existing OneDrive
+sync client, syncing issues should go to the original app, which is linked above.
+
+
 
 ![Status page](docs/screenshots/status-light.png)
 
