@@ -28,8 +28,25 @@ jobs:
 
   # Every package is built natively on x86_64 and arm64 runners, then installed and opened on
   # a fresh system before anything is released.
-  deb-appimage:
+  # The Dolphin badge plugin, built once on the oldest Plasma 6 base (Debian 13, Qt 6.8) and put
+  # into every package; its headless test runs as part of the build.
+  dolphin-plugin:
     needs: test
+    strategy:
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v7
+      - run: packaging/build.sh dolphin-plugin
+      - uses: actions/upload-artifact@v7
+        with:
+          name: dolphin-plugin-${{ matrix.runner }}
+          path: target/plugins/*
+
+  deb-appimage:
+    needs: dolphin-plugin
     strategy:
       matrix:
         runner: [ubuntu-22.04, ubuntu-22.04-arm]
@@ -37,14 +54,19 @@ jobs:
     container: ubuntu:22.04
     steps:
       - uses: actions/checkout@v7
-      - run: packaging/build.sh deb-appimage
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dolphin-plugin-*
+          path: target/plugins
+          merge-multiple: true
+      - run: REQUIRE_PLUGIN=1 packaging/build.sh deb-appimage
       - uses: actions/upload-artifact@v7
         with:
           name: packages-deb-appimage-${{ matrix.runner }}
           path: dist/*
 
   rpm:
-    needs: test
+    needs: dolphin-plugin
     strategy:
       matrix:
         runner: [ubuntu-24.04, ubuntu-24.04-arm]
@@ -52,7 +74,12 @@ jobs:
     container: registry.fedoraproject.org/fedora:41
     steps:
       - uses: actions/checkout@v7
-      - run: packaging/build.sh rpm
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: dolphin-plugin-*
+          path: target/plugins
+          merge-multiple: true
+      - run: REQUIRE_PLUGIN=1 packaging/build.sh rpm
       - uses: actions/upload-artifact@v7
         with:
           name: packages-rpm-${{ matrix.runner }}
