@@ -185,10 +185,18 @@ fn measure(dir: &Path) -> Result<(u64, u64), String> {
         for entry in rd {
             let e = entry.map_err(|e| format!("Couldn't enumerate {}: {e}", d.display()))?;
             let path = e.path();
+            let file_type = e
+                .file_type()
+                .map_err(|e| format!("Couldn't inspect {}: {e}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
             let m = path
                 .symlink_metadata()
                 .map_err(|e| format!("Couldn't inspect {}: {e}", path.display()))?;
             if m.is_dir() {
+                // The entry changed between reading its type and metadata.
                 stack.push(path);
             } else {
                 files += 1;
@@ -814,6 +822,23 @@ mod tests {
         let dest = copy_noreplace(&source.join("item.txt"), &target, "item.txt", "host").unwrap();
         assert_eq!(fs::read_to_string(dest).unwrap(), "contents");
         assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn measure_counts_but_does_not_follow_directory_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("lodg-measure-{}", std::process::id()));
+        let source = dir.join("source");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(source.join("nested")).unwrap();
+        fs::write(source.join("root.txt"), "ab").unwrap();
+        fs::write(source.join("nested/item.txt"), "wxyz").unwrap();
+        symlink("nested", source.join("shortcut")).unwrap();
+        let link_bytes = fs::symlink_metadata(source.join("shortcut")).unwrap().len();
+
+        assert_eq!(measure(&source).unwrap(), (3, 2 + 4 + link_bytes));
         let _ = fs::remove_dir_all(&dir);
     }
 
