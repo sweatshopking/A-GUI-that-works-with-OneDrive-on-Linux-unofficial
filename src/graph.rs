@@ -56,17 +56,31 @@ fn at(url: &str) -> String {
     url.to_string()
 }
 
-fn unreachable(e: ureq::Error) -> String {
-    format!("Couldn't reach Microsoft. Check your internet connection and try again. ({e})")
+fn unreachable(_: ureq::Error) -> String {
+    "Couldn't reach Microsoft. Check your internet connection and try again.".into()
 }
 
-/// Reads a JSON reply, explaining replies that aren't JSON (an outage page, an empty "too many
-/// requests" answer) instead of passing on a parser error.
+/// Turns Microsoft's response codes into an explanation a person can act on.
+fn request_problem(status: u16) -> String {
+    match status {
+        401 => "Microsoft no longer accepts this sign-in. Open Settings and sign in again.".into(),
+        403 => "This account doesn't have permission to do that. Check that you have access to this file or site.".into(),
+        404 => "That item could not be found in OneDrive. It may have been moved or deleted.".into(),
+        409 => "OneDrive changed while this was running. Refresh and try again.".into(),
+        423 => "That item is locked. Close it elsewhere or try again later.".into(),
+        429 => "Microsoft is busy right now. Try again in a minute.".into(),
+        507 => "Your OneDrive storage is full. Free up space or get more storage, then try again.".into(),
+        500..=599 => "Microsoft is having a problem right now. Try again later.".into(),
+        _ => "Microsoft couldn't complete that request. Try again later.".into(),
+    }
+}
+
+/// Reads a JSON reply, explaining replies that aren't JSON instead of passing on a parser error.
 fn read_reply(resp: &mut ureq::http::Response<ureq::Body>) -> Result<Value, String> {
     let status = resp.status();
     resp.body_mut().read_json().map_err(|_| {
-        if status.as_u16() == 429 {
-            "Microsoft is busy right now (too many requests). Try again in a minute.".to_string()
+        if status.as_u16() >= 400 {
+            request_problem(status.as_u16())
         } else {
             format!("Microsoft sent an unexpected reply ({status}). Try again later.")
         }
@@ -119,10 +133,10 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
                 + Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(120)),
             graph,
         }),
-        None => Err(format!(
-            "Microsoft refused the saved sign-in ({}). Try signing in again.",
-            v["error"].as_str().unwrap_or("unknown error")
-        )),
+        None if v["error"].as_str() == Some("invalid_grant") => {
+            Err("Microsoft no longer accepts this sign-in. Open Settings and sign in again.".into())
+        }
+        None => Err(request_problem(resp.status().as_u16())),
     }
 }
 
@@ -135,10 +149,7 @@ fn get(tok: &Token, url: &str) -> Result<Value, String> {
     let status = resp.status().as_u16();
     let v = read_reply(&mut resp)?;
     if status >= 400 {
-        return Err(format!(
-            "HTTP {status}: {}",
-            v["error"]["message"].as_str().unwrap_or("request failed")
-        ));
+        return Err(request_problem(status));
     }
     Ok(v)
 }
@@ -343,7 +354,7 @@ pub fn find_libraries(tok: &Token, query: &str) -> Result<Vec<Library>, String> 
         match site_libraries(tok, id, name) {
             Ok(libs) => out.extend(libs),
             // a site can show up in search although the user can't open its libraries
-            Err(e) if e.starts_with("HTTP 403:") => {}
+            Err(e) if e.starts_with("This account doesn't have permission") => {}
             // one broken site shouldn't hide the others; say why only if nothing worked
             Err(e) => failed = Some(format!("Couldn't check libraries on {name}: {e}")),
         }
@@ -443,6 +454,16 @@ fn percent_decode(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn microsoft_errors_are_actionable_and_do_not_expose_http_details() {
+        assert!(request_problem(401).contains("sign in again"));
+        assert!(request_problem(403).contains("doesn't have permission"));
+        assert!(request_problem(404).contains("moved or deleted"));
+        assert!(request_problem(429).contains("Try again in a minute"));
+        assert!(request_problem(507).contains("storage is full"));
+        assert!(!request_problem(401).contains("401"));
+    }
 
     #[test]
     fn site_urls() {
@@ -681,10 +702,7 @@ pub fn download_version(
         .call()
         .map_err(unreachable)?;
     if resp.status().as_u16() >= 400 {
-        return Err(format!(
-            "Microsoft wouldn't send that version ({}).",
-            resp.status()
-        ));
+        return Err(request_problem(resp.status().as_u16()));
     }
     static NEXT_DOWNLOAD: AtomicU64 = AtomicU64::new(0);
     let parent = dest
@@ -753,10 +771,7 @@ fn post(tok: &Token, url: &str, body: Option<Value>) -> Result<Value, String> {
     }
     let v = read_reply(&mut resp).unwrap_or(Value::Null);
     if status >= 400 {
-        return Err(v["error"]["message"]
-            .as_str()
-            .unwrap_or("Microsoft turned the request down.")
-            .to_string());
+        return Err(request_problem(status));
     }
     Ok(v)
 }
@@ -863,10 +878,7 @@ pub fn create_link(
             };
             return Ok((u.to_string(), kind));
         }
-        last = v["error"]["message"]
-            .as_str()
-            .unwrap_or("couldn't create a link")
-            .to_string();
+        last = request_problem(status);
     }
     Err(last)
 }
