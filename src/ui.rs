@@ -4777,18 +4777,27 @@ pub fn run(account: Option<String>) {
     });
     on!(on_sync_now, |c| {
         let Some(acc) = current(c) else { return };
-        if let Some(why) = client_blocker() {
-            c.borrow().ui().set_s_msg(ss(why));
-            check_client();
-            return;
-        }
-        match core::sync_now(&acc) {
-            Ok(_) => {
-                c.borrow().ui().set_s_msg(ss("Syncing now…"));
-            }
-            Err(e) => c.borrow().ui().set_s_msg(ss(e)),
-        }
-        refresh(c);
+        c.borrow().ui().set_s_busy(true);
+        bg(
+            move || {
+                if let Some(why) = client_blocker() {
+                    (Err(why), true)
+                } else {
+                    (core::sync_now(&acc).map(|_| ()), false)
+                }
+            },
+            |c, (result, blocked)| {
+                c.borrow().ui().set_s_busy(false);
+                match result {
+                    Ok(()) => c.borrow().ui().set_s_msg(ss("Syncing now…")),
+                    Err(e) => c.borrow().ui().set_s_msg(ss(e)),
+                }
+                if blocked {
+                    check_client();
+                }
+                refresh(c);
+            },
+        );
     });
     on!(on_set_background, |c, on: bool| {
         let Some(acc) = current(c) else { return };
