@@ -54,9 +54,29 @@ sync client, syncing issues should go to the original app, which is linked above
   </tr>
 </table>
 
+## New in 1.0.0
+
+- **A new name: DriveDeck for OneDrive.** Upgrading carries everything over by itself: your
+  settings, accounts, autostart, menu entry and Dolphin actions. The old package is replaced, and
+  old login entries still start the app.
+- **Sync badges on your files** in Dolphin, Nemo and Caja: a tick when a file is synced, arrows while
+  it's syncing, a warning sign when it couldn't sync, a pause sign while paused. You can switch them
+  off in *App settings*.
+- **Tells you about syncing started outside the app** (for example a service that starts for every
+  user at login) and switches it off only if you ask.
+- **Microsoft's errors in plain words**, with Microsoft's own reason kept after the explanation.
+- **Faster and smoother**: the settings window and tray stay responsive while they check things,
+  big folder lists load quickly, and the app does less work while the settings window is closed.
+- **Easier with a keyboard and screen reader**: every control can be reached with the keyboard and
+  has a clear name.
+- **Fixes**: the tray icon no longer stops answering clicks after a minute, and *Sync now* in the
+  settings window now lifts a pause like it does in the tray.
+- **Even more careful with your system**: rewritten files keep their permissions, and existing
+  client setup files are never overwritten.
+
 ## New in 0.4.0
 
-The biggest update yet. Everything below is new since 0.3.5:
+The biggest update before 1.0. Everything below was new since 0.3.5:
 
 - **A tray panel like the one on Windows.** Click the icon for every account's status, the files
   syncing right now with their progress, and recent files with their icons. Click one to open it.
