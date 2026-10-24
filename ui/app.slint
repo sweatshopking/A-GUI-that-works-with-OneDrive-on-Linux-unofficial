@@ -1044,6 +1044,7 @@ export component AppWindow inherits Window {
                                                 vertical-alignment: center;
                                             }
                                             LineEdit {
+                                                accessible-label: "Account name";
                                                 text <=> root.s-name;
                                                 accepted => {
                                                     root.rename();
@@ -1207,6 +1208,7 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             Switch {
+                                                accessible-label: "Background sync";
                                                 checked: root.s-bg-enabled;
                                                 enabled: !root.s-busy;
                                                 toggled => {
@@ -1550,6 +1552,7 @@ export component AppWindow inherits Window {
                                                 width: 150px;
                                             }
                                             ComboBox {
+                                                accessible-label: "How often to check for changes";
                                                 model: ["5 minutes", "10 minutes", "15 minutes", "30 minutes", "1 hour", "2 hours"];
                                                 current-index <=> root.o-interval;
                                             }
@@ -1567,6 +1570,7 @@ export component AppWindow inherits Window {
                                                 checked <=> root.o-sched-on;
                                             }
                                             LineEdit {
+                                                accessible-label: "Schedule start time";
                                                 text <=> root.o-from;
                                                 enabled: root.o-sched-on;
                                                 width: 80px;
@@ -1577,6 +1581,7 @@ export component AppWindow inherits Window {
                                                 vertical-alignment: center;
                                             }
                                             LineEdit {
+                                                accessible-label: "Schedule end time";
                                                 text <=> root.o-to;
                                                 enabled: root.o-sched-on;
                                                 width: 80px;
@@ -1597,6 +1602,7 @@ export component AppWindow inherits Window {
                                                 width: 150px;
                                             }
                                             ComboBox {
+                                                accessible-label: "Sync speed limit";
                                                 model: ["No limit", "1 MB/s", "2 MB/s", "5 MB/s", "10 MB/s", "25 MB/s", "50 MB/s"];
                                                 current-index <=> root.o-rate;
                                             }
@@ -1625,6 +1631,7 @@ export component AppWindow inherits Window {
                                             text: "Direction";
                                         }
                                         ComboBox {
+                                            accessible-label: "Sync direction";
                                             model: ["Both ways (normal)", "Download only", "Upload only"];
                                             current-index <=> root.o-direction;
                                             // chosen by the user (not loaded): a backup should survive
@@ -1684,6 +1691,7 @@ export component AppWindow inherits Window {
                                                 vertical-alignment: center;
                                             }
                                             LineEdit {
+                                                accessible-label: "File name patterns to skip";
                                                 text <=> root.o-skip-files;
                                                 placeholder-text: "~*|.~*|*.tmp|*.swp|*.partial";
                                             }
@@ -1698,6 +1706,7 @@ export component AppWindow inherits Window {
                                                 vertical-alignment: center;
                                             }
                                             LineEdit {
+                                                accessible-label: "Folder names or paths to skip";
                                                 text <=> root.o-skip-dirs;
                                                 placeholder-text: "node_modules|Temp|Cache";
                                             }
@@ -1741,6 +1750,7 @@ export component AppWindow inherits Window {
                                                 vertical-alignment: center;
                                             }
                                             LineEdit {
+                                                accessible-label: "Number of deleted items that stops syncing";
                                                 text <=> root.o-big-delete;
                                                 width: 90px;
                                                 placeholder-text: "1000";
@@ -1778,6 +1788,7 @@ export component AppWindow inherits Window {
                                             }
                                             Switch {
                                                 text: root.o-adv-open ? "Shown" : "Hidden";
+                                                accessible-label: "Show advanced settings";
                                                 checked <=> root.o-adv-open;
                                             }
                                         }
@@ -1786,6 +1797,7 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 spacing: 8px;
                                                 LineEdit {
+                                                    accessible-label: "Search advanced settings";
                                                     placeholder-text: "Search settings (threads, timeout, log…)";
                                                     text <=> root.o-adv-query;
                                                     edited(t) => {
@@ -1906,13 +1918,13 @@ export component AppWindow inherits Window {
                                                                 spacing: 6px;
                                                                 alignment: end;
                                                                 LineEdit {
+                                                                    accessible-label: row.label;
                                                                     text <=> row.text;
                                                                     enabled: active;
                                                                     placeholder-text: row.placeholder;
                                                                     width: row.kind == 1 ? 96px : 260px;
                                                                     input-type: row.kind == 1 ? InputType.number : InputType.text;
                                                                     horizontal-alignment: row.kind == 1 ? right : left;
-                                                                    accessible-label: row.label;
                                                                 }
                                                                 if row.unit != "": Text {
                                                                     text: row.unit;
@@ -1922,6 +1934,7 @@ export component AppWindow inherits Window {
                                                                 }
                                                             }
                                                             if row.kind == 3: ComboBox {
+                                                                accessible-label: row.label;
                                                                 model: row.choices;
                                                                 current-index <=> row.choice;
                                                                 enabled: active;
@@ -2080,6 +2093,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     ComboBox {
+                                        accessible-label: "Work or school account for this library";
                                         model: root.add-from;
                                         current-index <=> root.add-from-index;
                                         horizontal-stretch: 1;
@@ -2093,6 +2107,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     LineEdit {
+                                        accessible-label: "SharePoint site address or name";
                                         text <=> root.add-query;
                                         placeholder-text: "Paste the site's address, or type part of its name";
                                         accepted => {
@@ -2151,6 +2166,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     LineEdit {
+                                        accessible-label: "Account name";
                                         text <=> root.add-name;
                                         placeholder-text: "e.g. Personal, Work";
                                     }
@@ -2163,6 +2179,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     LineEdit {
+                                        accessible-label: "Local folder for synced files";
                                         text <=> root.add-folder;
                                     }
                                     Button {
@@ -2183,6 +2200,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     ComboBox {
+                                        accessible-label: "Microsoft cloud";
                                         model: ["Worldwide (normal)", "US Government (GCC High)", "US Government (DoD)", "Germany", "China (21Vianet)"];
                                         current-index <=> root.add-cloud;
                                     }
@@ -2198,6 +2216,7 @@ export component AppWindow inherits Window {
                                         vertical-alignment: center;
                                     }
                                     LineEdit {
+                                        accessible-label: "Organization tenant";
                                         text <=> root.add-tenant;
                                         placeholder-text: "contoso.onmicrosoft.us";
                                     }
@@ -2376,6 +2395,7 @@ export component AppWindow inherits Window {
                                     width: 150px;
                                 }
                                 ComboBox {
+                                    accessible-label: "Glass effect";
                                     model: ["Automatic", "On", "Off"];
                                     current-index <=> root.app-glass;
                                     selected => {
@@ -2483,6 +2503,7 @@ export component AppWindow inherits Window {
                     wrap: word-wrap;
                 }
                 if root.si-need-paste: LineEdit {
+                    accessible-label: "Address from the blank sign-in page";
                     text <=> root.si-paste;
                     placeholder-text: "https://login.microsoftonline.com/common/oauth2/nativeclient?code=…";
                     accepted => {
@@ -3462,6 +3483,7 @@ export component PopupPanel inherits Window {
                         horizontal-stretch: 1;
                     }
                     if root.filters.length > 2: ComboBox {
+                        accessible-label: "Show recent files for account";
                         width: 170px;
                         model: root.filters;
                         current-index <=> root.filter;
@@ -3801,6 +3823,7 @@ export component FileWindow inherits Window {
                     font-weight: 600;
                 }
                 LineEdit {
+                    accessible-label: "Email addresses to invite";
                     text <=> root.emails;
                     placeholder-text: "name@example.com, another@example.com";
                     input-type: text;
@@ -3833,6 +3856,7 @@ export component FileWindow inherits Window {
                     font-weight: 600;
                 }
                 TextEdit {
+                    accessible-label: "Invitation message";
                     text <=> root.message;
                     height: 90px;
                     wrap: word-wrap;
