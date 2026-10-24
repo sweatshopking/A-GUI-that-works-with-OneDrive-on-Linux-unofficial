@@ -899,6 +899,19 @@ pub fn unit_state(unit: &str) -> UnitState {
     }
 }
 
+/// Reads a unit's state only once while building one account snapshot. Discovery and the status
+/// refresh often need the same unit, and each uncached lookup starts a `systemctl` process.
+pub(crate) fn cached_unit_state(
+    cache: &mut HashMap<String, UnitState>,
+    unit: &str,
+    load: impl FnOnce(&str) -> UnitState,
+) -> UnitState {
+    cache
+        .entry(unit.to_string())
+        .or_insert_with(|| load(unit))
+        .clone()
+}
+
 /// Name of the transient unit used for a one-off resync of an account.
 pub fn resync_unit(confdir: &Path) -> String {
     format!(
@@ -1575,6 +1588,16 @@ fn outside_starts_in(user_dir: &Path, system_dir: &Path, login: &str) -> Vec<Out
 /// Every account we can find: user units named onedrive*.service, plus config directories
 /// (~/.config/onedrive*) that have a config or sign-in but no unit yet.
 pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
+    discover_with_states(settings).0
+}
+
+/// Every account we can find, and the systemd states discovery already read for its units.
+/// Callers building live status can reuse those states instead of starting the same processes
+/// again in the same refresh.
+pub(crate) fn discover_with_states(
+    settings: &AppSettings,
+) -> (Vec<AccountInfo>, HashMap<String, UnitState>) {
+    let mut unit_states = HashMap::new();
     let mut by_dir: BTreeMap<PathBuf, (Option<String>, bool, Option<String>)> = BTreeMap::new();
     let mut sys_units: Vec<(String, String)> = Vec::new();
     for d in [
@@ -1601,7 +1624,7 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
         };
         if !is_user {
             // a distro-provided unit only counts once it is enabled or the account exists
-            let st = unit_state(&unit);
+            let st = cached_unit_state(&mut unit_states, &unit, unit_state);
             if !st.enabled && !st.active && !dir.join("refresh_token").exists() {
                 continue;
             }
@@ -1609,7 +1632,7 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
         let managed = is_managed(&text);
         let entry = by_dir.entry(dir).or_insert((None, false, None));
         // prefer an enabled unit if several point at the same config dir
-        if entry.0.is_none() || unit_state(&unit).enabled {
+        if entry.0.is_none() || cached_unit_state(&mut unit_states, &unit, unit_state).enabled {
             *entry = (Some(unit), managed, description_name(&text));
         }
     }
@@ -1677,7 +1700,7 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
             a.name.to_lowercase(),
         )
     });
-    out
+    (out, unit_states)
 }
 
 /// The files the client keeps in a configuration folder, plus the "-shm"/"-wal" companions of its
@@ -2824,6 +2847,28 @@ pub fn show_in_folder(p: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unit_state_is_read_once_per_snapshot() {
+        let mut cache = HashMap::new();
+        let reads = std::cell::Cell::new(0);
+        let load = |_: &str| {
+            reads.set(reads.get() + 1);
+            UnitState {
+                active: true,
+                ..Default::default()
+            }
+        };
+        assert!(cached_unit_state(&mut cache, "onedrive.service", load).active);
+        assert!(
+            cached_unit_state(&mut cache, "onedrive.service", |_| {
+                reads.set(reads.get() + 1);
+                UnitState::default()
+            })
+            .active
+        );
+        assert_eq!(reads.get(), 1);
+    }
 
     #[test]
     fn outside_starts_found() {

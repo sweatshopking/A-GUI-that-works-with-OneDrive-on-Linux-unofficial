@@ -278,12 +278,18 @@ fn log_state(unit: Option<&str>) -> LogState {
 
 pub(crate) fn take_snapshot() -> Snapshot {
     let settings = AppSettings::load();
-    let infos = core::discover(&settings);
+    let (infos, mut unit_states) = core::discover_with_states(&settings);
     let statuses = infos
         .iter()
         .map(|i| {
-            let unit = i.unit.as_deref().map(core::unit_state).unwrap_or_default();
-            let resyncing = core::unit_state(&core::resync_unit(&i.confdir)).active;
+            let unit = i
+                .unit
+                .as_deref()
+                .map(|u| core::cached_unit_state(&mut unit_states, u, core::unit_state))
+                .unwrap_or_default();
+            let resync_unit = core::resync_unit(&i.confdir);
+            let resyncing =
+                core::cached_unit_state(&mut unit_states, &resync_unit, core::unit_state).active;
             let log = log_state(i.unit.as_deref());
             let prefs = settings.prefs(&i.confdir);
             Status {
