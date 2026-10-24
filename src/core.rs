@@ -2613,6 +2613,11 @@ pub fn unit_action(verb: &'static str, unit: &str) {
 /// "Sync now": a fresh sync right away. Outside the schedule it's allowed for an hour, and a
 /// pause is lifted. Returns the unit (made now if the account had none).
 pub fn sync_now(info: &AccountInfo) -> Result<String, String> {
+    if account_busy(&info.confdir) {
+        return Err(
+            "This account is busy with another task. Try again when it has finished.".into(),
+        );
+    }
     let mut s = AppSettings::load();
     if !s.prefs(&info.confdir).sync_allowed() {
         let p = s.prefs_mut(&info.confdir);
@@ -2669,7 +2674,7 @@ pub fn pause(info: &AccountInfo, secs: i64) -> Result<i64, String> {
     if let Some(u) = &info.unit {
         if until != 0 {
             unit_action("stop", u);
-        } else if allowed && unit_state(u).enabled {
+        } else if allowed && unit_state(u).enabled && !account_busy(&info.confdir) {
             // resuming doesn't start an account whose background sync is off, or whose
             // schedule says not now (the tray would only stop it again)
             unit_action("start", u);

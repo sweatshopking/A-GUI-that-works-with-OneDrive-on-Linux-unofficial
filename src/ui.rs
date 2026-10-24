@@ -4758,30 +4758,11 @@ pub fn run(account: Option<String>) {
             check_client();
             return;
         }
-        let mut s = AppSettings::load();
-        s.prefs_mut(&acc.confdir).override_until = Local::now().timestamp() + 3600;
-        if let Err(e) = s.save() {
-            c.borrow()
-                .ui()
-                .set_s_msg(ss(format!("Couldn't save the sync override: {e}")));
-            return;
-        }
-        let unit = acc
-            .unit
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(|| core::ensure_unit(&acc));
-        match unit {
-            Ok(u) => {
-                let verb = if core::unit_state(&u).active {
-                    "restart"
-                } else {
-                    "start"
-                };
-                core::unit_action(verb, &u);
+        match core::sync_now(&acc) {
+            Ok(_) => {
                 c.borrow().ui().set_s_msg(ss("Syncing now…"));
             }
-            Err(e) => c.borrow().ui().set_s_msg(ss(e.to_string())),
+            Err(e) => c.borrow().ui().set_s_msg(ss(e)),
         }
         refresh(c);
     });
