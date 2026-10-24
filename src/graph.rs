@@ -60,6 +60,16 @@ fn unreachable(_: ureq::Error) -> String {
     "Couldn't reach Microsoft. Check your internet connection and try again.".into()
 }
 
+/// The plain explanation, plus Microsoft's own reason when it sent one: for refusals such as
+/// an organization's sharing policy, that reason is what tells the person what to do.
+fn problem(status: u16, reply: &Value) -> String {
+    let base = request_problem(status);
+    match reply["error"]["message"].as_str().map(str::trim) {
+        Some(m) if !m.is_empty() && m.len() <= 300 => format!("{base} (Microsoft says: {m})"),
+        _ => base,
+    }
+}
+
 /// Turns Microsoft's response codes into an explanation a person can act on.
 fn request_problem(status: u16) -> String {
     match status {
@@ -149,7 +159,7 @@ fn get(tok: &Token, url: &str) -> Result<Value, String> {
     let status = resp.status().as_u16();
     let v = read_reply(&mut resp)?;
     if status >= 400 {
-        return Err(request_problem(status));
+        return Err(problem(status, &v));
     }
     Ok(v)
 }
@@ -463,6 +473,16 @@ mod tests {
         assert!(request_problem(429).contains("Try again in a minute"));
         assert!(request_problem(507).contains("storage is full"));
         assert!(!request_problem(401).contains("401"));
+        let reply =
+            serde_json::json!({"error": {"message": "Sharing is turned off for this site."}});
+        assert_eq!(
+            problem(403, &reply),
+            format!(
+                "{} (Microsoft says: Sharing is turned off for this site.)",
+                request_problem(403)
+            )
+        );
+        assert_eq!(problem(404, &Value::Null), request_problem(404));
     }
 
     #[test]
@@ -771,7 +791,7 @@ fn post(tok: &Token, url: &str, body: Option<Value>) -> Result<Value, String> {
     }
     let v = read_reply(&mut resp).unwrap_or(Value::Null);
     if status >= 400 {
-        return Err(request_problem(status));
+        return Err(problem(status, &v));
     }
     Ok(v)
 }
@@ -878,7 +898,7 @@ pub fn create_link(
             };
             return Ok((u.to_string(), kind));
         }
-        last = request_problem(status);
+        last = problem(status, &v);
     }
     Err(last)
 }
