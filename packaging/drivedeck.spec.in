@@ -20,6 +20,8 @@ Provides:       linux-onedrive-gui = %{version}-%{release}
 Obsoletes:      linux-onedrive-gui < 0.5.0
 
 %global debug_package %{nil}
+# the Dolphin plugin only works with Plasma 6 and must not pull KDE onto other desktops
+%global __requires_exclude_from ^/usr/lib64/qt6/plugins/.*$
 %global __strip /bin/true
 
 %description
@@ -44,3 +46,4 @@ cp -a %{stage}/. %{buildroot}/
 /usr/share/icons/hicolor/256x256/apps/drivedeck.png
 /usr/share/icons/hicolor/scalable/status/drivedeck-*.svg
 /usr/share/kio/servicemenus/drivedeck.desktop
+@PLUGIN@

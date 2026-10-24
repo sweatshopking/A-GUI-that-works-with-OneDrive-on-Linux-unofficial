@@ -705,6 +705,12 @@ export component AppWindow inherits Window {
     callback app-check-updates-toggled();
     in-out property <bool> app-pause-metered;
     in-out property <bool> app-pause-saver;
+    in-out property <bool> app-badges;
+    in property <bool> app-dolphin-offer;
+    in property <bool> app-dolphin-busy;
+    in property <string> app-badges-msg;
+    callback app-badges-toggled();
+    callback app-dolphin-install();
     callback app-pause-toggled();
     // a newer version that's out, or ""
     in property <string> app-update;
@@ -2284,6 +2290,32 @@ export component AppWindow inherits Window {
                             }
                             Hint {
                                 text: "Syncing carries on by itself afterwards. \"Sync now\" still syncs for an hour if you need it to.";
+                            }
+                            CheckBox {
+                                text: "Show sync badges on files in Dolphin, Nemo and Caja";
+                                checked <=> root.app-badges;
+                                toggled => {
+                                    root.app-badges-toggled();
+                                }
+                            }
+                            Hint {
+                                text: "A small tick, arrows or warning sign on the files in your OneDrive folders. File manager windows that are already open show them once they're reopened.";
+                            }
+                            if root.app-badges && root.app-dolphin-offer: HorizontalLayout {
+                                alignment: start;
+                                Button {
+                                    text: root.app-dolphin-busy ? "Adding…" : "Add badges to Dolphin…";
+                                    enabled: !root.app-dolphin-busy;
+                                    clicked => {
+                                        root.app-dolphin-install();
+                                    }
+                                }
+                            }
+                            if root.app-badges && root.app-dolphin-offer: Hint {
+                                text: "Dolphin needs a small plugin installed for everyone on this computer, so it asks for your password once.";
+                            }
+                            if root.app-badges-msg != "": Hint {
+                                text: root.app-badges-msg;
                             }
                             CheckBox {
                                 text: "Tell me when a new version is out";

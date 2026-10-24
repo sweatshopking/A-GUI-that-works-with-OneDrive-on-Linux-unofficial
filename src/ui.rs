@@ -4044,6 +4044,8 @@ fn prepare_app_page(ctx: &Shared) {
     ui.set_app_stop_on_quit(AppSettings::load().stop_sync_on_quit);
     ui.set_app_pause_metered(AppSettings::load().pause_on_metered.unwrap_or(true));
     ui.set_app_pause_saver(AppSettings::load().pause_on_power_saver.unwrap_or(true));
+    ui.set_app_badges(AppSettings::load().show_badges.unwrap_or(true));
+    ui.set_app_dolphin_offer(crate::badges::dolphin_offer());
     let check = AppSettings::load().check_updates.unwrap_or(true);
     ui.set_app_check_updates(check);
     if check {
@@ -4925,6 +4927,44 @@ pub fn run(account: Option<String>) {
         if let Err(e) = s.save() {
             ui.set_app_msg(ss(format!("Couldn't save the setting: {e}")));
         }
+    });
+    on!(on_app_badges_toggled, |c| {
+        let ui = c.borrow().ui();
+        let on = ui.get_app_badges();
+        let mut s = AppSettings::load();
+        s.show_badges = (!on).then_some(false);
+        if let Err(e) = s.save() {
+            ui.set_app_badges_msg(ss(format!("Couldn't save the setting: {e}")));
+            return;
+        }
+        // the tray picks the setting up within a few seconds; the Nemo / Caja extension and the
+        // badge pictures come and go with it
+        let errors = if on {
+            crate::badges::install_user_files();
+            Vec::new()
+        } else {
+            crate::badges::remove_user_files()
+        };
+        ui.set_app_badges_msg(ss(if errors.is_empty() {
+            String::new()
+        } else {
+            format!("Couldn't remove {}", errors.join(", "))
+        }));
+    });
+    on!(on_app_dolphin_install, |c| {
+        let ui = c.borrow().ui();
+        ui.set_app_dolphin_busy(true);
+        ui.set_app_badges_msg(ss("Your computer will ask for your password…"));
+        bg(crate::badges::install_dolphin_plugin, |ctx, r| {
+            let ui = ctx.borrow().ui();
+            ui.set_app_dolphin_busy(false);
+            ui.set_app_dolphin_offer(crate::badges::dolphin_offer());
+            ui.set_app_badges_msg(ss(match r {
+                Ok(()) => "Added. Close every Dolphin window and open it again to see the badges."
+                    .to_string(),
+                Err(e) => e,
+            }));
+        });
     });
     on!(on_app_check_updates_toggled, |c| {
         let on = c.borrow().ui().get_app_check_updates();

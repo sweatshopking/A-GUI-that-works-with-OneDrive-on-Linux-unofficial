@@ -32,6 +32,25 @@ int main(int argc, char **argv)
             bad += !ok;
             printf("%s %s -> '%s'\n", ok ? "ok  " : "FAIL", c.path, qPrintable(g));
         }
+        // "Changed": the plugin asks again (in one call) and reports only what changed
+        int reported = 0;
+        QString aNow;
+        QObject::connect(plugin, &KOverlayIconPlugin::overlaysChanged, [&](const QUrl &u, const QStringList &o) {
+            ++reported;
+            if (u.path().endsWith(QStringLiteral("/a.txt"))) {
+                aNow = o.value(0);
+            }
+        });
+        FILE *f = fopen("/tmp/badges-flip", "w");
+        if (f) {
+            fclose(f);
+        }
+        QTimer::singleShot(3000, &app, &QCoreApplication::quit);
+        app.exec();
+        const bool ok = reported == 1 && aNow == QStringLiteral("emblem-drivedeck-error");
+        bad += !ok;
+        printf("%s Changed -> %d update(s), a.txt now '%s'\n", ok ? "ok  " : "FAIL", reported, qPrintable(aNow));
+        remove("/tmp/badges-flip");
     }
     return bad;
 }

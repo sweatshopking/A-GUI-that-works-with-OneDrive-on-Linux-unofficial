@@ -3,6 +3,11 @@
 #
 #   packaging/build.sh deb-appimage   on Ubuntu 22.04  -> dist/*.deb, dist/*.AppImage
 #   packaging/build.sh rpm            on Fedora 41     -> dist/*.rpm
+#   packaging/build.sh dolphin-plugin on Debian 13     -> target/plugins/drivedeck-badges-<arch>.so
+#
+# Run dolphin-plugin first: the other targets put its Dolphin badge plugin into their packages
+# (built once on the oldest Plasma 6 base, Qt 6.8, it loads on every newer one). Without it they
+# build without Dolphin badges, unless REQUIRE_PLUGIN=1 (the release workflow) makes that an error.
 #
 # Packages are built for the machine it runs on: x86_64 (amd64) or aarch64 (arm64).
 #
@@ -29,6 +34,7 @@ case "$ARCH" in
     *) echo "error: unsupported architecture $ARCH" >&2; exit 1 ;;
 esac
 mkdir -p "$WORK" "$DIST"
+PLUGIN="$ROOT/target/plugins/drivedeck-badges-$ARCH.so"
 
 log() { printf '\n==> %s\n' "$*"; }
 
@@ -54,6 +60,42 @@ install_deps_fedora() {
         desktop-file-utils >/dev/null
 }
 
+install_deps_debian_kf6() {
+    log "Installing build dependencies for the Dolphin plugin (apt)"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq
+    apt-get install -y -qq --no-install-recommends ca-certificates g++ make cmake extra-cmake-modules \
+        qt6-base-dev libkf6kio-dev dbus python3-gi >/dev/null
+}
+
+# The Dolphin badge plugin, then its headless test: loaded the way Dolphin loads overlay plugins,
+# answered by a stand-in for the tray's badge service.
+build_dolphin_plugin() {
+    log "Building the Dolphin badge plugin"
+    local b="$WORK/dolphin" t="$WORK/dolphin-test"
+    rm -rf "$b" "$t"
+    cmake -S "$ROOT/plugins/dolphin" -B "$b" -DCMAKE_BUILD_TYPE=Release >/dev/null
+    cmake --build "$b" >/dev/null
+    cmake -S "$ROOT/plugins/dolphin/test" -B "$t" >/dev/null
+    cmake --build "$t" >/dev/null
+    log "Testing it"
+    dbus-run-session -- sh -c "python3 '$ROOT/plugins/dolphin/test/fake-badges.py' & sleep 2; QT_PLUGIN_PATH='$b/bin' '$t/badges-test'"
+    install -Dm644 "$b/bin/kf6/overlayicon/drivedeck-badges.so" "$PLUGIN"
+    ls -la "$PLUGIN"
+}
+
+# Copies the Dolphin plugin to $1 (a folder), if it was built.
+stage_plugin() {
+    if [ -f "$PLUGIN" ]; then
+        install -Dm644 "$PLUGIN" "$1/drivedeck-badges.so"
+    elif [ "${REQUIRE_PLUGIN:-}" = 1 ]; then
+        echo "error: $PLUGIN is missing (run packaging/build.sh dolphin-plugin first)" >&2
+        exit 1
+    else
+        echo "warning: no Dolphin plugin ($PLUGIN): building without Dolphin badges" >&2
+    fi
+}
+
 install_rust() {
     if ! command -v cargo >/dev/null; then
         log "Installing Rust"
@@ -70,7 +112,7 @@ build_app() {
 
 # Lays out the installed file tree shared by the .deb and .rpm.
 stage_tree() {
-    local dest="$1"
+    local dest="$1" qt_plugins="$2" # the distribution's Qt 6 plugin folder
     rm -rf "$dest"
     install -Dm755 "$BIN" "$dest/usr/bin/$APP"
     # the name before 0.5.0: login entries of earlier versions start it, and the app then moves
@@ -90,12 +132,14 @@ stage_tree() {
     chmod 755 "$dest/usr/share/kio/servicemenus/$APP.desktop"
     install -Dm644 "$ROOT/LICENSE" "$dest/usr/share/licenses/$APP/LICENSE"
     install -Dm644 "$ROOT/packaging/THIRD-PARTY.md" "$dest/usr/share/doc/$APP/THIRD-PARTY.md"
+    # Dolphin (Plasma 6) badges; harmless elsewhere: nothing else loads it
+    stage_plugin "$dest$qt_plugins/kf6/overlayicon"
 }
 
 build_deb() {
     log "Packaging .deb"
     local stage="$WORK/deb"
-    stage_tree "$stage"
+    stage_tree "$stage" "/usr/lib/$(dpkg-architecture -qDEB_HOST_MULTIARCH)/qt6/plugins"
     mkdir -p "$stage/DEBIAN" "$WORK/debian"
     # dpkg-shlibdeps needs a debian/control to exist; it only reads the package name from it
     printf 'Source: %s\n\nPackage: %s\nArchitecture: %s\n' "$APP" "$APP" "$DEB_ARCH" >"$WORK/debian/control"
@@ -153,6 +197,8 @@ build_appimage() {
     install -Dm644 "$ROOT/packaging/$APPSTREAM_ID.metainfo.xml" "$appdir/usr/share/metainfo/$APPSTREAM_ID.metainfo.xml"
     install -Dm644 "$ROOT/LICENSE" "$appdir/usr/share/licenses/$APP/LICENSE"
     install -Dm644 "$ROOT/packaging/THIRD-PARTY.md" "$appdir/usr/share/doc/$APP/THIRD-PARTY.md"
+    # offered from App settings, installed for everyone with one password prompt
+    stage_plugin "$appdir/usr/share/$APP"
     local ld="$WORK/linuxdeploy-$ARCH.AppImage"
     [ -x "$ld" ] || {
         curl -fsSL -o "$ld" "https://github.com/linuxdeploy/linuxdeploy/releases/download/$LINUXDEPLOY_TAG/linuxdeploy-$ARCH.AppImage"
@@ -177,11 +223,14 @@ build_appimage() {
 build_rpm() {
     log "Packaging .rpm"
     local stage="$WORK/rpm-root"
-    stage_tree "$stage"
+    stage_tree "$stage" /usr/lib64/qt6/plugins
     local top="$WORK/rpmbuild"
     rm -rf "$top"
     mkdir -p "$top"/{BUILD,RPMS,SOURCES,SPECS,SRPMS}
-    sed -e "s/@VERSION@/$VERSION/" "$ROOT/packaging/$APP.spec.in" >"$top/SPECS/$APP.spec"
+    local plugin_file=""
+    [ -f "$stage/usr/lib64/qt6/plugins/kf6/overlayicon/drivedeck-badges.so" ] &&
+        plugin_file=/usr/lib64/qt6/plugins/kf6/overlayicon/drivedeck-badges.so
+    sed -e "s/@VERSION@/$VERSION/" -e "s|@PLUGIN@|$plugin_file|" "$ROOT/packaging/$APP.spec.in" >"$top/SPECS/$APP.spec"
     rpmbuild -bb --quiet \
         --define "_topdir $top" \
         --define "stage $stage" \
@@ -199,6 +248,10 @@ case "${1:-}" in
         build_deb
         build_appimage
         ;;
+    dolphin-plugin)
+        [ "${SKIP_DEPS:-}" = 1 ] || install_deps_debian_kf6
+        build_dolphin_plugin
+        ;;
     rpm)
         [ "${SKIP_DEPS:-}" = 1 ] || install_deps_fedora
         install_rust
@@ -206,7 +259,7 @@ case "${1:-}" in
         build_rpm
         ;;
     *)
-        echo "usage: $0 deb-appimage|rpm" >&2
+        echo "usage: $0 dolphin-plugin|deb-appimage|rpm" >&2
         exit 2
         ;;
 esac

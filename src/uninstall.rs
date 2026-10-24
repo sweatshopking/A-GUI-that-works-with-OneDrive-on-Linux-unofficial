@@ -274,12 +274,18 @@ pub fn stop_tray_named(bus_name: &str) -> bool {
 /// Removes the app itself. Returns a note when the user has to finish by hand.
 pub fn remove_program(how: &Installed) -> Result<(), String> {
     match how {
-        Installed::AppImage(p) => fs::remove_file(p).map_err(|e| {
-            format!(
-                "Couldn't delete {}: {e}. Delete it yourself to finish.",
-                p.display()
-            )
-        }),
+        Installed::AppImage(p) => {
+            // the Dolphin badge plugin it installed for everyone (asks for the password)
+            let plugin = crate::badges::remove_dolphin_plugin().err();
+            fs::remove_file(p)
+                .map_err(|e| {
+                    format!(
+                        "Couldn't delete {}: {e}. Delete it yourself to finish.",
+                        p.display()
+                    )
+                })
+                .and(plugin.map_or(Ok(()), Err))
+        }
         Installed::Package(cmd) => {
             let ok = Command::new(&cmd[0])
                 .args(&cmd[1..])

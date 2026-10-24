@@ -156,6 +156,11 @@ It covers what the OneDrive app on Windows does, and then some. In short:
 - **Back up this computer's folders.** Keep Desktop, Documents, Pictures, Music and Videos in OneDrive,
   as on Windows. They stay where your apps expect them, and nothing is ever deleted: stopping leaves
   the files in OneDrive.
+- **Sync badges on your files**, as in Windows File Explorer: a tick when a file is synced, arrows
+  while it's syncing, a warning sign when it couldn't sync, a pause sign while syncing is paused.
+  They show in Dolphin (Plasma 6), Nemo and Caja, and can be switched off in *App settings*. The
+  .deb and .rpm include the Dolphin part; with the AppImage, *App settings → Add badges to
+  Dolphin* installs it with one password prompt. GNOME Files has no way to show them.
 - **Version history and sharing from Dolphin.** Right-click a file to see its earlier versions, open
   one or restore it, or invite people by email to view or edit it.
 - **Sharing links from Dolphin**: *Copy view-only link*, *Copy editing link* and *View on the OneDrive

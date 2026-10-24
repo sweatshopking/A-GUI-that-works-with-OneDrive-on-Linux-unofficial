@@ -5,9 +5,10 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 ENGINE="$(command -v podman || command -v docker)"
-targets=("${@:-deb-appimage rpm}")
+targets=("${@:-dolphin-plugin deb-appimage rpm}")
 for t in ${targets[*]}; do
     case "$t" in
+        dolphin-plugin) image=docker.io/library/debian:trixie ;;
         deb-appimage) image=docker.io/library/ubuntu:22.04 ;;
         rpm) image=registry.fedoraproject.org/fedora:41 ;;
         *) echo "unknown target $t" >&2; exit 2 ;;

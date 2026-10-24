@@ -404,6 +404,9 @@ pub struct AppSettings {
     /// Pause syncing while battery saver is on (None: yes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pause_on_power_saver: Option<bool>,
+    /// Sync badges on files in Dolphin, Nemo and Caja (None: yes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show_badges: Option<bool>,
     /// Prevents a fallback/default value from overwriting settings that could not be loaded.
     #[serde(skip)]
     load_error: Option<String>,

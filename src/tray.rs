@@ -579,6 +579,11 @@ fn apply_events(
 
 /// Hands the file manager badges the accounts' current state.
 fn publish_badges(t: &Tray) {
+    if !crate::badges::enabled() {
+        // switched off: every file answers "no badge"
+        crate::badges::publish(Vec::new());
+        return;
+    }
     crate::badges::publish(
         t.accs
             .iter()

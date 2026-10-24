@@ -329,6 +329,7 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
         "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg,
         "ci_text" => get_ci_text, "ci_title" => get_ci_title, "ci_action" => get_ci_action,
         "client_done" => get_client_done, "outside_start" => get_outside_start,
+        "app_badges_msg" => get_app_badges_msg,
         "outside_start_hint" => get_outside_start_hint
     );
     r.or_else(|| {
@@ -369,6 +370,9 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "client_update" => ui.get_client_update().to_string(),
             "client_installing" => ui.get_client_installing().to_string(),
             "outside_start_busy" => ui.get_outside_start_busy().to_string(),
+            "app_badges" => ui.get_app_badges().to_string(),
+            "app_dolphin_offer" => ui.get_app_dolphin_offer().to_string(),
+            "app_dolphin_busy" => ui.get_app_dolphin_busy().to_string(),
             "ci_visible" => ui.get_ci_visible().to_string(),
             "u_busy" => ui.get_u_busy().to_string(),
             "a_current" => ui.get_a_current().to_string(),
@@ -468,6 +472,7 @@ fn set(ui: &AppWindow, k: &str, v: &str) -> bool {
         "u_keep_setup" => ui.set_u_keep_setup(b),
         "app_autostart" => ui.set_app_autostart(b),
         "app_stop_on_quit" => ui.set_app_stop_on_quit(b),
+        "app_badges" => ui.set_app_badges(b),
         "app_glass" => ui.set_app_glass(i),
         "dark" => ui.set_dark(b),
         "glass" => ui.global::<crate::ui::Theme>().set_glass(b),
@@ -531,6 +536,8 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "ci_myself" => ui.invoke_ci_myself(),
         "client_done_ok" => ui.invoke_client_done_ok(),
         "outside_start_off" => ui.invoke_outside_start_off(),
+        "app_badges_toggled" => ui.invoke_app_badges_toggled(),
+        "app_dolphin_install" => ui.invoke_app_dolphin_install(),
         "outside_start_keep" => ui.invoke_outside_start_keep(),
         "u_confirm" => ui.invoke_u_confirm(),
         "u_cancel" => ui.invoke_u_cancel(),
