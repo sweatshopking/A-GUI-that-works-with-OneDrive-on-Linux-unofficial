@@ -3114,7 +3114,7 @@ fn load_conflicts(ctx: &Shared, acc: &AccountInfo) {
     let (key, root) = (acc.key(), acc.sync_dir.clone());
     ctx.borrow().ui().set_c_rows(ModelRc::default());
     bg(
-        move || crate::conflict::find(&root, 300_000),
+        move || crate::conflict::find(&root, 20_000),
         move |ctx, found| {
             if ctx.borrow().current.as_deref() != Some(key.as_str()) {
                 return;
@@ -3144,8 +3144,8 @@ fn load_conflicts(ctx: &Shared, acc: &AccountInfo) {
                         .map(|p| p.display().to_string())
                         .filter(|p| !p.is_empty())
                         .unwrap_or_else(|| "Top of OneDrive".into());
-                    let when = fs::metadata(&c.copy)
-                        .and_then(|m| m.modified())
+                    let when = c
+                        .modified
                         .map(|t| {
                             chrono::DateTime::<Local>::from(t)
                                 .format("%-d %b, %H:%M")

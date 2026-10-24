@@ -15,6 +15,8 @@ pub struct Conflict {
     pub copy: PathBuf,
     /// The file it clashed with (OneDrive's version); may be gone since
     pub original: PathBuf,
+    /// The kept copy's last modification time, read during the scan.
+    pub modified: Option<SystemTime>,
     copy_identity: Option<FileIdentity>,
     original_identity: Option<FileIdentity>,
 }
@@ -30,9 +32,8 @@ struct FileIdentity {
     ctime_nsec: i64,
 }
 
-fn identity(path: &Path) -> Option<FileIdentity> {
-    let m = fs::symlink_metadata(path).ok()?;
-    Some(FileIdentity {
+fn identity_from_metadata(m: &fs::Metadata) -> FileIdentity {
+    FileIdentity {
         dev: m.dev(),
         ino: m.ino(),
         len: m.len(),
@@ -40,7 +41,14 @@ fn identity(path: &Path) -> Option<FileIdentity> {
         mtime_nsec: m.mtime_nsec(),
         ctime: m.ctime(),
         ctime_nsec: m.ctime_nsec(),
-    })
+    }
+}
+
+fn identity(path: &Path) -> Option<FileIdentity> {
+    fs::symlink_metadata(path)
+        .ok()
+        .as_ref()
+        .map(identity_from_metadata)
 }
 
 const MARK: &str = "-safeBackup-";
@@ -110,17 +118,17 @@ pub fn find(root: &Path, limit: usize) -> Result<(Vec<Conflict>, Option<String>)
                 && e.file_name().to_string_lossy().contains(MARK)
                 && let Some(original) = original_of(&p)
             {
-                let t = e
-                    .metadata()
-                    .and_then(|m| m.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                let metadata = fs::symlink_metadata(&p).ok();
+                let modified = metadata.as_ref().and_then(|m| m.modified().ok());
+                let t = modified.unwrap_or(SystemTime::UNIX_EPOCH);
                 out.push((
                     t,
                     Conflict {
-                        copy_identity: identity(&p),
+                        copy_identity: metadata.as_ref().map(identity_from_metadata),
                         original_identity: identity(&original),
                         copy: p,
                         original,
+                        modified,
                     },
                 ));
             }
@@ -289,12 +297,14 @@ mod tests {
         let (found, note) = find(&dir, 1000).unwrap();
         assert_eq!(note, None);
         assert_eq!(found.len(), 1);
+        assert!(found[0].modified.is_some());
         let msg = settle(&found[0], Choice::KeepBoth).unwrap();
         assert!(msg.contains("my-report (this computer's copy).docx"));
         assert!(dir.join("my-report (this computer's copy).docx").is_file());
         let long = Conflict {
             copy: dir.join("long-safeBackup-pc-safeBackup-0001.txt"),
             original: dir.join(format!("{}.txt", "x".repeat(245))),
+            modified: None,
             copy_identity: None,
             original_identity: None,
         };
