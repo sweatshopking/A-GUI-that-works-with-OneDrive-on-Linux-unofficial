@@ -166,7 +166,9 @@ It covers what the OneDrive app on Windows does, and then some. In short:
   while it's syncing, a warning sign when it couldn't sync, a pause sign while syncing is paused.
   They show in Dolphin (Plasma 6), Nemo and Caja, and can be switched off in *App settings*. The
   .deb and .rpm include the Dolphin part; with the AppImage, *App settings → Add badges to
-  Dolphin* installs it with one password prompt. GNOME Files has no way to show them.
+  Dolphin* installs it with one password prompt. Nemo and Caja need their nemo-python or
+  caja-python add-on (from your system's software store) to show them. GNOME Files has no way to
+  show them.
 - **Version history and sharing from Dolphin.** Right-click a file to see its earlier versions, open
   one or restore it, or invite people by email to view or edit it.
 - **Sharing links from Dolphin**: *Copy view-only link*, *Copy editing link* and *View on the OneDrive
