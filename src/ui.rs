@@ -103,7 +103,7 @@ struct Preview {
     unit: Option<String>,
     was_active: bool,
     snapshot: Vec<(PathBuf, Option<Vec<u8>>)>,
-    out: Arc<Mutex<String>>,
+    out: Arc<Mutex<PreviewLog>>,
     cancelled: Arc<AtomicBool>,
     running: bool,
     folders_changed: bool,
@@ -1723,6 +1723,117 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
+const MAX_PREVIEW_LINE: usize = 8192;
+
+#[derive(Clone, Default)]
+struct PreviewLog {
+    last_line: String,
+    tail: std::collections::VecDeque<String>,
+    downloads: u64,
+    uploads: u64,
+    online_deletions: u64,
+    local_deletions: u64,
+    online_samples: Vec<String>,
+    local_samples: Vec<String>,
+    errors: u64,
+    first_error: Option<String>,
+}
+
+impl PreviewLog {
+    fn observe(&mut self, line: &str) {
+        let line = line.trim();
+        if !line.is_empty() {
+            self.last_line = line.chars().take(110).collect();
+            if self.tail.len() == 6 {
+                self.tail.pop_front();
+            }
+            self.tail.push_back(line.chars().take(512).collect());
+        }
+        let number = |prefix: &str| {
+            line.strip_prefix(prefix)
+                .and_then(|n| n.trim().parse::<u64>().ok())
+        };
+        if let Some(n) = number("Number of items to download from Microsoft OneDrive:") {
+            self.downloads = self.downloads.saturating_add(n);
+        } else if let Some(n) = number("New items to upload to Microsoft OneDrive:") {
+            self.uploads = self.uploads.saturating_add(n);
+        } else if let Some(path) = line.strip_prefix("Deleting item from Microsoft OneDrive: ") {
+            self.online_deletions = self.online_deletions.saturating_add(1);
+            add_preview_sample(&mut self.online_samples, path);
+        } else if let Some(path) = line
+            .strip_prefix("Deleting local file: ")
+            .or_else(|| line.strip_prefix("Deleting local directory: "))
+            // "download only" cleaning up what isn't online
+            .or_else(|| line.strip_prefix("Attempting removal of local file: "))
+            .or_else(|| line.strip_prefix("Attempting removal of local directory: "))
+        {
+            self.local_deletions = self.local_deletions.saturating_add(1);
+            add_preview_sample(&mut self.local_samples, path);
+        } else if line.starts_with("ERROR") {
+            self.errors = self.errors.saturating_add(1);
+            if self.first_error.is_none() {
+                self.first_error = Some(line.chars().take(512).collect());
+            }
+        }
+    }
+}
+
+fn add_preview_sample(samples: &mut Vec<String>, path: &str) {
+    if samples.len() < 8 {
+        let path = path.split(" ... ").next().unwrap_or(path).trim();
+        let path = path.strip_prefix("./").unwrap_or(path);
+        samples.push(path.chars().take(512).collect());
+    }
+}
+
+/// Captures a dry run as totals and a short tail instead of keeping one line per file.
+fn spawn_preview_capture(
+    mut cmd: Command,
+    out: Arc<Mutex<PreviewLog>>,
+) -> std::io::Result<(Child, Vec<std::thread::JoinHandle<()>>)> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let pipes: [Option<Box<dyn Read + Send>>; 2] = [
+        child.stdout.take().map(|p| Box::new(p) as _),
+        child.stderr.take().map(|p| Box::new(p) as _),
+    ];
+    let mut readers = Vec::new();
+    for mut pipe in pipes.into_iter().flatten() {
+        let out = out.clone();
+        readers.push(std::thread::spawn(move || {
+            let mut buf = [0u8; 8192];
+            let mut line = Vec::new();
+            let mut lines = Vec::new();
+            while let Ok(n) = pipe.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                for byte in &buf[..n] {
+                    if *byte == b'\n' {
+                        lines.push(String::from_utf8_lossy(&line).trim_end().to_string());
+                        line.clear();
+                    } else if line.len() < MAX_PREVIEW_LINE {
+                        line.push(*byte);
+                    }
+                }
+                if !lines.is_empty() {
+                    let mut out = out.lock().unwrap();
+                    for line in lines.drain(..) {
+                        out.observe(&line);
+                    }
+                }
+            }
+            if !line.is_empty() {
+                out.lock().unwrap().observe(&String::from_utf8_lossy(&line));
+            }
+        }));
+    }
+    Ok((child, readers))
+}
+
 /// Starts `cmd`, appending everything it prints (stdout and stderr) to `out` as it arrives.
 /// Reads raw chunks rather than lines so prompts without a newline show up too. The reader
 /// threads come back as well: a caller that reads `out` once the program has ended lets them
@@ -1785,7 +1896,7 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
     }
     let unit = acc.unit.clone();
     let was_active = unit.as_deref().is_some_and(|u| core::unit_state(u).active);
-    let out = Arc::new(Mutex::new(String::new()));
+    let out = Arc::new(Mutex::new(PreviewLog::default()));
     let cancelled = Arc::new(AtomicBool::new(false));
     let confdir = acc.confdir.clone();
     let busy = match core::BusyMarker::try_new(&confdir) {
@@ -1892,7 +2003,7 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
                 .arg(&confdir)
                 .args(change.mode.client_args())
                 .args(["--dry-run", "--verbose"]);
-            let (mut child, _, readers) = spawn_capture(cmd, out, false)
+            let (mut child, readers) = spawn_preview_capture(cmd, out)
                 .map_err(|e| format!("Couldn't start the sync engine: {e}"))?;
             let child_pid = child.id();
             let raw_fd =
@@ -1955,7 +2066,7 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
             ui.set_p_busy(false);
             match r {
                 Ok(ok) => {
-                    let mut s = summarize(&output, ok, folders_changed);
+                    let mut s = summarize_preview(&output, ok, folders_changed);
                     if s.can_apply && !note.is_empty() {
                         s.text = format!("{}\n\n{note}", s.text.trim_end());
                     }
@@ -1978,49 +2089,29 @@ struct Summary {
     can_apply: bool,
 }
 
+#[cfg(test)]
 fn summarize(output: &str, ok: bool, folders_changed: bool) -> Summary {
-    let clean = |p: &str| {
-        let p = p.split(" ... ").next().unwrap_or(p).trim();
-        p.strip_prefix("./").unwrap_or(p).to_string()
-    };
-    let num_after = |line: &str, prefix: &str| -> Option<u64> {
-        line.trim().strip_prefix(prefix)?.trim().parse().ok()
-    };
-    let (mut downloads, mut uploads) = (0u64, 0u64);
-    let (mut online_del, mut local_del, mut errors): (Vec<String>, Vec<String>, Vec<String>) =
-        (vec![], vec![], vec![]);
+    let mut log = PreviewLog::default();
     for line in output.lines() {
-        let l = line.trim();
-        if let Some(n) = num_after(l, "Number of items to download from Microsoft OneDrive:") {
-            downloads += n;
-        } else if let Some(n) = num_after(l, "New items to upload to Microsoft OneDrive:") {
-            uploads += n;
-        } else if let Some(p) = l.strip_prefix("Deleting item from Microsoft OneDrive: ") {
-            online_del.push(clean(p));
-        } else if let Some(p) = l
-            .strip_prefix("Deleting local file: ")
-            .or_else(|| l.strip_prefix("Deleting local directory: "))
-            // "download only" cleaning up what isn't online
-            .or_else(|| l.strip_prefix("Attempting removal of local file: "))
-            .or_else(|| l.strip_prefix("Attempting removal of local directory: "))
-        {
-            local_del.push(clean(p));
-        } else if l.starts_with("ERROR") {
-            errors.push(l.to_string());
-        }
+        log.observe(line);
     }
+    summarize_preview(&log, ok, folders_changed)
+}
+
+fn summarize_preview(output: &PreviewLog, ok: bool, folders_changed: bool) -> Summary {
     if !ok {
-        let tail: Vec<&str> = output
-            .lines()
-            .rev()
-            .filter(|l| !l.trim().is_empty())
-            .take(6)
-            .collect();
-        let detail = if errors.is_empty() {
-            tail.into_iter().rev().collect::<Vec<_>>().join("\n")
-        } else {
-            errors.join("\n")
-        };
+        let detail = output.first_error.as_deref().map_or_else(
+            || {
+                output
+                    .tail
+                    .iter()
+                    .filter(|l| !l.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            },
+            str::to_string,
+        );
         return Summary {
             text: "The dry run failed, so nothing was changed. Your previous settings will be restored when you close this.".into(),
             warn: detail,
@@ -2031,16 +2122,20 @@ fn summarize(output: &str, ok: bool, folders_changed: bool) -> Summary {
         "Dry run finished — nothing has changed yet. If you apply this, the sync engine will:\n",
     );
     text.push_str(&format!(
-        "  •  download {downloads} item(s) to this computer\n"
+        "  •  download {} item(s) to this computer\n",
+        output.downloads
     ));
-    text.push_str(&format!("  •  upload {uploads} item(s) to OneDrive\n"));
+    text.push_str(&format!(
+        "  •  upload {} item(s) to OneDrive\n",
+        output.uploads
+    ));
     text.push_str(&format!(
         "  •  delete {} item(s) online\n",
-        online_del.len()
+        output.online_deletions
     ));
     text.push_str(&format!(
         "  •  delete {} item(s) on this computer\n",
-        local_del.len()
+        output.local_deletions
     ));
     if folders_changed {
         text.push_str(
@@ -2048,25 +2143,33 @@ fn summarize(output: &str, ok: bool, folders_changed: bool) -> Summary {
         );
     }
     let mut warn = String::new();
-    for (label, list) in [
-        ("Online deletions", &online_del),
-        ("Deletions on this computer", &local_del),
+    for (label, count, samples) in [
+        (
+            "Online deletions",
+            output.online_deletions,
+            &output.online_samples,
+        ),
+        (
+            "Deletions on this computer",
+            output.local_deletions,
+            &output.local_samples,
+        ),
     ] {
-        if !list.is_empty() {
+        if count > 0 {
             warn.push_str(&format!("{label}:\n"));
-            for p in list.iter().take(8) {
+            for p in samples {
                 warn.push_str(&format!("  {p}\n"));
             }
-            if list.len() > 8 {
-                warn.push_str(&format!("  …and {} more\n", list.len() - 8));
+            if count > samples.len() as u64 {
+                warn.push_str(&format!("  …and {} more\n", count - samples.len() as u64));
             }
         }
     }
-    if !errors.is_empty() {
+    if output.errors > 0 {
         warn.push_str(&format!(
             "{} warning(s) during the check, e.g.: {}\n",
-            errors.len(),
-            errors[0]
+            output.errors,
+            output.first_error.as_deref().unwrap_or("see the sync log")
         ));
     }
     Summary {
@@ -2498,9 +2601,8 @@ fn update_preview_live(ctx: &Shared) {
         return;
     };
     let out = p.out.lock().unwrap();
-    if let Some(last) = out.lines().rev().map(str::trim).find(|l| !l.is_empty()) {
-        let last: String = last.chars().take(110).collect();
-        c.ui().set_p_live(ss(last));
+    if !out.last_line.is_empty() {
+        c.ui().set_p_live(ss(out.last_line.clone()));
     }
 }
 
@@ -5426,6 +5528,23 @@ mod tests {
         assert!(s.can_apply);
         assert!(!summarize("ERROR: boom", false, false).can_apply);
         assert!(!summarize("", true, false).text.contains("Folders you stop"));
+    }
+
+    #[test]
+    fn dry_run_capture_keeps_totals_and_a_bounded_tail() {
+        let mut log = PreviewLog::default();
+        for n in 0..10_000 {
+            log.observe(&format!(
+                "Deleting item from Microsoft OneDrive: /Team/Folder/file-{n}.txt"
+            ));
+        }
+        assert_eq!(log.online_deletions, 10_000);
+        assert_eq!(log.online_samples.len(), 8);
+        assert_eq!(log.tail.len(), 6);
+        assert!(log.last_line.ends_with("file-9999.txt"));
+        let summary = summarize_preview(&log, true, false);
+        assert!(summary.text.contains("delete 10000 item(s) online"));
+        assert!(summary.warn.contains("…and 9992 more"));
     }
 
     #[test]
