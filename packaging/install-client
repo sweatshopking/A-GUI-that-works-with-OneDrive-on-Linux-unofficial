@@ -16,7 +16,7 @@ step() { echo "STEP $*"; }
 source_in_use() {
     pat="npreining:/debian-ubuntu-onedrive/$1"
     for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list; do
-        [ -f "$f" ] && [ "$f" != /etc/apt/sources.list.d/onedrive.list ] &&
+        [ -f "$f" ] &&
             grep -qsE "^[[:space:]]*deb[[:space:]].*$pat" "$f" && return 0
     done
     for f in /etc/apt/sources.list.d/*.sources; do
@@ -44,7 +44,17 @@ apt_install() {
     if source_in_use "$1"; then
         step "The client's package source is already set up."
     else
+        list=/etc/apt/sources.list.d/onedrive.list
+        if [ -e "$list" ] || [ -L "$list" ]; then
+            echo "A OneDrive package source made for another system version is already set up ($list). It was left as it is: update it with the client's installation instructions, then try again." >&2
+            exit 1
+        fi
         step "Adding the OneDrive client's package source…"
+        if command -v gpg >/dev/null; then
+            key=/usr/share/keyrings/obs-onedrive.gpg
+        else
+            key=/usr/share/keyrings/obs-onedrive.asc
+        fi
         tmp="$(mktemp)"
         trap 'rm -f "$tmp"' EXIT
         if [ -x /usr/lib/apt/apt-helper ]; then
@@ -56,15 +66,19 @@ apt_install() {
         fi
         grep -q "BEGIN PGP PUBLIC KEY BLOCK" "$tmp" || { echo "The package source's signing key didn't download correctly." >&2; exit 1; }
         # apt reads a key in text form only from a .asc file; gpg turns it into the guide's .gpg file
-        if command -v gpg >/dev/null; then
-            key=/usr/share/keyrings/obs-onedrive.gpg
-            gpg --dearmor --yes -o "$key" "$tmp"
+        if [ -e "$key" ] || [ -L "$key" ]; then
+            echo "The existing signing key $key was left unchanged." >&2
+        elif command -v gpg >/dev/null; then
+            gpg --dearmor -o "$key" "$tmp"
+            chmod 644 "$key"
         else
-            key=/usr/share/keyrings/obs-onedrive.asc
             cp "$tmp" "$key"
+            chmod 644 "$key"
         fi
-        chmod 644 "$key"
-        echo "deb [arch=$(dpkg --print-architecture) signed-by=$key] $repo ./" > /etc/apt/sources.list.d/onedrive.list
+        (set -C; echo "deb [arch=$(dpkg --print-architecture) signed-by=$key] $repo ./" > "$list") || {
+            echo "A OneDrive package source made for another system version is already set up ($list). It was left as it is: update it with the client's installation instructions, then try again." >&2
+            exit 1
+        }
     fi
     # A system-wide "start at login" for the client (an admin's choice, or left by an older onedrive
     # package) is never changed here: the app reports it and switches it off only when asked.

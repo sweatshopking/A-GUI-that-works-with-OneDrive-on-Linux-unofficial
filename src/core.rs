@@ -557,6 +557,13 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
     let base = path.file_name().unwrap_or_default().to_string_lossy();
+    let mode = fs::symlink_metadata(path)
+        .ok()
+        .filter(|m| m.file_type().is_file())
+        .map(|m| {
+            use std::os::unix::fs::PermissionsExt;
+            m.permissions().mode()
+        });
     let mut created = None;
     for _ in 0..32 {
         let n = NEXT_TEMP.fetch_add(1, Ordering::Relaxed);
@@ -567,6 +574,10 @@ pub fn atomic_write(path: &Path, data: &[u8]) -> std::io::Result<()> {
             .open(&candidate)
         {
             Ok(f) => {
+                if let Some(mode) = mode {
+                    use std::os::unix::fs::PermissionsExt;
+                    f.set_permissions(fs::Permissions::from_mode(mode))?;
+                }
                 created = Some((candidate, f));
                 break;
             }
@@ -704,7 +715,11 @@ impl ClientConfig {
         let pos = self.lines.iter().position(|l| Self::key_of(l) == Some(key));
         self.lines.retain(|l| Self::key_of(l) != Some(key));
         if let Some(v) = value {
-            let line = format!("{key} = \"{}\"", v.replace('"', "\\\""));
+            let value = v
+                .chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .collect::<String>();
+            let line = format!("{key} = \"{}\"", value.replace('"', "\\\""));
             let at = pos.unwrap_or(self.lines.len()).min(self.lines.len());
             self.lines.insert(at, line);
         }
@@ -912,7 +927,10 @@ pub fn slug(s: &str) -> String {
 pub fn systemd_quote(s: &str) -> String {
     format!(
         "\"{}\"",
-        s.replace('\\', "\\\\")
+        s.chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect::<String>()
+            .replace('\\', "\\\\")
             .replace('"', "\\\"")
             .replace('%', "%%")
     )
@@ -1184,7 +1202,7 @@ pub fn desktop_exec() -> String {
 
 pub fn desktop_exec_arg(arg: &str) -> String {
     let mut out = String::from("\"");
-    for c in arg.chars() {
+    for c in arg.chars().map(|c| if c.is_control() { ' ' } else { c }) {
         match c {
             '"' | '`' | '$' => {
                 out.push_str(r"\\");
@@ -2900,6 +2918,27 @@ mod tests {
             r#""/home/a b/100%% \\"\\$x\\".AppImage""#
         );
         assert_eq!(desktop_exec_arg(r"/a\b"), r#""/a\\\\b""#);
+        assert_eq!(
+            desktop_exec_arg("/home/me\nExec=/bin/evil"),
+            "\"/home/me Exec=/bin/evil\""
+        );
+    }
+
+    #[test]
+    fn atomic_write_keeps_existing_file_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let dir = std::env::temp_dir().join(format!("lodg-atomic-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config");
+        fs::write(&path, b"old").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        atomic_write(&path, b"new").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        assert_eq!(metadata.permissions().mode() & 0o777, 0o600);
+        assert_eq!(metadata.nlink(), 1);
+        assert_eq!(fs::read(&path).unwrap(), b"new");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2913,6 +2952,11 @@ mod tests {
             Some("100% Work".into())
         );
         assert_eq!(unit_text("two\nlines"), "two lines");
+        assert_eq!(
+            systemd_quote("/home/me\nExecStart=/bin/evil"),
+            "\"/home/me ExecStart=/bin/evil\""
+        );
+        assert_eq!(systemd_quote("100%\twork"), "\"100%% work\"");
     }
 
     #[test]
@@ -3459,6 +3503,14 @@ mod tests {
             Some("Temp|Projects/Old")
         );
         assert_eq!(c.get_joined("skip_file"), None);
+        c.set("sync_dir", Some("~/OneDrive\nmalicious = true"));
+        assert_eq!(
+            c.get("sync_dir").as_deref(),
+            Some("~/OneDrive malicious = true")
+        );
+        c.save().unwrap();
+        let saved = fs::read_to_string(dir.join("config")).unwrap();
+        assert!(!saved.contains("\nmalicious = true"));
         // writing it back makes one line in place of the first
         c.set("skip_dir", Some("Temp|Projects/Old|Cache"));
         assert_eq!(

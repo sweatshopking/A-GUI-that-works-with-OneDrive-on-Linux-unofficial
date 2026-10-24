@@ -192,6 +192,7 @@ pub fn remove_user_files() -> Vec<String> {
 /// kf6/overlayicon. The .deb and .rpm install ours there; an AppImage carries a copy and offers
 /// to install it (one password prompt).
 pub const DOLPHIN_PLUGIN: &str = "drivedeck-badges.so";
+const DOLPHIN_INSTALL_SCRIPT: &str = r#"umask 022; mkdir -p "$1" || exit; tmp=$(mktemp "$1/.drivedeck-badges.so.XXXXXX") || exit; trap 'rm -f -- "$tmp"' EXIT; cat > "$tmp" && chmod 644 "$tmp" && mv -f -- "$tmp" "$1/drivedeck-badges.so""#;
 const QT_PLUGIN_DIRS: [&str; 4] = [
     "/usr/lib/qt6/plugins",
     "/usr/lib64/qt6/plugins",
@@ -243,9 +244,8 @@ pub fn install_dolphin_plugin() -> Result<(), String> {
         .ok_or("Dolphin badges need Plasma 6.")?
         .join("kf6/overlayicon");
     let bytes = std::fs::read(&src).map_err(|e| format!("Couldn't read the plugin: {e}"))?;
-    let script = r#"umask 022; mkdir -p "$1" && cat > "$1/.drivedeck-badges.so.new" && mv -f "$1/.drivedeck-badges.so.new" "$1/drivedeck-badges.so""#;
     let mut child = Command::new(crate::clientinstall::elevate())
-        .args(["/bin/sh", "-c", script, "sh"])
+        .args(["/bin/sh", "-c", DOLPHIN_INSTALL_SCRIPT, "sh"])
         .arg(&dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -335,6 +335,34 @@ pub fn serve() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dolphin_installer_does_not_follow_a_planted_temp_symlink() {
+        let dir = std::env::temp_dir().join(format!("lodg-plugin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let destination = dir.join("plugins");
+        let protected = dir.join("protected");
+        std::fs::write(&protected, b"keep me").unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::os::unix::fs::symlink(&protected, destination.join(".drivedeck-badges.so.new"))
+            .unwrap();
+        let result = std::process::Command::new("/bin/sh")
+            .args(["-c", DOLPHIN_INSTALL_SCRIPT, "sh"])
+            .arg(&destination)
+            .stdin(std::process::Stdio::piped())
+            .spawn();
+        let mut child = result.unwrap();
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(b"plugin").unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read(&protected).unwrap(), b"keep me");
+        assert_eq!(
+            std::fs::read(destination.join(DOLPHIN_PLUGIN)).unwrap(),
+            b"plugin"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn acc(root: &str, phase: Phase, moving: &[&str], blocked: &[&str]) -> AccState {
         AccState {
