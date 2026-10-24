@@ -4205,6 +4205,9 @@ fn move_folder_to(ctx: &Shared, acc: &AccountInfo, picked: &Path) {
 fn add_search(ctx: &Shared) {
     let c = ctx.borrow();
     let ui = c.ui();
+    if ui.get_add_busy() {
+        return;
+    }
     let accs = business_accounts(&c);
     let Some(from) = accs.get(ui.get_add_from_index().max(0) as usize).cloned() else {
         ui.set_add_msg(ss("Add and sign in to a work or school account first."));

@@ -2176,6 +2176,7 @@ export component AppWindow inherits Window {
                                         accessible-label: "Work or school account for this library";
                                         model: root.add-from;
                                         current-index <=> root.add-from-index;
+                                        enabled: !root.add-busy;
                                         horizontal-stretch: 1;
                                     }
                                 }
@@ -2189,6 +2190,7 @@ export component AppWindow inherits Window {
                                     LineEdit {
                                         accessible-label: "SharePoint site address or name";
                                         text <=> root.add-query;
+                                        enabled: !root.add-busy;
                                         placeholder-text: "Paste the site's address, or type part of its name";
                                         accepted => {
                                             root.add-search();
