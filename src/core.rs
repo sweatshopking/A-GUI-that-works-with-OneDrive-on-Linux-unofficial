@@ -1,9 +1,9 @@
 //! Shared plumbing: finding the onedrive client, accounts, config files, systemd units,
 //! app settings and log parsing. Used by both the tray and the settings window.
 
-use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::fs::{self, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -2418,26 +2418,121 @@ pub fn blocked_files(unit: &str) -> Vec<Blocked> {
     let Some(since) = since.filter(|_| !list.is_empty()) else {
         return list;
     };
-    // a file blocked earlier may have synced since, which only the busy file lines show, so
-    // replay every line about those files (and client starts) from the first block on
-    let mut pattern = String::from("Reading configuration file: ");
-    for b in &list {
-        pattern.push('|');
-        pattern.push_str(&regex_escape(&b.path));
-    }
+    // A file blocked earlier may have synced since, which only the busy file lines show. Read
+    // newest first and stop once each currently blocked path's latest event is known; retaining
+    // the entire journal since the first block would grow with the account's lifetime.
+    let pattern = list
+        .iter()
+        .map(|b| regex_escape(&b.path))
+        .collect::<Vec<_>>()
+        .join("|");
     let since = format!("@{}", since.timestamp());
-    let Some(lines) = journal_grep(unit, &pattern, &["--since", &since]) else {
-        return list;
-    };
-    let mut replayed = Vec::new();
-    for line in &lines {
-        if let Some((_, msg)) = split_journal_line(line)
-            && let Some(ev) = parse_log(msg)
-        {
-            track_blocked(&mut replayed, &ev);
+    replay_blocked_from_journal(unit, &pattern, &since, &list).unwrap_or(list)
+}
+
+struct BlockedReplay {
+    wanted: HashSet<String>,
+    latest: HashMap<String, Option<BlockReason>>,
+}
+
+impl BlockedReplay {
+    fn new(blocked: &[Blocked]) -> Self {
+        Self {
+            wanted: blocked.iter().map(|b| b.path.clone()).collect(),
+            latest: HashMap::new(),
         }
     }
-    replayed
+
+    /// Lines arrive newest first, so the first file or blocked event wins for each path.
+    fn observe(&mut self, event: &LogEvent) {
+        let update = match event {
+            LogEvent::Blocked { path, reason } => Some((path, Some(*reason))),
+            LogEvent::File { path, .. } => Some((path, None)),
+            _ => None,
+        };
+        if let Some((path, state)) = update
+            && self.wanted.contains(path)
+        {
+            self.latest.entry(path.clone()).or_insert(state);
+        }
+    }
+
+    fn complete(&self) -> bool {
+        self.latest.len() == self.wanted.len()
+    }
+
+    fn finish(self, blocked: &[Blocked]) -> Vec<Blocked> {
+        blocked
+            .iter()
+            .filter_map(|b| match self.latest.get(&b.path) {
+                Some(Some(reason)) => Some(Blocked {
+                    path: b.path.clone(),
+                    reason: *reason,
+                }),
+                Some(None) => None,
+                None => Some(b.clone()),
+            })
+            .collect()
+    }
+}
+
+fn replay_blocked_from_journal(
+    unit: &str,
+    pattern: &str,
+    since: &str,
+    blocked: &[Blocked],
+) -> Option<Vec<Blocked>> {
+    let mut child = Command::new("journalctl")
+        .args([
+            "--user",
+            "-u",
+            unit,
+            "-o",
+            "short-unix",
+            "--no-pager",
+            "-q",
+            "--since",
+            since,
+            "--reverse",
+            "--grep",
+            pattern,
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let stdout = child.stdout.take()?;
+    let mut reader = BufReader::new(stdout);
+    let mut replay = BlockedReplay::new(blocked);
+    let mut line = String::new();
+    loop {
+        match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return None;
+            }
+        }
+        if let Some((_, msg)) = split_journal_line(&line)
+            && let Some(event) = parse_log(msg)
+        {
+            replay.observe(&event);
+            if replay.complete() {
+                break;
+            }
+        }
+        line.clear();
+    }
+    drop(reader);
+    if replay.complete() {
+        let _ = child.kill();
+        let _ = child.wait();
+        Some(replay.finish(blocked))
+    } else {
+        child.wait().ok()?.success().then(|| replay.finish(blocked))
+    }
 }
 
 /// Lines of the unit's journal matching a PCRE2 pattern, or None if journalctl can't grep.
@@ -3335,6 +3430,46 @@ mod tests {
         track_blocked(&mut list, &ev);
         track_blocked(&mut list, &LogEvent::ClientStart);
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn blocked_replay_keeps_only_each_paths_newest_event() {
+        let blocked = vec![
+            Blocked {
+                path: "a.txt".into(),
+                reason: BlockReason::Locked,
+            },
+            Blocked {
+                path: "b.txt".into(),
+                reason: BlockReason::NotNow,
+            },
+        ];
+        let mut replay = BlockedReplay::new(&blocked);
+        replay.observe(&LogEvent::File {
+            kind: "↑",
+            path: "b.txt".into(),
+        });
+        replay.observe(&LogEvent::Blocked {
+            path: "a.txt".into(),
+            reason: BlockReason::ReadOnly,
+        });
+        // Older lines must not override the newest event for either path.
+        replay.observe(&LogEvent::File {
+            kind: "↑",
+            path: "a.txt".into(),
+        });
+        replay.observe(&LogEvent::Blocked {
+            path: "b.txt".into(),
+            reason: BlockReason::Locked,
+        });
+        assert!(replay.complete());
+        assert_eq!(
+            replay.finish(&blocked),
+            vec![Blocked {
+                path: "a.txt".into(),
+                reason: BlockReason::ReadOnly,
+            }]
+        );
     }
 
     #[test]
