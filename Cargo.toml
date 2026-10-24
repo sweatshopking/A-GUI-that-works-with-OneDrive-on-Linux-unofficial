@@ -1,6 +1,6 @@
 [package]
 name = "drivedeck"
-version = "0.4.1"
+version = "1.0.0"
 edition = "2024"
 description = "DriveDeck for OneDrive: the easiest, most complete way to use OneDrive on Linux"
 license = "GPL-3.0-or-later"
