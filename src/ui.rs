@@ -82,6 +82,7 @@ impl Tree {
 
 struct SignIn {
     key: String,
+    unit: Option<String>,
     child: Child,
     stdin: Option<ChildStdin>,
     out: Arc<Mutex<String>>,
@@ -135,6 +136,7 @@ struct Ctx {
     activity: Vec<String>,
     libraries: Vec<graph::Library>,
     signin: Option<SignIn>,
+    signin_starting: Option<Arc<AtomicBool>>,
     preview: Option<Preview>,
     /// What the client's installer has printed so far, while it runs.
     install_out: Option<Arc<Mutex<String>>>,
@@ -2561,37 +2563,110 @@ fn load_activity(ctx: &Shared, acc: &AccountInfo) {
 // ---------------------------------------------------------------- sign in / out
 
 fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
-    if ctx.borrow().signin.is_some() {
+    if ctx.borrow().signin.is_some() || ctx.borrow().signin_starting.is_some() {
         return;
     }
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let acc = acc.clone();
+    ctx.borrow_mut().signin_starting = Some(cancelled.clone());
+    let ui = ctx.borrow().ui();
+    ui.set_si_text(ss("Preparing sign-in…"));
+    ui.set_si_need_paste(false);
+    ui.set_si_has_url(false);
+    ui.set_si_done(false);
+    ui.set_si_paste(ss(""));
+    ui.set_si_visible(true);
+    let cancel_for_work = cancelled.clone();
+    bg(
+        move || begin_sign_in(acc, enable_after, cancel_for_work),
+        move |ctx, result| {
+            let is_current = ctx
+                .borrow()
+                .signin_starting
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &cancelled));
+            if !is_current {
+                if let SignInStart::Ready(si) = result {
+                    close_sign_in(si);
+                }
+                return;
+            }
+            ctx.borrow_mut().signin_starting = None;
+            match result {
+                SignInStart::Ready(si) if !cancelled.load(Ordering::Acquire) => {
+                    ctx.borrow().ui().set_si_text(ss("Opening the Microsoft sign-in page in your browser…\n\nLog in and approve access. This window updates by itself when you're done."));
+                    ctx.borrow_mut().signin = Some(si);
+                }
+                SignInStart::Ready(si) => close_sign_in(si),
+                SignInStart::Failed(message, client_blocked) => {
+                    let ui = ctx.borrow().ui();
+                    ui.set_si_visible(false);
+                    ui.set_s_msg(ss(message));
+                    if client_blocked {
+                        check_client();
+                    }
+                }
+                SignInStart::Cancelled => ctx.borrow().ui().set_si_visible(false),
+            }
+        },
+    );
+}
+
+enum SignInStart {
+    Ready(SignIn),
+    Failed(String, bool),
+    Cancelled,
+}
+
+fn begin_sign_in(acc: AccountInfo, enable_after: bool, cancelled: Arc<AtomicBool>) -> SignInStart {
     if let Some(why) = client_blocker() {
-        ctx.borrow().ui().set_s_msg(ss(why));
-        check_client();
-        return;
+        return SignInStart::Failed(why, true);
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return SignInStart::Cancelled;
     }
     // Cover the whole transition so the tray cannot restart this account between stop and spawn.
     let busy = match core::BusyMarker::try_new(&acc.confdir) {
         Ok(marker) => marker,
         Err(e) => {
-            ctx.borrow().ui().set_s_msg(ss(format!(
-                "Couldn't protect this account from a second sync process, so sign-in was not started: {e}"
-            )));
-            return;
+            return SignInStart::Failed(
+                format!(
+                    "Couldn't protect this account from a second sync process, so sign-in was not started: {e}"
+                ),
+                false,
+            );
         }
     };
     let was_active = acc
         .unit
         .as_deref()
         .is_some_and(|u| core::unit_state(u).active);
+    if cancelled.load(Ordering::Acquire) {
+        return SignInStart::Cancelled;
+    }
     if let Some(u) = &acc.unit {
         let (ok, err) = core::systemctl(&["stop", u]);
         if !ok {
-            ctx.borrow().ui().set_s_msg(ss(format!(
-                "Couldn't stop the sync engine before signing in: {}",
-                err.trim()
-            )));
-            return;
+            return SignInStart::Failed(
+                format!(
+                    "Couldn't stop the sync engine before signing in: {}",
+                    err.trim()
+                ),
+                false,
+            );
         }
+    }
+    if cancelled.load(Ordering::Acquire) {
+        return match restore_signin_service(&acc, was_active) {
+            Some(e) => SignInStart::Failed(
+                format!(
+                    "The sign-in was cancelled, but the previously running sync engine couldn't be restarted: {}",
+                    e.trim()
+                ),
+                false,
+            ),
+            None => SignInStart::Cancelled,
+        };
     }
     let out = Arc::new(Mutex::new(String::new()));
     let mut cmd = core::client_command();
@@ -2603,46 +2678,73 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
     }
     let url_file = browser_shim(&mut cmd);
     core::activate(&mut cmd);
-    let ui = ctx.borrow().ui();
-    let (child, stdin, readers) = match spawn_capture(cmd, out.clone(), true) {
-        Ok(c) => c,
+    match spawn_capture(cmd, out.clone(), true) {
+        Ok((child, stdin, readers)) => SignInStart::Ready(SignIn {
+            key: acc.key(),
+            unit: acc.unit.clone(),
+            child,
+            stdin,
+            out,
+            readers,
+            exited_polls: 0,
+            url: None,
+            url_file,
+            enable_after,
+            was_active,
+            finished: false,
+            _busy: busy,
+        }),
         Err(e) => {
-            let restore = if was_active {
-                core::systemctl(&["start", acc.unit.as_deref().unwrap()])
-            } else {
-                (true, String::new())
-            };
-            ui.set_s_msg(ss(if restore.0 {
-                format!("Couldn't start the sign-in process: {e}")
-            } else {
-                format!(
-                    "Couldn't start the sign-in process: {e}. The previously running sync engine also couldn't be restarted: {}",
-                    restore.1.trim()
-                )
-            }));
-            return;
+            let restore = restore_signin_service(&acc, was_active);
+            SignInStart::Failed(
+                if let Some(err) = restore {
+                    format!(
+                        "Couldn't start the sign-in process: {e}. The previously running sync engine also couldn't be restarted: {}",
+                        err.trim()
+                    )
+                } else {
+                    format!("Couldn't start the sign-in process: {e}")
+                },
+                false,
+            )
         }
-    };
-    ui.set_si_text(ss("Opening the Microsoft sign-in page in your browser…\n\nLog in and approve access. This window updates by itself when you're done."));
-    ui.set_si_need_paste(false);
-    ui.set_si_has_url(false);
-    ui.set_si_done(false);
-    ui.set_si_paste(ss(""));
-    ui.set_si_visible(true);
-    ctx.borrow_mut().signin = Some(SignIn {
-        key: acc.key(),
-        child,
-        stdin,
-        out,
-        readers,
-        exited_polls: 0,
-        url: None,
-        url_file,
-        enable_after,
-        was_active,
-        finished: false,
-        _busy: busy,
-    });
+    }
+}
+
+fn restore_signin_service(acc: &AccountInfo, was_active: bool) -> Option<String> {
+    if was_active {
+        acc.unit.as_deref().and_then(|u| {
+            let (ok, err) = core::systemctl(&["start", u]);
+            (!ok).then_some(err)
+        })
+    } else {
+        None
+    }
+}
+
+fn close_sign_in(mut si: SignIn) {
+    bg(
+        move || {
+            let unit = (!si.finished && si.was_active)
+                .then(|| si.unit.clone())
+                .flatten();
+            let _ = si.child.kill();
+            let _ = si.child.wait();
+            drop(si); // release the busy marker before restoring the previous service
+            unit.and_then(|u| {
+                let (ok, err) = core::systemctl(&["start", &u]);
+                (!ok).then_some(err)
+            })
+        },
+        |ctx, restart_error| {
+            if let Some(err) = restart_error {
+                ctx.borrow().ui().set_s_msg(ss(format!(
+                    "The sign-in window closed, but the previously running sync engine couldn't be restarted: {}",
+                    err.trim()
+                )));
+            }
+        },
+    );
 }
 
 /// Called on a timer while a sign-in is running.
@@ -2716,17 +2818,26 @@ fn poll_signin(ctx: &Shared) {
             "Sign-in didn't complete.\n\n{}",
             friendly_signin_error(&detail)
         )));
-        if was_active && let Some(unit) = acc.unit.as_deref() {
-            let (ok, err) = core::systemctl(&["start", unit]);
-            if !ok {
-                ui.set_s_msg(ss(format!(
-                    "Sign-in failed, and the previously running sync engine couldn't be restarted: {}",
-                    err.trim()
-                )));
-            }
-        }
+        let restart_unit = was_active.then(|| acc.unit.clone()).flatten();
         ui.set_si_done(true);
         ui.set_si_need_paste(false);
+        drop(c);
+        if let Some(unit) = restart_unit {
+            bg(
+                move || {
+                    let (ok, err) = core::systemctl(&["start", &unit]);
+                    (!ok).then_some(err)
+                },
+                |ctx, restart_error| {
+                    if let Some(err) = restart_error {
+                        ctx.borrow().ui().set_s_msg(ss(format!(
+                            "Sign-in failed, and the previously running sync engine couldn't be restarted: {}",
+                            err.trim()
+                        )));
+                    }
+                },
+            );
+        }
     }
 }
 
@@ -2839,27 +2950,15 @@ fn signin_submit(ctx: &Shared) {
 }
 
 fn signin_close(ctx: &Shared) {
-    let si = ctx.borrow_mut().signin.take();
-    if let Some(mut si) = si {
-        let restart_unit = if !si.finished && si.was_active {
-            ctx.borrow().account(&si.key).and_then(|a| a.unit.clone())
-        } else {
-            None
-        };
-        if !si.finished {
-            let _ = si.child.kill();
-        }
-        let _ = si.child.wait();
-        drop(si); // release the busy marker before restoring the previous service
-        if let Some(unit) = restart_unit {
-            let (ok, err) = core::systemctl(&["start", &unit]);
-            if !ok {
-                ctx.borrow().ui().set_s_msg(ss(format!(
-                    "The sign-in window closed, but the previously running sync engine couldn't be restarted: {}",
-                    err.trim()
-                )));
-            }
-        }
+    let (cancelled, si) = {
+        let mut c = ctx.borrow_mut();
+        (c.signin_starting.take(), c.signin.take())
+    };
+    if let Some(cancelled) = cancelled {
+        cancelled.store(true, Ordering::Release);
+    }
+    if let Some(si) = si {
+        close_sign_in(si);
     }
     ctx.borrow().ui().set_si_visible(false);
     refresh(ctx);
@@ -4596,7 +4695,7 @@ fn listen_for_hand_offs() {
                 with_ctx(|ctx| {
                     let busy = {
                         let c = ctx.borrow();
-                        c.preview.is_some() || c.signin.is_some()
+                        c.preview.is_some() || c.signin.is_some() || c.signin_starting.is_some()
                     };
                     // an update replaced us: reopen as the new version, unless that would
                     // interrupt a preview or a sign-in
@@ -4735,6 +4834,7 @@ pub fn run(account: Option<String>) {
         activity: Vec::new(),
         libraries: Vec::new(),
         signin: None,
+        signin_starting: None,
         preview: None,
         install_out: None,
         install_seen: 0,
@@ -5179,10 +5279,15 @@ pub fn run(account: Option<String>) {
                     return slint::CloseRequestResponse::KeepWindowShown;
                 }
             }
-            let signin = w.borrow_mut().signin.take();
-            if let Some(mut si) = signin {
-                let _ = si.child.kill();
-                let _ = si.child.wait();
+            let (cancelled, signin) = {
+                let mut c = w.borrow_mut();
+                (c.signin_starting.take(), c.signin.take())
+            };
+            if let Some(cancelled) = cancelled {
+                cancelled.store(true, Ordering::Release);
+            }
+            if let Some(si) = signin {
+                close_sign_in(si);
             }
             window_hiding();
             slint::CloseRequestResponse::HideWindow
