@@ -114,7 +114,7 @@ jobs:
           - Fedora, openSUSE: the \`.rpm\`
           - Anything else: the \`.AppImage\`
 
-          **First install the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg, version 2.5 or newer** — it does the syncing and isn't included, so it keeps getting updates from its author. The [README](https://github.com/${GITHUB_REPOSITORY}#install) shows how for each distribution, and the app tells you if it's missing. See [THIRD-PARTY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/packaging/THIRD-PARTY.md) for what is included.
+          **The app sets up the syncing for you.** If the [OneDrive Client for Linux](https://github.com/abraunegg/onedrive) by abraunegg (which does the actual syncing) isn't installed, the app installs it with one password prompt. It's kept as a separate package so it keeps getting updates from its author. See [THIRD-PARTY.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/packaging/THIRD-PARTY.md) for what is included.
 
           Not made by or affiliated with Microsoft.
           EOF
