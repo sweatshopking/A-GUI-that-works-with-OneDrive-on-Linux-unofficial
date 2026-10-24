@@ -12,8 +12,13 @@ def state(p):
         if s in p.rsplit("/", 1)[-1]: return s
     return "synced"
 def call(conn, sender, path, iface, method, params, inv):
+    global calls
+    calls += 1
+    with open("/tmp/badges-call-count", "w") as f:
+        f.write(str(calls))
     inv.return_value(GLib.Variant("(as)", ([state(p) for p in params.unpack()[0]],)))
 CONN = []
+calls = 0
 def flip():
     if os.path.exists("/tmp/badges-flip") and CONN:
         CONN[0].emit_signal(None, "/io/github/sweatshopking/DriveDeck/Badges",
@@ -21,6 +26,8 @@ def flip():
         return False
     return True
 def got_bus(conn, name):
+    with open("/tmp/badges-call-count", "w") as f:
+        f.write("0")
     CONN.append(conn)
     GLib.timeout_add(200, flip)
     conn.register_object("/io/github/sweatshopking/DriveDeck/Badges",

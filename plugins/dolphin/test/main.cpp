@@ -1,11 +1,21 @@
 // Headless check of the Dolphin badge plugin: load it the way Dolphin does and ask for badges.
 #include <KOverlayIconPlugin>
+#include <QFile>
 #include <QPluginLoader>
 #include <KPluginMetaData>
 #include <QCoreApplication>
 #include <QTimer>
 #include <QUrl>
 #include <cstdio>
+
+static int statusCalls()
+{
+    QFile f(QStringLiteral("/tmp/badges-call-count"));
+    if (!f.open(QIODevice::ReadOnly)) {
+        return -1;
+    }
+    return f.readAll().trimmed().toInt();
+}
 
 int main(int argc, char **argv)
 {
@@ -32,6 +42,12 @@ int main(int argc, char **argv)
             bad += !ok;
             printf("%s %s -> '%s'\n", ok ? "ok  " : "FAIL", c.path, qPrintable(g));
         }
+        const auto path = QUrl::fromLocalFile(QStringLiteral("/t/OneDrive/a.txt"));
+        const QStringList again = plugin->getOverlays(path);
+        const bool cached = again.value(0) == QStringLiteral("emblem-drivedeck-synced")
+            && statusCalls() == 4;
+        bad += !cached;
+        printf("%s repeated path uses cached status\n", cached ? "ok  " : "FAIL");
         // "Changed": the plugin asks again (in one call) and reports only what changed
         int reported = 0;
         QString aNow;
@@ -47,7 +63,7 @@ int main(int argc, char **argv)
         }
         QTimer::singleShot(3000, &app, &QCoreApplication::quit);
         app.exec();
-        const bool ok = reported == 1 && aNow == QStringLiteral("emblem-drivedeck-error");
+        const bool ok = reported == 1 && aNow == QStringLiteral("emblem-drivedeck-error") && statusCalls() == 5;
         bad += !ok;
         printf("%s Changed -> %d update(s), a.txt now '%s'\n", ok ? "ok  " : "FAIL", reported, qPrintable(aNow));
         remove("/tmp/badges-flip");

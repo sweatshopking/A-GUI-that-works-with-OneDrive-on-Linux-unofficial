@@ -21,14 +21,21 @@ class Badges : public KOverlayIconPlugin
 public:
     Badges()
     {
-        QDBusConnection::sessionBus().connect(Service, Path, Iface, QStringLiteral("Changed"), this,
-                                              SLOT(changed()));
+        const auto bus = QDBusConnection::sessionBus();
+        bus.connect(Service, Path, Iface, QStringLiteral("Changed"), this, SLOT(changed()));
+        bus.connect(QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
+                    QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameOwnerChanged"),
+                    this, SLOT(ownerChanged(QString,QString,QString)));
     }
 
     QStringList getOverlays(const QUrl &item) override
     {
         if (!item.isLocalFile()) {
             return {};
+        }
+        const auto cached = m_seen.constFind(item);
+        if (cached != m_seen.cend()) {
+            return emblem(cached.value());
         }
         const QString state = ask({item.toLocalFile()}).value(0);
         if (m_seen.size() >= MaxSeen && !m_seen.contains(item)) {
@@ -60,6 +67,26 @@ private Q_SLOTS:
             if (now.at(i) != was) {
                 was = now.at(i);
                 Q_EMIT overlaysChanged(m_order.at(i), emblem(was));
+            }
+        }
+    }
+
+    void ownerChanged(const QString &name, const QString &, const QString &owner)
+    {
+        if (name != Service) {
+            return;
+        }
+        if (!owner.isEmpty()) {
+            changed();
+            return;
+        }
+        // Don't leave badges looking current after the tray exits. When it starts again, one
+        // batched request below repopulates the cache.
+        for (const QUrl &u : std::as_const(m_order)) {
+            QString &state = m_seen[u];
+            if (!state.isEmpty()) {
+                state.clear();
+                Q_EMIT overlaysChanged(u, QStringList{});
             }
         }
     }
