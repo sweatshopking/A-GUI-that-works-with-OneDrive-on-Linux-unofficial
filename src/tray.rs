@@ -638,6 +638,10 @@ fn prune_followers(
     });
 }
 
+fn prune_phase_history(last_phase: &mut HashMap<String, Phase>, present: &HashSet<String>) {
+    last_phase.retain(|key, _| present.contains(key));
+}
+
 /// Waits for journal output with a short timeout so a removed account can stop a quiet follower.
 fn journal_ready(out: &BufReader<std::process::ChildStdout>, control: &FollowControl) -> bool {
     while !control.stop.load(Ordering::Acquire) {
@@ -1035,6 +1039,8 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
                     .collect()
             })
             .unwrap_or_default();
+        let present_phase_keys = phases.iter().map(|(key, ..)| key.clone()).collect();
+        prune_phase_history(&mut last_phase, &present_phase_keys);
         for (key, name, phase, unit, retrying) in &phases {
             if *phase == Phase::BigDelete
                 && *retrying
@@ -1332,6 +1338,19 @@ mod tests {
         control.done.store(true, Ordering::Release);
         prune_followers(&mut following, &HashSet::new());
         assert!(following.is_empty());
+    }
+
+    #[test]
+    fn removed_accounts_drop_phase_history() {
+        let mut history = HashMap::from([
+            ("account-a".into(), Phase::Error),
+            ("account-b".into(), Phase::UpToDate),
+        ]);
+        prune_phase_history(&mut history, &HashSet::from(["account-b".into()]));
+        assert_eq!(
+            history,
+            HashMap::from([("account-b".into(), Phase::UpToDate)])
+        );
     }
 
     #[test]
