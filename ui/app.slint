@@ -339,13 +339,35 @@ component UninstallChoice inherits Rectangle {
     callback clicked();
     border-radius: 10px;
     border-width: selected ? 2px : 1px;
-    border-color: selected ? Theme.accent : Theme.card-border;
+    border-color: fs.has-focus || selected ? Theme.accent : Theme.card-border;
     background: selected ? Theme.selected : area.has-hover && enabled ? Theme.hover : transparent;
     height: choice-layout.preferred-height;
+    accessible-role: radio-button;
+    accessible-label: root.title + ". " + root.detail;
+    accessible-checked: root.selected;
+    accessible-enabled: root.enabled;
+    accessible-action-default => {
+        if (root.enabled) {
+            root.clicked();
+        }
+    }
     area := TouchArea {
         enabled: root.enabled;
         clicked => {
+            fs.focus();
             root.clicked();
+        }
+    }
+    fs := FocusScope {
+        x: 0;
+        width: 0;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
         }
     }
     choice-layout := HorizontalLayout {
@@ -378,6 +400,47 @@ component UninstallChoice inherits Rectangle {
             Hint {
                 text: root.detail;
             }
+        }
+    }
+}
+
+// A large choice card that can be reached and activated without a mouse.
+component ChoiceCard inherits Card {
+    in property <string> title;
+    in property <string> detail;
+    callback clicked();
+    border-width: fs.has-focus ? 2px : 1px;
+    border-color: fs.has-focus ? Theme.accent : Theme.card-border;
+    accessible-role: button;
+    accessible-label: root.title + ". " + root.detail;
+    accessible-action-default => {
+        root.clicked();
+    }
+    ta := TouchArea {
+        clicked => {
+            fs.focus();
+            root.clicked();
+        }
+    }
+    fs := FocusScope {
+        x: 0;
+        width: 0;
+        key-pressed(event) => {
+            if (event.text == Key.Space || event.text == Key.Return) {
+                root.clicked();
+                return accept;
+            }
+            return reject;
+        }
+    }
+    VerticalLayout {
+        padding: 14px;
+        spacing: 4px;
+        Heading {
+            text: root.title;
+        }
+        Hint {
+            text: root.detail;
         }
     }
 }
@@ -790,15 +853,29 @@ export component AppWindow inherits Window {
                             height: 52px;
                             border-radius: 10px;
                             background: root.current == i ? Theme.selected : ta.has-hover ? Theme.hover : transparent;
+                            border-width: fs.has-focus ? 2px : 0;
+                            border-color: Theme.accent;
                             animate background { duration: Theme.quick; }
-                            accessible-role: list-item;
+                            accessible-role: button;
                             accessible-label: acc.name + ", " + acc.status;
                             accessible-action-default => {
                                 root.select(i);
                             }
                             ta := TouchArea {
                                 clicked => {
+                                    fs.focus();
                                     root.select(i);
+                                }
+                            }
+                            fs := FocusScope {
+                                x: 0;
+                                width: 0;
+                                key-pressed(event) => {
+                                    if (event.text == Key.Space || event.text == Key.Return) {
+                                        root.select(i);
+                                        return accept;
+                                    }
+                                    return reject;
                                 }
                             }
                             HorizontalLayout {
@@ -1475,6 +1552,16 @@ export component AppWindow inherits Window {
                                         spacing: 4px;
                                         Rectangle {
                                             width: 22px;
+                                            border-width: expand-focus.has-focus ? 2px : 0;
+                                            border-color: Theme.accent;
+                                            accessible-role: button;
+                                            accessible-label: row.loading ? "Loading subfolders for " + row.name : (row.expanded ? "Collapse " : "Expand ") + row.name;
+                                            accessible-enabled: row.has-children;
+                                            accessible-action-default => {
+                                                if (row.has-children) {
+                                                    root.f-expand(i);
+                                                }
+                                            }
                                             Text {
                                                 text: row.loading ? "…" : !row.has-children ? "" : row.expanded ? "▾" : "▸";
                                                 font-size: 14px;
@@ -1482,7 +1569,20 @@ export component AppWindow inherits Window {
                                             TouchArea {
                                                 enabled: row.has-children;
                                                 clicked => {
+                                                    expand-focus.focus();
                                                     root.f-expand(i);
+                                                }
+                                            }
+                                            expand-focus := FocusScope {
+                                                x: 0;
+                                                width: 0;
+                                                enabled: row.has-children;
+                                                key-pressed(event) => {
+                                                    if (event.text == Key.Space || event.text == Key.Return) {
+                                                        root.f-expand(i);
+                                                        return accept;
+                                                    }
+                                                    return reject;
                                                 }
                                             }
                                         }
@@ -2039,40 +2139,20 @@ export component AppWindow inherits Window {
                             text: "What would you like to sync?";
                             font-size: 14px;
                         }
-                        Card {
+                        ChoiceCard {
+                            title: "OneDrive";
+                            detail: "A personal Microsoft account (Outlook, Hotmail, Live) or a work or school account.";
                             height: 86px;
-                            TouchArea {
-                                clicked => {
-                                    root.add-choose(1);
-                                }
-                            }
-                            VerticalLayout {
-                                padding: 14px;
-                                spacing: 4px;
-                                Heading {
-                                    text: "OneDrive";
-                                }
-                                Hint {
-                                    text: "A personal Microsoft account (Outlook, Hotmail, Live) or a work or school account.";
-                                }
+                            clicked => {
+                                root.add-choose(1);
                             }
                         }
-                        Card {
+                        ChoiceCard {
+                            title: "SharePoint library";
+                            detail: "A document library from a SharePoint or Teams site. You'll need a work or school account added first.";
                             height: 86px;
-                            TouchArea {
-                                clicked => {
-                                    root.add-choose(2);
-                                }
-                            }
-                            VerticalLayout {
-                                padding: 14px;
-                                spacing: 4px;
-                                Heading {
-                                    text: "SharePoint library";
-                                }
-                                Hint {
-                                    text: "A document library from a SharePoint or Teams site. You'll need a work or school account added first.";
-                                }
+                            clicked => {
+                                root.add-choose(2);
                             }
                         }
                     }
@@ -2134,9 +2214,29 @@ export component AppWindow inherits Window {
                                         for lib[i] in root.add-libraries: Rectangle {
                                             height: 30px;
                                             background: root.add-lib-index == i ? Palette.selection-background.with-alpha(0.35) : lta.has-hover ? Palette.foreground.with-alpha(0.06) : transparent;
+                                            border-width: lib-focus.has-focus ? 2px : 0;
+                                            border-color: Theme.accent;
+                                            accessible-role: list-item;
+                                            accessible-label: lib;
+                                            accessible-item-index: i;
+                                            accessible-action-default => {
+                                                root.add-lib-picked(i);
+                                            }
                                             lta := TouchArea {
                                                 clicked => {
+                                                    lib-focus.focus();
                                                     root.add-lib-picked(i);
+                                                }
+                                            }
+                                            lib-focus := FocusScope {
+                                                x: 0;
+                                                width: 0;
+                                                key-pressed(event) => {
+                                                    if (event.text == Key.Space || event.text == Key.Return) {
+                                                        root.add-lib-picked(i);
+                                                        return accept;
+                                                    }
+                                                    return reject;
                                                 }
                                             }
                                             Text {
