@@ -4046,13 +4046,14 @@ fn start_tray() {
 
 fn prepare_app_page(ctx: &Shared) {
     let ui = ctx.borrow().ui();
+    let settings = AppSettings::load();
     ui.set_app_autostart(autostart_file().exists());
-    ui.set_app_stop_on_quit(AppSettings::load().stop_sync_on_quit);
-    ui.set_app_pause_metered(AppSettings::load().pause_on_metered.unwrap_or(true));
-    ui.set_app_pause_saver(AppSettings::load().pause_on_power_saver.unwrap_or(true));
-    ui.set_app_badges(AppSettings::load().show_badges.unwrap_or(true));
+    ui.set_app_stop_on_quit(settings.stop_sync_on_quit);
+    ui.set_app_pause_metered(settings.pause_on_metered.unwrap_or(true));
+    ui.set_app_pause_saver(settings.pause_on_power_saver.unwrap_or(true));
+    ui.set_app_badges(settings.show_badges.unwrap_or(true));
     ui.set_app_dolphin_offer(crate::badges::dolphin_offer());
-    let check = AppSettings::load().check_updates.unwrap_or(true);
+    let check = settings.check_updates.unwrap_or(true);
     ui.set_app_check_updates(check);
     if check {
         bg(crate::update::newer_version, |ctx, v| {
@@ -4062,20 +4063,23 @@ fn prepare_app_page(ctx: &Shared) {
     ui.set_app_version(ss(env!("CARGO_PKG_VERSION")));
     ui.set_app_is_appimage(std::env::var("APPIMAGE").is_ok());
     ui.set_app_msg(ss(""));
-    let client = match core::check_client() {
-        core::ClientCheck::Ok { path, version } => format!(
-            "Sync engine: OneDrive Client for Linux {version} ({})",
-            path.display()
-        ),
-        core::ClientCheck::TooOld { path, version } => format!(
-            "Sync engine: OneDrive Client for Linux {version} ({}) — too old, please update it.",
-            path.display()
-        ),
-        core::ClientCheck::Missing => {
-            "Sync engine: the OneDrive Client for Linux isn't installed.".into()
-        }
-    };
-    ui.set_app_client(ss(client));
+    ui.set_app_client(ss("Checking the sync engine…"));
+    bg(core::check_client, |ctx, check| {
+        let client = match check {
+            core::ClientCheck::Ok { path, version } => format!(
+                "Sync engine: OneDrive Client for Linux {version} ({})",
+                path.display()
+            ),
+            core::ClientCheck::TooOld { path, version } => format!(
+                "Sync engine: OneDrive Client for Linux {version} ({}) — too old, please update it.",
+                path.display()
+            ),
+            core::ClientCheck::Missing => {
+                "Sync engine: the OneDrive Client for Linux isn't installed.".into()
+            }
+        };
+        ctx.borrow().ui().set_app_client(ss(client));
+    });
 }
 
 /// For AppImages: add a menu entry, icon and Dolphin actions for the current user.
@@ -4676,7 +4680,8 @@ pub fn run(account: Option<String>) {
         install_out: None,
         install_seen: 0,
         update_dismissed: false,
-        refreshing: false,
+        // The first status snapshot is read off the UI thread before the window appears.
+        refreshing: true,
         refresh_again: false,
         close_when_idle: false,
         rows,
@@ -4685,28 +4690,38 @@ pub fn run(account: Option<String>) {
     }));
     CTX.with(|c| *c.borrow_mut() = Some(ctx.clone()));
     listen_for_hand_offs();
-
-    // the first load is synchronous so the window opens fully populated, on the right page
-    apply_snapshot(&ctx, take_snapshot());
-    show_client_check(&ctx, &core::check_client());
     show_outside_starts();
-    let start = account
-        .and_then(|k| {
-            ctx.borrow()
-                .accounts
-                .iter()
-                .position(|a| a.key() == k || a.name == k)
-        })
-        .map(|i| i as i32)
-        .unwrap_or(if ctx.borrow().accounts.is_empty() {
-            -1
-        } else {
-            0
-        });
-    select(&ctx, start);
-    if !ctx.borrow().accounts.is_empty() && recovery_error.is_none() {
-        start_tray();
-    }
+    check_client();
+    let initial_account = account.clone();
+    let start_tray_after_load = recovery_error.is_none();
+    bg(take_snapshot, move |ctx, snap| {
+        let reread = {
+            let mut c = ctx.borrow_mut();
+            c.refreshing = false;
+            std::mem::take(&mut c.refresh_again)
+        };
+        apply_snapshot(ctx, snap);
+        let start = initial_account
+            .and_then(|k| {
+                ctx.borrow()
+                    .accounts
+                    .iter()
+                    .position(|a| a.key() == k || a.name == k)
+            })
+            .map(|i| i as i32)
+            .unwrap_or(if ctx.borrow().accounts.is_empty() {
+                -1
+            } else {
+                0
+            });
+        select(ctx, start);
+        if start_tray_after_load && !ctx.borrow().accounts.is_empty() {
+            start_tray();
+        }
+        if reread {
+            refresh(ctx);
+        }
+    });
 
     macro_rules! on {
         ($setter:ident, |$c:ident $(, $arg:ident : $t:ty)*| $body:expr) => {{
