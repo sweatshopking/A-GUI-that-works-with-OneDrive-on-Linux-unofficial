@@ -10,6 +10,9 @@ use crate::core::{self, AccountInfo};
 use crate::graph::{self, Version};
 use crate::ui::{FileWindow, Theme, VersionRow};
 
+const VERSION_CACHE_FILES: usize = 50;
+const VERSION_CACHE_BYTES: u64 = 512 * 1024 * 1024;
+
 #[derive(Clone, Copy, PartialEq)]
 pub enum Mode {
     Versions,
@@ -118,6 +121,46 @@ fn version_copy_path(file: &Path, v: &Version) -> Result<PathBuf, String> {
     }
     let dir = core::cache_home().join(core::APP_ID).join("versions");
     Ok(dir.join(format!("{}{}{ext}", &stem[..end], suffix)))
+}
+
+/// Keeps opened old versions as a small, reusable cache. A copy currently being opened stays.
+fn trim_version_cache(
+    dir: &Path,
+    keep: &Path,
+    max_files: usize,
+    max_bytes: u64,
+) -> std::io::Result<()> {
+    let mut files = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_file() {
+            files.push((
+                metadata.modified().unwrap_or(std::time::UNIX_EPOCH),
+                path,
+                metadata.len(),
+            ));
+        }
+    }
+    files.sort_by(|a, b| (&a.0, &a.1).cmp(&(&b.0, &b.1)));
+    let bytes = files
+        .iter()
+        .fold(0u64, |total, file| total.saturating_add(file.2));
+    let mut count = files.len();
+    let mut bytes = bytes;
+    for (_, path, size) in files {
+        if count <= max_files && bytes <= max_bytes {
+            break;
+        }
+        if path == keep {
+            continue;
+        }
+        if std::fs::remove_file(path).is_ok() {
+            count -= 1;
+            bytes = bytes.saturating_sub(size);
+        }
+    }
+    Ok(())
 }
 
 pub fn run(mode: Mode, path: &Path) {
@@ -294,9 +337,15 @@ fn versions(
                 move || {
                     if let Some(d) = dest.parent() {
                         std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+                        let _ =
+                            trim_version_cache(d, &dest, VERSION_CACHE_FILES, VERSION_CACHE_BYTES);
                     }
                     let t = graph::token(&acc.confdir)?;
                     graph::download_version(&t, acc.drive_id.as_deref(), &rel, &v.id, &dest)?;
+                    if let Some(d) = dest.parent() {
+                        let _ =
+                            trim_version_cache(d, &dest, VERSION_CACHE_FILES, VERSION_CACHE_BYTES);
+                    }
                     Ok::<_, String>(dest)
                 },
                 |ui, r| {
@@ -418,5 +467,24 @@ mod tests {
                 .to_string_lossy()
                 .ends_with(").txt")
         );
+    }
+
+    #[test]
+    fn version_cache_is_bounded_and_keeps_the_requested_copy() {
+        let dir = std::env::temp_dir().join(format!("lodg-version-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let paths = [dir.join("old"), dir.join("middle"), dir.join("current")];
+        for (path, contents) in paths.iter().zip(["123", "45", "6"]) {
+            std::fs::write(path, contents).unwrap();
+        }
+
+        trim_version_cache(&dir, &paths[2], 2, u64::MAX).unwrap();
+        assert!(paths[2].is_file());
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2);
+        trim_version_cache(&dir, &paths[2], usize::MAX, 1).unwrap();
+        assert_eq!(std::fs::read_to_string(&paths[2]).unwrap(), "6");
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
