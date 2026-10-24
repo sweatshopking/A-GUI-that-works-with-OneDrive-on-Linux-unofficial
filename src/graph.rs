@@ -153,9 +153,26 @@ fn get_all_limited(
     url: &mut String,
     limit: Option<usize>,
 ) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    for_each_page(tok, url, |items| {
+        out.extend(items.iter().cloned());
+        if let Some(max) = limit.filter(|&max| out.len() >= max) {
+            out.truncate(max);
+            true
+        } else {
+            false
+        }
+    })?;
+    Ok(out)
+}
+
+fn for_each_page(
+    tok: &Token,
+    url: &mut String,
+    mut consume: impl FnMut(&[Value]) -> bool,
+) -> Result<(), String> {
     // a server that keeps sending next links (or the same one again) mustn't hold us forever
     const MAX_PAGES: usize = 100;
-    let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for _ in 0..MAX_PAGES {
         if !seen.insert(url.clone()) {
@@ -165,16 +182,14 @@ fn get_all_limited(
         let items = v["value"]
             .as_array()
             .ok_or_else(|| "Microsoft sent an unexpected reply. Try again later.".to_string())?;
-        out.extend(items.iter().cloned());
-        if let Some(max) = limit.filter(|&max| out.len() >= max) {
-            out.truncate(max);
-            return Ok(out);
+        if consume(items) {
+            return Ok(());
         }
         match v["@odata.nextLink"].as_str() {
             // the next page carries the sign-in too, so it may only go to Microsoft Graph
             Some(next) if is_graph(next, &tok.graph) => *url = next.to_string(),
             Some(_) => return Err("Microsoft sent an unexpected reply. Try again later.".into()),
-            None => return Ok(out),
+            None => return Ok(()),
         }
     }
     Err("Microsoft sent too many pages for this list. Try again later.".into())
@@ -241,17 +256,22 @@ pub fn list_folders(
             p.split('/').map(enc).collect::<Vec<_>>().join("/")
         )
     };
-    let items = get_all(tok, format!("{item}/children?$select=name,folder&$top=999"))?;
-    let mut out: Vec<Folder> = items
-        .iter()
-        .filter(|i| i.get("folder").is_some())
-        .map(|i| Folder {
-            name: i["name"].as_str().unwrap_or("").to_string(),
-            has_children: i["folder"]["childCount"].as_u64().unwrap_or(1) > 0,
-        })
-        .collect();
+    let mut url = format!("{item}/children?$select=name,folder&$top=999");
+    let mut out = Vec::new();
+    for_each_page(tok, &mut url, |items| {
+        out.extend(items.iter().filter_map(folder_from_item));
+        false
+    })?;
     out.sort_by_key(|f| f.name.to_lowercase());
     Ok(out)
+}
+
+fn folder_from_item(item: &Value) -> Option<Folder> {
+    let folder = item.get("folder")?;
+    Some(Folder {
+        name: item["name"].as_str().unwrap_or("").to_string(),
+        has_children: folder["childCount"].as_u64().unwrap_or(1) > 0,
+    })
 }
 
 pub struct Quota {
@@ -459,6 +479,23 @@ mod tests {
             "https://x/sites/a/models/forms",
             "https://x/sites/a/model"
         ));
+    }
+
+    #[test]
+    fn folder_pages_keep_only_folder_metadata() {
+        let items = [
+            serde_json::json!({"name": "notes.txt", "file": {"size": 8}}),
+            serde_json::json!({"name": "Team", "folder": {"childCount": 3}}),
+            serde_json::json!({"name": "Empty", "folder": {"childCount": 0}}),
+        ];
+        let folders: Vec<_> = items.iter().filter_map(folder_from_item).collect();
+        assert_eq!(
+            folders
+                .iter()
+                .map(|folder| (folder.name.as_str(), folder.has_children))
+                .collect::<Vec<_>>(),
+            [("Team", true), ("Empty", false)]
+        );
     }
 
     #[test]
