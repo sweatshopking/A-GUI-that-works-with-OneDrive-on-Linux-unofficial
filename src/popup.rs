@@ -850,6 +850,7 @@ fn place_on_x11(w: &slint::winit_030::winit::window::Window, at: (i32, i32)) {
 // ---------------------------------------------------------------- run
 
 pub fn run(at: Option<(i32, i32)>) {
+    static READING: AtomicBool = AtomicBool::new(false);
     // The tray closes the panel with SIGTERM (a second click on its icon): close the way Esc
     // does, so the KWin script is unloaded. First thing, so an early click can't leave it loaded.
     static TERM: AtomicBool = AtomicBool::new(false);
@@ -873,6 +874,8 @@ pub fn run(at: Option<(i32, i32)>) {
     let wayland = std::env::var_os("WAYLAND_DISPLAY").is_some();
     // on Wayland there's always a compositor, so rounded corners can be see-through
     ui.set_rounded(wayland);
+    ui.set_summary(ss("Checking OneDrive…"));
+    ui.set_summary_tone(1);
     {
         // the desktop's settings service can be slow or stuck: don't hold the panel up for it
         let (tx, rx) = std::sync::mpsc::channel();
@@ -898,11 +901,6 @@ pub fn run(at: Option<(i32, i32)>) {
     ui.set_accounts(ModelRc::from(account_model.clone()));
     ui.set_transfers(ModelRc::from(transfer_model.clone()));
     ui.set_recent(ModelRc::from(recent_model.clone()));
-    CLIENT_OK.store(
-        matches!(core::check_client(), core::ClientCheck::Ok { .. }),
-        Ordering::Relaxed,
-    );
-    let first = read_data();
     STATE.with(|st| {
         *st.borrow_mut() = Some(State {
             data: Data {
@@ -920,7 +918,6 @@ pub fn run(at: Option<(i32, i32)>) {
             account_model,
         })
     });
-    apply(&ui, first);
 
     ui.on_close_panel(close);
     {
@@ -1061,7 +1058,23 @@ pub fn run(at: Option<(i32, i32)>) {
     }
 
     // fresh data every two seconds, read off the event loop (one read at a time)
-    static READING: AtomicBool = AtomicBool::new(false);
+    READING.store(true, Ordering::Relaxed);
+    let weak = ui.as_weak();
+    std::thread::spawn(move || {
+        let client_ok = matches!(core::check_client(), core::ClientCheck::Ok { .. });
+        let data = read_data();
+        if slint::invoke_from_event_loop(move || {
+            READING.store(false, Ordering::Relaxed);
+            CLIENT_OK.store(client_ok, Ordering::Relaxed);
+            if let Some(ui) = weak.upgrade() {
+                apply(&ui, data);
+            }
+        })
+        .is_err()
+        {
+            READING.store(false, Ordering::Relaxed);
+        }
+    });
     let refresh = slint::Timer::default();
     {
         let weak = ui.as_weak();
