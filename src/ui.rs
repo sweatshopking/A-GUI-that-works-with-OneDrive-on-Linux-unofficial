@@ -140,8 +140,6 @@ struct Ctx {
     preview: Option<Preview>,
     /// What the client's installer has printed so far, while it runs.
     install_out: Option<Arc<Mutex<String>>>,
-    /// how much of `install_out` has been looked at for progress steps
-    install_seen: usize,
     /// "Not now" on the offer to update the client: don't offer again while the window is open.
     update_dismissed: bool,
     refreshing: bool,
@@ -1724,6 +1722,10 @@ fn sh_quote(s: &str) -> String {
 }
 
 const MAX_PREVIEW_LINE: usize = 8192;
+const MAX_CAPTURE_BYTES: usize = 1024 * 1024;
+const CAPTURE_HEAD_BYTES: usize = 4096;
+const CAPTURE_TAIL_BYTES: usize = MAX_CAPTURE_BYTES / 2;
+const CAPTURE_OMITTED: &str = "\n[…earlier output omitted…]\n";
 
 #[derive(Clone, Default)]
 struct PreviewLog {
@@ -1835,9 +1837,34 @@ fn spawn_preview_capture(
 }
 
 /// Starts `cmd`, appending everything it prints (stdout and stderr) to `out` as it arrives.
-/// Reads raw chunks rather than lines so prompts without a newline show up too. The reader
-/// threads come back as well: a caller that reads `out` once the program has ended lets them
-/// finish first (`finish_reading`), or the last lines, often the error, may not be in yet.
+/// Keeps the start and a bounded tail: sign-in prompts/errors and installer failures remain
+/// available without retaining an installer's full build log. Reads raw chunks so prompts
+/// without a newline show up too.
+fn append_capture(out: &mut String, chunk: &str) {
+    out.push_str(chunk);
+    if out.len() <= MAX_CAPTURE_BYTES {
+        return;
+    }
+    let head_end = out
+        .char_indices()
+        .find_map(|(i, _)| (i >= CAPTURE_HEAD_BYTES).then_some(i))
+        .unwrap_or(out.len());
+    let tail_at = out.len().saturating_sub(CAPTURE_TAIL_BYTES);
+    let tail_start = out
+        .char_indices()
+        .find_map(|(i, _)| (i >= tail_at).then_some(i))
+        .unwrap_or(out.len());
+    let head = out[..head_end].to_string();
+    let tail = out[tail_start..].to_string();
+    out.clear();
+    out.reserve(head.len() + CAPTURE_OMITTED.len() + tail.len());
+    out.push_str(&head);
+    out.push_str(CAPTURE_OMITTED);
+    out.push_str(&tail);
+}
+
+/// The reader threads come back as well: a caller that reads `out` once the program has ended
+/// lets them finish first (`finish_reading`), or the last lines may not be in yet.
 fn spawn_capture(
     mut cmd: Command,
     out: Arc<Mutex<String>>,
@@ -1866,9 +1893,10 @@ fn spawn_capture(
                 if n == 0 {
                     break;
                 }
-                out.lock()
-                    .unwrap()
-                    .push_str(&String::from_utf8_lossy(&buf[..n]));
+                append_capture(
+                    &mut out.lock().unwrap(),
+                    &String::from_utf8_lossy(&buf[..n]),
+                );
             }
         }));
     }
@@ -4577,7 +4605,6 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
     ui.set_client_install_msg(ss("Your computer will ask for your password…"));
     let out = Arc::new(Mutex::new(String::new()));
     ctx.borrow_mut().install_out = Some(out.clone());
-    ctx.borrow_mut().install_seen = 0;
     let was_update = ui.get_client_update();
     bg(
         move || {
@@ -4654,23 +4681,23 @@ fn run_client_install(ctx: &Shared, plan: clientinstall::Plan) {
 
 /// Shows the installer's latest step while it runs (building on Arch takes minutes).
 fn update_install_live(ctx: &Shared) {
-    let mut c = ctx.borrow_mut();
+    let c = ctx.borrow();
     let Some(out) = c.install_out.clone() else {
         return;
     };
     let out = out.lock().unwrap();
-    // only what came in since the last look, up to its last full line (a line still arriving is
-    // read whole next time); makepkg's output runs to many thousands of lines
-    let new = &out[c.install_seen.min(out.len())..];
-    let complete = new.rfind('\n').map_or(0, |i| i + 1);
-    if let Some(step) = new[..complete]
+    // Build output can be large, so only the retained tail is scanned for new step markers.
+    let tail = out
+        .rsplit_once(CAPTURE_OMITTED)
+        .map_or(out.as_str(), |(_, tail)| tail);
+    let complete = tail.rfind('\n').map_or(0, |i| i + 1);
+    if let Some(step) = tail[..complete]
         .lines()
         .rev()
         .find_map(|l| l.strip_prefix(STEP))
     {
         c.ui().set_client_install_msg(ss(step.trim()));
     }
-    c.install_seen += complete;
 }
 
 /// A short "it worked" note where the banner was. It stays until OK or adding an account: going
@@ -4939,7 +4966,6 @@ pub fn run(account: Option<String>) {
         signin_starting: None,
         preview: None,
         install_out: None,
-        install_seen: 0,
         update_dismissed: false,
         // The first status snapshot is read off the UI thread before the window appears.
         refreshing: true,
@@ -5545,6 +5571,19 @@ mod tests {
         let summary = summarize_preview(&log, true, false);
         assert!(summary.text.contains("delete 10000 item(s) online"));
         assert!(summary.warn.contains("…and 9992 more"));
+    }
+
+    #[test]
+    fn child_output_capture_keeps_a_bounded_start_and_tail() {
+        let mut output = String::new();
+        append_capture(&mut output, "STEP preparing\n");
+        for n in 0..60_000 {
+            append_capture(&mut output, &format!("build output line {n}\n"));
+        }
+        assert!(output.len() < MAX_CAPTURE_BYTES);
+        assert!(output.starts_with("STEP preparing\n"));
+        assert!(output.contains(CAPTURE_OMITTED));
+        assert!(output.ends_with("build output line 59999\n"));
     }
 
     #[test]
