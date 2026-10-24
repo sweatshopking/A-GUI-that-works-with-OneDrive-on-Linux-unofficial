@@ -46,15 +46,19 @@ pub fn publish(accs: Vec<AccState>) {
     }
     *p = (Some(std::time::Instant::now()), false);
     drop(p);
-    if let Some(c) = CONN.get() {
-        let _ = c.emit_signal(
-            None::<&str>,
-            OBJECT_PATH,
-            INTERFACE,
-            "Changed",
-            &(Vec::<String>::new(),),
-        );
-    }
+    // on a thread of its own: the tray calls this from inside its icon's async runtime, where a
+    // blocking D-Bus call panics
+    std::thread::spawn(|| {
+        if let Some(c) = CONN.get() {
+            let _ = c.emit_signal(
+                None::<&str>,
+                OBJECT_PATH,
+                INTERFACE,
+                "Changed",
+                &(Vec::<String>::new(),),
+            );
+        }
+    });
 }
 
 /// Whether the user wants badges (App settings; on unless switched off). Asked on every log

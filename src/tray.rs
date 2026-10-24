@@ -2,6 +2,7 @@
 //! menu, and the sync schedule enforcer.
 
 use std::collections::{HashMap, HashSet};
+use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
@@ -979,6 +980,36 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
     }
 }
 
+/// The tray runs with nowhere to print (started at login or by the window), so a panic in one of
+/// its threads would vanish while that part silently stops. Each one is added to
+/// ~/.local/share/drivedeck/logs/tray-errors.log (kept small) for bug reports.
+fn log_panics() {
+    let default = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        default(info);
+        let file = core::data_home()
+            .join(core::APP_ID)
+            .join("logs/tray-errors.log");
+        if let Some(dir) = file.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        if fs::metadata(&file).is_ok_and(|m| m.len() > 256 * 1024) {
+            let _ = fs::rename(&file, file.with_extension("log.old"));
+        }
+        let thread = thread::current().name().unwrap_or("unnamed").to_string();
+        let line = format!(
+            "{} {} (thread {thread}): {info}\n{}\n",
+            Local::now().format("%Y-%m-%d %H:%M:%S"),
+            env!("CARGO_PKG_VERSION"),
+            std::backtrace::Backtrace::force_capture()
+        );
+        if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&file) {
+            use std::io::Write;
+            let _ = f.write_all(line.as_bytes());
+        }
+    }));
+}
+
 static UPDATE_CHECK_FAILED: AtomicBool = AtomicBool::new(false);
 
 /// Warns once when an account's storage is nearly full (90%) and again when it's full, as the
@@ -1106,6 +1137,7 @@ pub fn run() {
     };
     crate::badges::serve();
     crate::badges::install_user_files();
+    log_panics();
     let h = handle.clone();
     thread::spawn(move || poll(h));
     loop {
