@@ -59,7 +59,7 @@ impl Acc {
     }
     fn status(&self) -> Status {
         Status {
-            phase: core::compose_phase(
+            phase: core::compose_phase_cached(
                 &self.info,
                 &self.prefs,
                 &self.unit,
@@ -834,6 +834,9 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         }
         round = round.wrapping_add(1);
         let settings = AppSettings::load();
+        // The lookup may use desktop D-Bus; do it on this polling thread once per round so
+        // ksni callbacks only ever read the cache.
+        let hold = core::device_hold();
         let (infos, mut unit_states) = core::discover_with_states(&settings);
         let states: Vec<(UnitState, bool)> = infos
             .iter()
@@ -856,7 +859,6 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         for (info, (st, resyncing)) in infos.iter().zip(&states) {
             let prefs = settings.prefs(&info.confdir);
             let Some(unit) = &info.unit else { continue };
-            let hold = core::device_hold();
             let managed_by_time = prefs.schedule.enabled
                 || prefs.pause_until > 0
                 || hold.is_some()

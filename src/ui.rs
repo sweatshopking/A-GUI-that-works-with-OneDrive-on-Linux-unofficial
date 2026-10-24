@@ -277,6 +277,9 @@ fn log_state(unit: Option<&str>) -> LogState {
 }
 
 pub(crate) fn take_snapshot() -> Snapshot {
+    // Refresh desktop power and network state here, off the UI event loop. Status text is then
+    // rendered from the cached answer without waiting on D-Bus.
+    let _ = core::device_hold();
     let settings = AppSettings::load();
     let (infos, mut unit_states) = core::discover_with_states(&settings);
     let statuses = infos

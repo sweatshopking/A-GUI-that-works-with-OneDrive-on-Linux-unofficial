@@ -300,11 +300,18 @@ impl AccountPrefs {
     /// Whether the background service should be running right now. "Sync now" (the override)
     /// gets past a schedule and a metered network or battery saver for an hour.
     pub fn sync_allowed(&self) -> bool {
+        self.sync_allowed_with(device_hold())
+    }
+    /// Checks the last device hold without doing desktop D-Bus work.
+    pub fn sync_allowed_cached(&self) -> bool {
+        self.sync_allowed_with(cached_device_hold())
+    }
+    fn sync_allowed_with(&self, hold: Option<Hold>) -> bool {
         let now = Local::now();
         let overridden = self.override_until > now.timestamp();
         !self.paused()
             && (self.schedule.allows(now.time()) || overridden)
-            && (device_hold().is_none() || overridden)
+            && (hold.is_none() || overridden)
     }
 }
 
@@ -337,6 +344,13 @@ pub enum Hold {
     PowerSaver,
 }
 
+type DeviceHoldCache = std::sync::Mutex<Option<(std::time::Instant, Option<Hold>)>>;
+static DEVICE_HOLD_CACHE: std::sync::OnceLock<DeviceHoldCache> = std::sync::OnceLock::new();
+
+fn device_hold_cache() -> &'static DeviceHoldCache {
+    DEVICE_HOLD_CACHE.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 impl Hold {
     pub fn words(self) -> &'static str {
         match self {
@@ -349,13 +363,15 @@ impl Hold {
 /// The current hold, if the user wants syncing to pause for it (both on unless switched off in
 /// App settings). Asked often, so the answer is kept for ten seconds.
 pub fn device_hold() -> Option<Hold> {
-    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<Hold>)>> =
-        std::sync::Mutex::new(None);
-    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-    if let Some((at, h)) = *c
-        && at.elapsed() < std::time::Duration::from_secs(10)
     {
-        return h;
+        let c = device_hold_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some((at, h)) = *c
+            && at.elapsed() < std::time::Duration::from_secs(10)
+        {
+            return h;
+        }
     }
     // On a thread of its own: the tray icon's D-Bus service asks for this (the tooltip) from
     // inside its async runtime, where a blocking D-Bus call panics.
@@ -371,8 +387,25 @@ pub fn device_hold() -> Option<Hold> {
     })
     .join()
     .unwrap_or(None);
+    let mut c = device_hold_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some((at, cached)) = *c
+        && at.elapsed() < std::time::Duration::from_secs(10)
+    {
+        return cached;
+    }
     *c = Some((std::time::Instant::now(), h));
     h
+}
+
+/// Returns the last device hold without waiting for its D-Bus refresh.
+pub fn cached_device_hold() -> Option<Hold> {
+    device_hold_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|(_, hold)| *hold)
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
@@ -2545,7 +2578,7 @@ impl Status {
                     None => "Paused".into(),
                 }
             }
-            Phase::Paused => match device_hold() {
+            Phase::Paused => match cached_device_hold() {
                 Some(h) if prefs.schedule.allows(Local::now().time()) => {
                     format!("Paused: {}", h.words())
                 }
@@ -2568,6 +2601,28 @@ pub fn compose_phase(
     unit: &UnitState,
     resyncing: bool,
     log_phase: Phase,
+) -> Phase {
+    compose_phase_with_cache(acc, prefs, unit, resyncing, log_phase, false)
+}
+
+/// Computes status using only the cached device hold, for tray runtime callbacks.
+pub fn compose_phase_cached(
+    acc: &AccountInfo,
+    prefs: &AccountPrefs,
+    unit: &UnitState,
+    resyncing: bool,
+    log_phase: Phase,
+) -> Phase {
+    compose_phase_with_cache(acc, prefs, unit, resyncing, log_phase, true)
+}
+
+fn compose_phase_with_cache(
+    acc: &AccountInfo,
+    prefs: &AccountPrefs,
+    unit: &UnitState,
+    resyncing: bool,
+    log_phase: Phase,
+    cached: bool,
 ) -> Phase {
     if resyncing {
         return Phase::Resyncing;
@@ -2596,7 +2651,13 @@ pub fn compose_phase(
         ) {
             return log_phase;
         }
-        if unit.enabled && !prefs.sync_allowed() {
+        if unit.enabled
+            && !(if cached {
+                prefs.sync_allowed_cached()
+            } else {
+                prefs.sync_allowed()
+            })
+        {
             return Phase::Paused;
         }
         if unit.failed {
