@@ -19,6 +19,7 @@ const GRAPH: &str = "https://graph.microsoft.com/v1.0";
 pub struct Token {
     pub access: String,
     pub expires: Instant,
+    pub(crate) graph: String,
 }
 
 fn agent() -> ureq::Agent {
@@ -36,7 +37,12 @@ fn at(url: &str) -> String {
     if let Ok(fake) = std::env::var("LODG_TEST_MICROSOFT") {
         for real in [
             "https://graph.microsoft.com",
+            "https://graph.microsoft.us",
+            "https://dod-graph.microsoft.us",
+            "https://microsoftgraph.chinacloudapi.cn",
             "https://login.microsoftonline.com",
+            "https://login.microsoftonline.us",
+            "https://login.partner.microsoftonline.cn",
         ] {
             if let Some(rest) = url.strip_prefix(real) {
                 return format!("{fake}{rest}");
@@ -63,21 +69,23 @@ fn read_reply(resp: &mut ureq::http::Response<ureq::Body>) -> Result<Value, Stri
     })
 }
 
-fn endpoints(cfg: &ClientConfig) -> (String, String) {
+fn endpoints(cfg: &ClientConfig) -> Result<(String, String, String), String> {
     let tenant = cfg
         .get("azure_tenant_id")
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| "common".into());
-    let host = match cfg.get("azure_ad_endpoint").unwrap_or_default().as_str() {
-        "USL4" | "USL5" => "https://login.microsoftonline.us",
-        "DE" => "https://login.microsoftonline.de",
-        "CN" => "https://login.chinacloudapi.cn",
-        _ => "https://login.microsoftonline.com",
+    let (host, graph) = match cfg.get("azure_ad_endpoint").unwrap_or_default().as_str() {
+        "USL4" => ("https://login.microsoftonline.us", "https://graph.microsoft.us/v1.0"),
+        "USL5" => ("https://login.microsoftonline.us", "https://dod-graph.microsoft.us/v1.0"),
+        "DE" => return Err("Azure Germany closed on October 29, 2021. Migrate this account to a supported Microsoft cloud and select that cloud here.".into()),
+        "CN" => ("https://login.partner.microsoftonline.cn", "https://microsoftgraph.chinacloudapi.cn/v1.0"),
+        _ => ("https://login.microsoftonline.com", GRAPH),
     };
-    (
+    Ok((
         format!("{host}/{tenant}/oauth2/v2.0/token"),
         format!("{host}/common/oauth2/nativeclient"),
-    )
+        graph.to_string(),
+    ))
 }
 
 pub fn token(confdir: &Path) -> Result<Token, String> {
@@ -88,7 +96,7 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
         .get("application_id")
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| DEFAULT_APP_ID.into());
-    let (url, redirect) = endpoints(&cfg);
+    let (url, redirect, graph) = endpoints(&cfg)?;
     let mut resp = agent()
         .post(at(&url))
         .send_form([
@@ -105,6 +113,7 @@ pub fn token(confdir: &Path) -> Result<Token, String> {
             access: a.to_string(),
             expires: Instant::now()
                 + Duration::from_secs(v["expires_in"].as_u64().unwrap_or(3600).saturating_sub(120)),
+            graph,
         }),
         None => Err(format!(
             "Microsoft refused the saved sign-in ({}). Try signing in again.",
@@ -122,15 +131,24 @@ fn get(tok: &Token, url: &str) -> Result<Value, String> {
     let status = resp.status().as_u16();
     let v = read_reply(&mut resp)?;
     if status >= 400 {
-        return Err(v["error"]["message"]
-            .as_str()
-            .unwrap_or("request failed")
-            .to_string());
+        return Err(format!(
+            "HTTP {status}: {}",
+            v["error"]["message"].as_str().unwrap_or("request failed")
+        ));
     }
     Ok(v)
 }
 
 fn get_all(tok: &Token, mut url: String) -> Result<Vec<Value>, String> {
+    get_all_limited(tok, &mut url, None)
+}
+
+/// Reads a collection, optionally stopping once `limit` items have arrived (no further pages).
+fn get_all_limited(
+    tok: &Token,
+    url: &mut String,
+    limit: Option<usize>,
+) -> Result<Vec<Value>, String> {
     // a server that keeps sending next links (or the same one again) mustn't hold us forever
     const MAX_PAGES: usize = 100;
     let mut out = Vec::new();
@@ -139,13 +157,18 @@ fn get_all(tok: &Token, mut url: String) -> Result<Vec<Value>, String> {
         if !seen.insert(url.clone()) {
             return Err("Microsoft repeated a page while listing items. Try again later.".into());
         }
-        let v = get(tok, &url)?;
-        if let Some(items) = v["value"].as_array() {
-            out.extend(items.iter().cloned());
+        let v = get(tok, url)?;
+        let items = v["value"]
+            .as_array()
+            .ok_or_else(|| "Microsoft sent an unexpected reply. Try again later.".to_string())?;
+        out.extend(items.iter().cloned());
+        if let Some(max) = limit.filter(|&max| out.len() >= max) {
+            out.truncate(max);
+            return Ok(out);
         }
         match v["@odata.nextLink"].as_str() {
             // the next page carries the sign-in too, so it may only go to Microsoft Graph
-            Some(next) if is_graph(next) => url = next.to_string(),
+            Some(next) if is_graph(next, &tok.graph) => *url = next.to_string(),
             Some(_) => return Err("Microsoft sent an unexpected reply. Try again later.".into()),
             None => return Ok(out),
         }
@@ -153,14 +176,15 @@ fn get_all(tok: &Token, mut url: String) -> Result<Vec<Value>, String> {
     Err("Microsoft sent too many pages for this list. Try again later.".into())
 }
 
-fn is_graph(url: &str) -> bool {
+fn is_graph(url: &str, graph: &str) -> bool {
     #[cfg(feature = "test-driver")]
     if let Ok(fake) = std::env::var("LODG_TEST_MICROSOFT")
         && url.starts_with(&fake)
     {
         return true;
     }
-    url.starts_with("https://graph.microsoft.com/")
+    url.starts_with(&format!("{}/", graph.trim_end_matches("/v1.0")))
+        || url.starts_with(&format!("{graph}/"))
 }
 
 /// An address from Microsoft that is safe to hand to the browser: only https.
@@ -184,10 +208,10 @@ fn enc(seg: &str) -> String {
     s
 }
 
-fn drive_base(drive_id: Option<&str>) -> String {
+fn drive_base(tok: &Token, drive_id: Option<&str>) -> String {
     match drive_id {
-        Some(d) => format!("{GRAPH}/drives/{}", enc(d)),
-        None => format!("{GRAPH}/me/drive"),
+        Some(d) => format!("{}/drives/{}", tok.graph, enc(d)),
+        None => format!("{}/me/drive", tok.graph),
     }
 }
 
@@ -203,7 +227,7 @@ pub fn list_folders(
     drive_id: Option<&str>,
     path: &str,
 ) -> Result<Vec<Folder>, String> {
-    let base = drive_base(drive_id);
+    let base = drive_base(tok, drive_id);
     let p = path.trim_matches('/');
     let item = if p.is_empty() {
         format!("{base}/root")
@@ -235,7 +259,10 @@ pub struct Quota {
 pub fn quota(tok: &Token, drive_id: Option<&str>) -> Result<Quota, String> {
     let v = get(
         tok,
-        &format!("{}?$select=quota,owner,driveType", drive_base(drive_id)),
+        &format!(
+            "{}?$select=quota,owner,driveType",
+            drive_base(tok, drive_id)
+        ),
     )?;
     let owner = v["owner"]["user"]["email"]
         .as_str()
@@ -252,7 +279,7 @@ pub fn quota(tok: &Token, drive_id: Option<&str>) -> Result<Quota, String> {
 
 /// The signed-in user's account type: "personal" or "business".
 pub fn account_kind(tok: &Token) -> Result<String, String> {
-    let v = get(tok, &format!("{GRAPH}/me/drive?$select=driveType"))?;
+    let v = get(tok, &format!("{}/me/drive?$select=driveType", tok.graph))?;
     Ok(if v["driveType"].as_str() == Some("personal") {
         "personal"
     } else {
@@ -277,22 +304,30 @@ pub fn find_libraries(tok: &Token, query: &str) -> Result<Vec<Library>, String> 
     } else {
         query.trim()
     };
-    let sites = get_all(
-        tok,
-        format!(
-            "{GRAPH}/sites?search={}&$select=id,displayName&$top=50",
-            enc(q)
-        ),
-    )?;
+    let mut url = format!(
+        "{}/sites?search={}&$select=id,displayName&$top=50",
+        tok.graph,
+        enc(q)
+    );
+    // the best 30 matches are plenty to pick from; more would only slow the search down
+    let sites = get_all_limited(tok, &mut url, Some(30))?;
     let mut out = Vec::new();
-    for s in sites.iter().take(30) {
-        let (Some(id), name) = (s["id"].as_str(), s["displayName"].as_str().unwrap_or("")) else {
-            continue;
-        };
-        // sites you can see but not open (403) are skipped
-        if let Ok(libs) = site_libraries(tok, id, name) {
-            out.extend(libs);
+    let mut failed = None;
+    for s in &sites {
+        let Some(id) = s["id"].as_str() else { continue };
+        let name = s["displayName"].as_str().unwrap_or("");
+        match site_libraries(tok, id, name) {
+            Ok(libs) => out.extend(libs),
+            // a site can show up in search although the user can't open its libraries
+            Err(e) if e.starts_with("HTTP 403:") => {}
+            // one broken site shouldn't hide the others; say why only if nothing worked
+            Err(e) => failed = Some(format!("Couldn't check libraries on {name}: {e}")),
         }
+    }
+    if out.is_empty()
+        && let Some(e) = failed
+    {
+        return Err(e);
     }
     Ok(out)
 }
@@ -301,7 +336,8 @@ fn site_libraries(tok: &Token, site_id: &str, site_name: &str) -> Result<Vec<Lib
     let drives = get_all(
         tok,
         format!(
-            "{GRAPH}/sites/{}/drives?$select=id,name,webUrl",
+            "{}/sites/{}/drives?$select=id,name,webUrl",
+            tok.graph,
             enc(site_id)
         ),
     )?;
@@ -352,9 +388,9 @@ pub fn libraries_at_url(tok: &Token, url: &str) -> Result<(Vec<Library>, Option<
     let (host, path) = parse_site_url(url)
         .ok_or_else(|| "That doesn't look like a SharePoint address. Copy it from your browser's address bar — it starts with https://".to_string())?;
     let site_url = if path.is_empty() {
-        format!("{GRAPH}/sites/{host}")
+        format!("{}/sites/{host}", tok.graph)
     } else {
-        format!("{GRAPH}/sites/{host}:{path}")
+        format!("{}/sites/{host}:{path}", tok.graph)
     };
     let site = get(tok, &format!("{site_url}?$select=id,displayName"))
         .map_err(|e| format!("Couldn't open that site with this account: {e}"))?;
@@ -443,9 +479,9 @@ pub fn human_size(b: u64) -> String {
     }
 }
 
-fn item_url(drive_id: Option<&str>, rel: &str) -> String {
+fn item_url(tok: &Token, drive_id: Option<&str>, rel: &str) -> String {
     let p = rel.trim_matches('/');
-    let base = drive_base(drive_id);
+    let base = drive_base(tok, drive_id);
     if p.is_empty() {
         format!("{base}/root")
     } else {
@@ -458,7 +494,10 @@ fn item_url(drive_id: Option<&str>, rel: &str) -> String {
 
 /// The OneDrive website address for a file or folder (`rel` relative to the account's folder).
 pub fn item_web_url(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<String, String> {
-    let v = get(tok, &format!("{}?$select=webUrl", item_url(drive_id, rel)))?;
+    let v = get(
+        tok,
+        &format!("{}?$select=webUrl", item_url(tok, drive_id, rel)),
+    )?;
     web_address(v["webUrl"].as_str().unwrap_or(""))
 }
 
@@ -550,7 +589,7 @@ pub fn versions(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<Vec<Ve
         tok,
         format!(
             "{}/versions?$select=id,lastModifiedDateTime,size,lastModifiedBy",
-            item_url(drive_id, rel)
+            item_url(tok, drive_id, rel)
         ),
     )?;
     let mut out: Vec<Version> = items
@@ -571,8 +610,8 @@ pub fn versions(tok: &Token, drive_id: Option<&str>, rel: &str) -> Result<Vec<Ve
     Ok(out)
 }
 
-fn version_url(drive_id: Option<&str>, rel: &str, id: &str) -> String {
-    format!("{}/versions/{}", item_url(drive_id, rel), enc(id))
+fn version_url(tok: &Token, drive_id: Option<&str>, rel: &str, id: &str) -> String {
+    format!("{}/versions/{}", item_url(tok, drive_id, rel), enc(id))
 }
 
 /// Saves an old version of a file to `dest`.
@@ -593,7 +632,10 @@ pub fn download_version(
         ));
     }
     let resp = agent()
-        .get(at(&format!("{}/content", version_url(drive_id, rel, id))))
+        .get(at(&format!(
+            "{}/content",
+            version_url(tok, drive_id, rel, id)
+        )))
         .header("Authorization", &format!("Bearer {}", tok.access))
         .call()
         .map_err(unreachable)?;
@@ -607,15 +649,11 @@ pub fn download_version(
     let parent = dest
         .parent()
         .ok_or_else(|| "Couldn't find where to save that version.".to_string())?;
-    let base = dest
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
     let mut temp = None;
     for _ in 0..32 {
         let n = NEXT_DOWNLOAD.fetch_add(1, Ordering::Relaxed);
-        let path = parent.join(format!(".{base}.download-{}-{n}", std::process::id()));
+        // Keep the temporary component short even when the requested destination is at NAME_MAX.
+        let path = parent.join(format!(".lodg-version-{}-{n}.tmp", std::process::id()));
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -691,7 +729,7 @@ pub fn restore_version(
 ) -> Result<(), String> {
     post(
         tok,
-        &format!("{}/restoreVersion", version_url(drive_id, rel, id)),
+        &format!("{}/restoreVersion", version_url(tok, drive_id, rel, id)),
         None,
     )
     .map(|_| ())
@@ -722,7 +760,7 @@ pub fn invite(
     }
     post(
         tok,
-        &format!("{}/invite", item_url(drive_id, rel)),
+        &format!("{}/invite", item_url(tok, drive_id, rel)),
         Some(body),
     )
     .map(|_| ())
@@ -746,7 +784,7 @@ pub fn create_link(
     account_kind: &str,
     edit: bool,
 ) -> Result<(String, LinkScope), String> {
-    let url = format!("{}/createLink", item_url(drive_id, rel));
+    let url = format!("{}/createLink", item_url(tok, drive_id, rel));
     let looked_up;
     let account_kind = match account_kind {
         "personal" | "business" | "sharepoint" => account_kind,

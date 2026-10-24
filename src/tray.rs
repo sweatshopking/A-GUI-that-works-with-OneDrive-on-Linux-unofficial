@@ -5,8 +5,8 @@ use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -97,7 +97,7 @@ fn open_settings(account: Option<&str>) {
 
 /// The open panel's process and when it opened, and when the last one closed.
 struct PopupState {
-    open: Option<(u32, Instant, Option<OwnedFd>)>,
+    open: Option<(u32, Instant, Option<OwnedFd>, mpsc::Sender<()>)>,
     closed: Option<Instant>,
     /// the activation token the tray host handed over for the latest click on the icon
     token: Option<(String, Instant)>,
@@ -112,12 +112,12 @@ static POPUP: Mutex<PopupState> = Mutex::new(PopupState {
 /// Opens the panel, or closes it if it's open. `at`: where the tray icon was clicked.
 fn toggle_popup(at: Option<(i32, i32)>) {
     let mut p = POPUP.lock().unwrap();
-    if let Some((_, opened, pidfd)) = p.open.as_ref() {
+    if let Some((_, opened, pidfd, close)) = p.open.as_ref() {
         // the second click of a double-click: it was meant to open the panel, which it did
         if opened.elapsed() < Duration::from_millis(400) {
             return;
         }
-        if let Some(fd) = pidfd {
+        let signalled = if let Some(fd) = pidfd {
             // SAFETY: fd is a pidfd for this exact child process, so PID reuse cannot redirect it.
             unsafe {
                 libc::syscall(
@@ -126,8 +126,15 @@ fn toggle_popup(at: Option<(i32, i32)>) {
                     libc::SIGTERM,
                     std::ptr::null::<libc::siginfo_t>(),
                     0,
-                );
+                ) == 0
             }
+        } else {
+            false
+        };
+        if !signalled {
+            // The waiter owns the Child and can safely signal it before reaping it, even on
+            // kernels without pidfd support.
+            let _ = close.send(());
         }
         p.open = None;
         return;
@@ -161,14 +168,37 @@ fn toggle_popup(at: Option<(i32, i32)>) {
     } else {
         None
     };
-    p.open = Some((pid, Instant::now(), pidfd));
+    let (close_tx, close_rx) = mpsc::channel();
+    p.open = Some((pid, Instant::now(), pidfd, close_tx));
     drop(p);
     thread::spawn(move || {
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) | Err(_) => break,
+                Ok(None) => {}
+            }
+            match close_rx.recv_timeout(Duration::from_millis(100)) {
+                Ok(()) => {
+                    // This thread alone reaps the child. If it is still running, its PID cannot
+                    // have been reused; use SIGTERM so the popup can unload its desktop script.
+                    if matches!(child.try_wait(), Ok(None)) {
+                        unsafe {
+                            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                        }
+                    }
+                    break;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
         let _ = child.wait();
         let mut p = POPUP.lock().unwrap();
         if p.open
             .as_ref()
-            .is_some_and(|(open_pid, _, _)| *open_pid == pid)
+            .is_some_and(|(open_pid, _, _, _)| *open_pid == pid)
         {
             p.open = None;
             // closed by itself (focus moved away); one closed by a click above isn't recorded,

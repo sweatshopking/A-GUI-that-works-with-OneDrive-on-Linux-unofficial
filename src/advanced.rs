@@ -208,7 +208,6 @@ pub const CLOUDS: &[(&str, &str)] = &[
     ("", "Worldwide (normal)"),
     ("USL4", "US Government (GCC High)"),
     ("USL5", "US Government (DoD)"),
-    ("DE", "Germany"),
     ("CN", "China (21Vianet)"),
 ];
 

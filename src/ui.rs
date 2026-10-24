@@ -7,11 +7,12 @@ use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{Read, Write};
+use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -89,7 +90,6 @@ struct Preview {
     was_active: bool,
     snapshot: Vec<(PathBuf, Option<Vec<u8>>)>,
     out: Arc<Mutex<String>>,
-    pid: Arc<AtomicU32>,
     cancelled: Arc<AtomicBool>,
     running: bool,
     folders_changed: bool,
@@ -108,6 +108,7 @@ pub(crate) struct Snapshot {
 struct CachedToken {
     access: String,
     expires: Instant,
+    graph: String,
 }
 
 struct Ctx {
@@ -203,6 +204,7 @@ fn token_for(confdir: &Path, cached: Option<CachedToken>) -> Result<CachedToken,
     graph::token(confdir).map(|t| CachedToken {
         access: t.access,
         expires: t.expires,
+        graph: t.graph,
     })
 }
 
@@ -210,6 +212,7 @@ fn as_graph(t: &CachedToken) -> graph::Token {
     graph::Token {
         access: t.access.clone(),
         expires: t.expires,
+        graph: t.graph.clone(),
     }
 }
 
@@ -1759,7 +1762,6 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
     let unit = acc.unit.clone();
     let was_active = unit.as_deref().is_some_and(|u| core::unit_state(u).active);
     let out = Arc::new(Mutex::new(String::new()));
-    let pid = Arc::new(AtomicU32::new(0));
     let cancelled = Arc::new(AtomicBool::new(false));
     let confdir = acc.confdir.clone();
     let busy = match core::BusyMarker::try_new(&confdir) {
@@ -1812,7 +1814,6 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
         was_active,
         snapshot,
         out: out.clone(),
-        pid: pid.clone(),
         cancelled: cancelled.clone(),
         running: true,
         folders_changed: change.sync_list.is_some(),
@@ -1869,10 +1870,49 @@ fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewCh
                 .args(["--dry-run", "--verbose"]);
             let (mut child, _, readers) = spawn_capture(cmd, out, false)
                 .map_err(|e| format!("Couldn't start the sync engine: {e}"))?;
-            pid.store(child.id(), Ordering::SeqCst);
-            let ok = child.wait().map(|s| s.success()).unwrap_or(false);
+            let child_pid = child.id();
+            let raw_fd =
+                unsafe { libc::syscall(libc::SYS_pidfd_open, child_pid as libc::pid_t, 0) };
+            let pidfd = if raw_fd >= 0 {
+                // SAFETY: pidfd_open returned a new owned file descriptor.
+                Some(unsafe { OwnedFd::from_raw_fd(raw_fd as i32) })
+            } else {
+                None
+            };
+            let mut cancel_sent = false;
+            let ok = loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.success(),
+                    Err(_) => {
+                        let _ = child.wait();
+                        break false;
+                    }
+                    Ok(None) => {}
+                }
+                if cancelled.load(Ordering::SeqCst) && !cancel_sent {
+                    if let Some(fd) = &pidfd {
+                        // SAFETY: this pidfd refers to this child, even if it has just exited.
+                        unsafe {
+                            libc::syscall(
+                                libc::SYS_pidfd_send_signal,
+                                fd.as_raw_fd(),
+                                libc::SIGTERM,
+                                std::ptr::null::<libc::siginfo_t>(),
+                                0,
+                            );
+                        }
+                    } else {
+                        // This worker is the only code that reaps the child. Since try_wait just
+                        // reported it still running, its PID cannot have been reused.
+                        unsafe {
+                            libc::kill(child_pid as libc::pid_t, libc::SIGTERM);
+                        }
+                    }
+                    cancel_sent = true;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            };
             finish_reading(readers);
-            pid.store(0, Ordering::SeqCst);
             Ok(ok)
         },
         |ctx, r| {
@@ -2218,12 +2258,6 @@ fn preview_cancel(ctx: &Shared) {
         let c = ctx.borrow();
         let Some(p) = c.preview.as_ref() else { return };
         p.cancelled.store(true, Ordering::SeqCst);
-        let pid = p.pid.load(Ordering::SeqCst);
-        if pid != 0 {
-            unsafe {
-                libc::kill(pid as i32, libc::SIGTERM);
-            }
-        }
         p.running
     };
     if running {

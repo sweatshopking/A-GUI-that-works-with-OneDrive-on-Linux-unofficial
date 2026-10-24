@@ -214,6 +214,54 @@ fn device(path: &Path) -> Result<u64, String> {
     ))
 }
 
+/// Checks common removable-drive mount roots before writing into a sync directory. If the drive
+/// is unplugged, those directories still exist on the root filesystem and metadata alone would
+/// make them look like a usable OneDrive location.
+fn ensure_user_mount_available(path: &Path) -> Result<(), String> {
+    let resolved = fs::canonicalize(path).map_err(|e| {
+        format!(
+            "Couldn't resolve the OneDrive folder {}: {e}",
+            path.display()
+        )
+    })?;
+    let roots = [
+        Path::new("/run/media"),
+        Path::new("/media"),
+        Path::new("/mnt"),
+    ];
+    let Some(root) = roots
+        .iter()
+        .copied()
+        .find(|root| resolved.starts_with(root))
+    else {
+        return Ok(());
+    };
+    let output = Command::new("findmnt")
+        .args(["-rn", "-o", "TARGET", "-T"])
+        .arg(&resolved)
+        .output()
+        .map_err(|e| {
+            format!(
+                "Couldn't check the mounted drive for {}: {e}",
+                path.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(format!(
+            "Couldn't check whether the drive for {} is mounted.",
+            path.display()
+        ));
+    }
+    let mount = PathBuf::from(String::from_utf8_lossy(&output.stdout).trim());
+    if !mount.starts_with(root) {
+        return Err(format!(
+            "The drive for {} isn't mounted. Connect it before backing up this folder.",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
 /// Whether the account's chosen folders (sync_list) leave `name` out.
 fn excluded_by_sync_list(acc: &AccountInfo, name: &str) -> Result<bool, String> {
     let path = acc.confdir.join("sync_list");
@@ -269,6 +317,7 @@ pub fn plan(acc: &AccountInfo, all: &[AccountInfo], key: &str) -> Result<Plan, S
             acc.sync_dir.display()
         ));
     }
+    ensure_user_mount_available(&acc.sync_dir)?;
     let sync_meta = fs::metadata(&acc.sync_dir)
         .map_err(|e| format!("Couldn't inspect {}: {e}", acc.sync_dir.display()))?;
     let home = core::home();
@@ -277,6 +326,11 @@ pub fn plan(acc: &AccountInfo, all: &[AccountInfo], key: &str) -> Result<Plan, S
             "Your {label} folder is set to {}, which holds everything in your home folder, so it can't be backed up. Point {label} at its own folder in your desktop's settings first.",
             source.display()
         ));
+    }
+    // XDG paths are editable and may resolve through `..` or symlinked parents. Do not let a
+    // misplaced Desktop/Documents setting make the backup move a system or app-settings tree.
+    if let Some(reason) = core::unsuitable_sync_folder(&source) {
+        return Err(format!("Your {label} folder can't be backed up: {reason}"));
     }
     let meta = fs::symlink_metadata(&source)
         .map_err(|_| format!("{} doesn't exist.", source.display()))?;
@@ -379,7 +433,22 @@ fn free_name(dir: &Path, name: &str, host: &str) -> Result<PathBuf, String> {
         } else {
             format!("from {host} {n}")
         };
-        let candidate = dir.join(format!("{stem} ({tag}){ext}"));
+        let suffix = format!(" ({tag}){ext}");
+        if suffix.len() >= 255 {
+            return Err(format!(
+                "The suffix for {name} is too long to make a collision-safe name."
+            ));
+        }
+        let mut end = stem.len().min(255 - suffix.len());
+        while !stem.is_char_boundary(end) {
+            end -= 1;
+        }
+        if end == 0 {
+            return Err(format!(
+                "The name for {name} is too long to make a collision-safe copy."
+            ));
+        }
+        let candidate = dir.join(format!("{}{suffix}", &stem[..end]));
         match fs::symlink_metadata(&candidate) {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
             Err(e) => return Err(format!("Couldn't inspect {}: {e}", candidate.display())),
@@ -526,6 +595,7 @@ fn start_files(acc: &AccountInfo, plan: &Plan) -> Result<Done, String> {
             acc.sync_dir.display()
         ));
     }
+    ensure_user_mount_available(&acc.sync_dir)?;
     let source_meta = fs::symlink_metadata(&plan.source)
         .map_err(|e| format!("Couldn't inspect {}: {e}", plan.source.display()))?;
     if source_meta.file_type().is_symlink()

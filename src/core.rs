@@ -131,16 +131,23 @@ pub fn client_binary() -> Option<PathBuf> {
         ]
         .into_iter()
         .flatten()
-        .find(|p| p.is_file())
+        .find(|p| executable_file(p))
     })
 }
 
+fn executable_file(path: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(path_c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return false;
+    };
+    path.is_file() && unsafe { libc::access(path_c.as_ptr(), libc::X_OK) == 0 }
+}
+
 pub fn which(prog: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH")?
-        .to_str()?
-        .split(':')
-        .map(|d| Path::new(d).join(prog))
-        .find(|p| p.is_file())
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path)
+        .map(|d| d.join(prog))
+        .find(|p| executable_file(p))
 }
 
 /// A Command that runs the installed client (the bare name if it's missing, which then fails
@@ -404,19 +411,19 @@ impl AppSettings {
         serde_json::from_str(&text).unwrap_or_else(|e| {
             // keep the damaged file aside, then carry on with defaults; if no copy can be kept,
             // refuse to save so the only copy isn't overwritten
-            let aside = path.with_extension("json.damaged");
             let mut settings = Self::default();
-            if aside.exists() || fs::copy(&path, &aside).is_ok() {
-                eprintln!(
+            match preserve_damaged_settings(&path, &text) {
+                Ok(aside) => eprintln!(
                     "{} couldn't be read ({e}); a copy was kept as {}",
                     path.display(),
                     aside.display()
-                );
-            } else {
-                settings.load_error = Some(format!(
-                    "{} is damaged ({e}) and no copy of it could be kept, so it isn't replaced",
-                    path.display()
-                ));
+                ),
+                Err(copy_error) => {
+                    settings.load_error = Some(format!(
+                        "{} is damaged ({e}) and no copy could be kept ({copy_error}), so it isn't replaced",
+                        path.display()
+                    ));
+                }
             }
             settings
         })
@@ -444,6 +451,60 @@ impl AppSettings {
             .entry(confdir.to_string_lossy().to_string())
             .or_default()
     }
+}
+
+/// Keeps each damaged settings file in its own exclusive backup. A pre-existing backup may
+/// belong to an earlier incident and is not proof that the current contents were preserved.
+fn preserve_damaged_settings(path: &Path, text: &str) -> std::io::Result<PathBuf> {
+    static NEXT_DAMAGED: AtomicU64 = AtomicU64::new(0);
+    let first = path.with_extension("json.damaged");
+    // settings are read often: a backup that already holds exactly this text is enough
+    let prefix = first
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+    if let Some(dir) = first.parent()
+        && let Ok(entries) = fs::read_dir(dir)
+    {
+        for entry in entries.flatten() {
+            if entry.file_name().to_string_lossy().starts_with(&prefix)
+                && fs::read(entry.path()).is_ok_and(|old| old == text.as_bytes())
+            {
+                return Ok(entry.path());
+            }
+        }
+    }
+    for attempt in 0..32 {
+        let backup = if attempt == 0 {
+            first.clone()
+        } else {
+            let n = NEXT_DAMAGED.fetch_add(1, Ordering::Relaxed);
+            PathBuf::from(format!("{}-{}-{n}", first.display(), std::process::id()))
+        };
+        let mut file = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&backup)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        };
+        let saved = file
+            .write_all(text.as_bytes())
+            .and_then(|()| file.sync_all());
+        if let Err(e) = saved {
+            drop(file);
+            let _ = fs::remove_file(&backup);
+            return Err(e);
+        }
+        return Ok(backup);
+    }
+    Err(std::io::Error::new(
+        std::io::ErrorKind::AlreadyExists,
+        "couldn't allocate a unique damaged-settings backup after 32 attempts",
+    ))
 }
 
 /// Renames `from` to `to` only if nothing is at `to` (fails with AlreadyExists otherwise), so a

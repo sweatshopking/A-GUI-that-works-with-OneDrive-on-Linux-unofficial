@@ -35,8 +35,19 @@ pub fn copy_to_clipboard(text: &str) -> bool {
             .spawn()
         {
             use std::io::Write;
-            if let Some(mut i) = c.stdin.take() {
-                let _ = i.write_all(text.as_bytes());
+            let Some(mut i) = c.stdin.take() else {
+                let _ = c.kill();
+                continue;
+            };
+            if i.write_all(text.as_bytes()).is_err() {
+                let _ = c.kill();
+                continue;
+            }
+            drop(i);
+            match c.try_wait() {
+                Ok(Some(status)) if !status.success() => continue,
+                Err(_) => continue,
+                _ => {}
             }
             // wl-copy and xclip keep running to serve the clipboard, so don't wait for them
             return true;
@@ -51,7 +62,7 @@ pub(crate) fn locate(path: &Path) -> Result<(core::AccountInfo, String), String>
         .canonicalize()
         .map_err(|_| format!("{} doesn't exist.", path.display()))?;
     let settings = AppSettings::load();
-    let mut best: Option<(core::AccountInfo, String)> = None;
+    let mut best: Option<(core::AccountInfo, String, usize)> = None;
     for a in core::discover(&settings) {
         let root = a
             .sync_dir
@@ -59,16 +70,18 @@ pub(crate) fn locate(path: &Path) -> Result<(core::AccountInfo, String), String>
             .unwrap_or_else(|_| a.sync_dir.clone());
         if let Ok(rel) = path.strip_prefix(&root) {
             let rel = rel.to_string_lossy().to_string();
+            let depth = root.components().count();
             // prefer the most specific folder if accounts are nested
             if best
                 .as_ref()
-                .is_none_or(|(b, _)| b.sync_dir.as_os_str().len() < a.sync_dir.as_os_str().len())
+                .is_none_or(|(_, _, best_depth)| depth > *best_depth)
             {
-                best = Some((a, rel));
+                best = Some((a, rel, depth));
             }
         }
     }
-    best.ok_or_else(|| "That isn't inside any of your OneDrive folders.".into())
+    best.map(|(account, rel, _)| (account, rel))
+        .ok_or_else(|| "That isn't inside any of your OneDrive folders.".into())
 }
 
 /// Copies a sharing link to `path`: view-only, or one that lets people edit (change, add or
