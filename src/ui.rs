@@ -4231,15 +4231,30 @@ fn new_confdir(name: &str, accounts: &[AccountInfo]) -> PathBuf {
 
 fn add_create(ctx: &Shared) {
     let ui = ctx.borrow().ui();
+    if ui.get_add_busy() {
+        return;
+    }
     ui.set_client_done(ss(""));
+    ui.set_add_busy(true);
+    ui.set_add_msg(ss("Checking the OneDrive client…"));
+    bg(core::check_client, |ctx, check| {
+        if let Some(why) = client_blocker_for(check) {
+            let ui = ctx.borrow().ui();
+            ui.set_add_busy(false);
+            ui.set_add_msg(ss(why));
+            check_client();
+            return;
+        }
+        add_create_ready(ctx);
+        ctx.borrow().ui().set_add_busy(false);
+    });
+}
+
+fn add_create_ready(ctx: &Shared) {
+    let ui = ctx.borrow().ui();
     let mode = ui.get_add_mode();
     let name = ui.get_add_name().trim().to_string();
     let folder = ui.get_add_folder().trim().to_string();
-    if let Some(why) = client_blocker() {
-        ui.set_add_msg(ss(why));
-        check_client();
-        return;
-    }
     if name.is_empty() || folder.is_empty() {
         ui.set_add_msg(ss("Give the account a name and pick a local folder."));
         return;
@@ -4671,7 +4686,11 @@ fn check_client_update() {
 
 /// The reason not to start something that needs the client, if there is one.
 fn client_blocker() -> Option<String> {
-    match core::check_client() {
+    client_blocker_for(core::check_client())
+}
+
+fn client_blocker_for(check: core::ClientCheck) -> Option<String> {
+    match check {
         core::ClientCheck::Ok { .. } => None,
         core::ClientCheck::Missing => Some(
             "Install the OneDrive Client for Linux first — see the note at the top of the window."
