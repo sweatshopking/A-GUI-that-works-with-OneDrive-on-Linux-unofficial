@@ -136,10 +136,8 @@ pub fn view_online(path: &Path) {
 }
 
 fn service_menu_body() -> String {
-    include_str!("../packaging/linux-onedrive-gui-servicemenu.desktop").replace(
-        "Exec=linux-onedrive-gui",
-        &format!("Exec={}", core::desktop_exec()),
-    )
+    include_str!("../packaging/drivedeck-servicemenu.desktop")
+        .replace("Exec=drivedeck", &format!("Exec={}", core::desktop_exec()))
 }
 
 /// The tray's status pictures. Plasma looks a tray icon's name up in the icon theme before the
@@ -147,23 +145,23 @@ fn service_menu_body() -> String {
 /// packages install these system-wide, an AppImage keeps a copy in the user's icons.
 const STATUS_ICONS: [(&str, &str); 4] = [
     (
-        "linux-onedrive-gui-ok.svg",
-        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-ok.svg"),
+        "drivedeck-ok.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/drivedeck-ok.svg"),
     ),
     (
-        "linux-onedrive-gui-sync.svg",
-        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-sync.svg"),
+        "drivedeck-sync.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/drivedeck-sync.svg"),
     ),
     (
-        "linux-onedrive-gui-error.svg",
-        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-error.svg"),
+        "drivedeck-error.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/drivedeck-error.svg"),
     ),
     (
-        "linux-onedrive-gui-off.svg",
-        include_str!("../assets/icons/hicolor/scalable/status/linux-onedrive-gui-off.svg"),
+        "drivedeck-off.svg",
+        include_str!("../assets/icons/hicolor/scalable/status/drivedeck-off.svg"),
     ),
 ];
-const APP_ICON: &str = include_str!("../assets/linux-onedrive-gui.svg");
+const APP_ICON: &str = include_str!("../assets/drivedeck.svg");
 
 /// The status icons an AppImage keeps in the user's icons (for uninstall; the menu icon is
 /// removed with the menu entry).
@@ -215,6 +213,27 @@ pub fn refresh_service_menu() {
         }
         _ => {}
     }
+}
+
+/// For AppImages: a menu entry, icon and Dolphin actions for the current user.
+pub fn install_menu_entry() -> std::io::Result<()> {
+    let data = core::data_home();
+    let icon_dir = data.join("icons/hicolor/scalable/apps");
+    fs::create_dir_all(&icon_dir)?;
+    core::atomic_write(
+        &icon_dir.join(format!("{}.svg", core::APP_ID)),
+        APP_ICON.as_bytes(),
+    )?;
+    let apps = data.join("applications");
+    fs::create_dir_all(&apps)?;
+    let desktop = include_str!("../packaging/drivedeck.desktop")
+        .replace("Exec=drivedeck", &format!("Exec={}", core::desktop_exec()));
+    core::atomic_write(
+        &apps.join(format!("{}.desktop", core::APP_ID)),
+        desktop.as_bytes(),
+    )?;
+    install_service_menu(&data)?;
+    Ok(())
 }
 
 /// Installs the Dolphin right-click actions for this user (packages ship their own copy).

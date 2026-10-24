@@ -11,11 +11,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use chrono::{DateTime, Local, TimeZone};
 use serde::{Deserialize, Serialize};
 
-pub const APP_ID: &str = "linux-onedrive-gui";
-pub const APP_NAME: &str = "A GUI that works with OneDrive on Linux (unofficial)";
-pub const MANAGED_MARK: &str = "# Managed by linux-onedrive-gui";
+pub const APP_ID: &str = "drivedeck";
+pub const APP_NAME: &str = "DriveDeck for OneDrive";
+pub const MANAGED_MARK: &str = "# Managed by DriveDeck";
+/// The mark units got before the app was renamed (0.4.x); `repair_managed_units` updates it.
+pub const OLD_MANAGED_MARK: &str = "# Managed by linux-onedrive-gui";
+
+/// A unit file this app wrote (now or under its old name).
+pub fn is_managed(text: &str) -> bool {
+    text.lines()
+        .any(|l| l == MANAGED_MARK || l == OLD_MANAGED_MARK)
+}
 /// Session-bus name the tray owns while it runs, so only one tray ever starts.
-pub const TRAY_BUS_NAME: &str = "io.github.sweatshopking.LinuxOnedriveGui.Tray";
+pub const TRAY_BUS_NAME: &str = "io.github.sweatshopking.DriveDeck.Tray";
 
 // ---------------------------------------------------------------- paths
 
@@ -120,7 +128,7 @@ pub const CLIENT_INSTALL_URL: &str =
 /// ships its own copy, so the client keeps getting updates from its own packages.
 pub fn client_binary() -> Option<PathBuf> {
     // lets the automated tests use a stand-in client
-    if let Some(p) = std::env::var_os("LINUX_ONEDRIVE_GUI_CLIENT") {
+    if let Some(p) = std::env::var_os("DRIVEDECK_CLIENT") {
         return Some(PathBuf::from(p));
     }
     which("onedrive").or_else(|| {
@@ -343,20 +351,26 @@ impl Hold {
 pub fn device_hold() -> Option<Hold> {
     static CACHE: std::sync::Mutex<Option<(std::time::Instant, Option<Hold>)>> =
         std::sync::Mutex::new(None);
-    let mut c = CACHE.lock().unwrap();
+    let mut c = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, h)) = *c
         && at.elapsed() < std::time::Duration::from_secs(10)
     {
         return h;
     }
-    let s = AppSettings::load();
-    let h = if s.pause_on_metered.unwrap_or(true) && crate::dbus::network_metered() {
-        Some(Hold::Metered)
-    } else if s.pause_on_power_saver.unwrap_or(true) && crate::dbus::power_saver() {
-        Some(Hold::PowerSaver)
-    } else {
-        None
-    };
+    // On a thread of its own: the tray icon's D-Bus service asks for this (the tooltip) from
+    // inside its async runtime, where a blocking D-Bus call panics.
+    let h = std::thread::spawn(|| {
+        let s = AppSettings::load();
+        if s.pause_on_metered.unwrap_or(true) && crate::dbus::network_metered() {
+            Some(Hold::Metered)
+        } else if s.pause_on_power_saver.unwrap_or(true) && crate::dbus::power_saver() {
+            Some(Hold::PowerSaver)
+        } else {
+            None
+        }
+    })
+    .join()
+    .unwrap_or(None);
     *c = Some((std::time::Instant::now(), h));
     h
 }
@@ -381,6 +395,9 @@ pub struct AppSettings {
     /// The newest version the user was already told about
     #[serde(skip_serializing_if = "Option::is_none")]
     pub update_notified: Option<String>,
+    /// Sync services started outside this app (see OutsideStart) the user chose to leave as they are
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub outside_start_kept: Vec<String>,
     /// Pause syncing on a metered network (None: yes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pause_on_metered: Option<bool>,
@@ -917,8 +934,7 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
         }
         Ok(_) => {
             let text = fs::read_to_string(&path)?;
-            if !text.contains(MANAGED_MARK) || confdir_from_exec(&text).as_deref() != Some(confdir)
-            {
+            if !is_managed(&text) || confdir_from_exec(&text).as_deref() != Some(confdir) {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     format!(
@@ -934,7 +950,7 @@ pub fn write_managed_unit(unit: &str, name: &str, confdir: &Path) -> std::io::Re
     let body = format!(
         "[Unit]\n\
          Description=OneDrive sync ({})\n\
-         Documentation=https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial\n\
+         Documentation=https://github.com/sweatshopking/DriveDeck\n\
          After=network-online.target\n\
          Wants=network-online.target\n\
          {}\n\
@@ -1324,7 +1340,7 @@ pub fn repair_managed_units() -> Vec<String> {
         let Ok(text) = fs::read_to_string(&p) else {
             continue;
         };
-        if !text.contains(MANAGED_MARK) {
+        if !is_managed(&text) {
             continue;
         }
         let Some(confdir) = confdir_from_exec(&text) else {
@@ -1340,8 +1356,10 @@ pub fn repair_managed_units() -> Vec<String> {
             if l.starts_with("ConditionPathExists=") {
                 continue; // rewritten below
             }
-            if l == MANAGED_MARK {
+            if l == MANAGED_MARK || l == OLD_MANAGED_MARK {
                 new.push(condition_line(&client));
+                new.push(MANAGED_MARK.to_string());
+                continue;
             }
             new.push(if l.starts_with("ExecStart=") {
                 exec.clone()
@@ -1350,7 +1368,9 @@ pub fn repair_managed_units() -> Vec<String> {
             });
         }
         let new = new.join("\n") + "\n";
-        if new != text && atomic_write(&p, new.as_bytes()).is_ok() {
+        // only the old mark changed: no need to restart a sync for a comment
+        let only_mark = new == text.replace(OLD_MANAGED_MARK, MANAGED_MARK);
+        if new != text && atomic_write(&p, new.as_bytes()).is_ok() && !only_mark {
             changed.push(e.file_name().to_string_lossy().to_string());
         }
     }
@@ -1470,6 +1490,67 @@ fn description_name(text: &str) -> Option<String> {
     (b > a + 1).then(|| d[a + 1..b].replace("%%", "%"))
 }
 
+/// A sync service someone switched on outside this app for the whole computer: for every user at
+/// login (`systemctl --global enable`, `system` false) or for this user at boot
+/// (`systemctl enable onedrive@<user>`). The admin may have set it up on purpose, or an older
+/// onedrive package left it behind; it keeps starting whatever this app does, so we only report
+/// it, and switch it off only when asked.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutsideStart {
+    pub unit: String,
+    pub system: bool,
+}
+
+pub fn outside_starts() -> Vec<OutsideStart> {
+    outside_starts_in(
+        Path::new("/etc/systemd/user"),
+        Path::new("/etc/systemd/system"),
+        &login_name(),
+    )
+}
+
+fn login_name() -> String {
+    // SAFETY: getpwuid returns a pointer into static storage (or null); it is read straight away
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_name.is_null() {
+            return std::env::var("USER").unwrap_or_default();
+        }
+        std::ffi::CStr::from_ptr((*pw).pw_name)
+            .to_string_lossy()
+            .into_owned()
+    }
+}
+
+fn outside_starts_in(user_dir: &Path, system_dir: &Path, login: &str) -> Vec<OutsideStart> {
+    let mut out: Vec<OutsideStart> = Vec::new();
+    let system_unit = format!("onedrive@{login}.service");
+    for (dir, system) in [(user_dir, false), (system_dir, true)] {
+        let Ok(rd) = fs::read_dir(dir) else { continue };
+        for wants in rd.flatten() {
+            if !wants.file_name().to_string_lossy().ends_with(".wants") {
+                continue;
+            }
+            let Ok(units) = fs::read_dir(wants.path()) else {
+                continue;
+            };
+            for u in units.flatten() {
+                let unit = u.file_name().to_string_lossy().into_owned();
+                let ours = if system {
+                    !login.is_empty() && unit == system_unit
+                } else {
+                    unit.starts_with("onedrive") && unit.ends_with(".service")
+                };
+                if ours && !out.iter().any(|o| o.unit == unit && o.system == system) {
+                    out.push(OutsideStart { unit, system });
+                }
+            }
+        }
+    }
+    out.sort_by(|a, b| (a.system, &a.unit).cmp(&(b.system, &b.unit)));
+    out
+}
+
 /// Every account we can find: user units named onedrive*.service, plus config directories
 /// (~/.config/onedrive*) that have a config or sign-in but no unit yet.
 pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
@@ -1504,7 +1585,7 @@ pub fn discover(settings: &AppSettings) -> Vec<AccountInfo> {
                 continue;
             }
         }
-        let managed = text.contains(MANAGED_MARK);
+        let managed = is_managed(&text);
         let entry = by_dir.entry(dir).or_insert((None, false, None));
         // prefer an enabled unit if several point at the same config dir
         if entry.0.is_none() || unit_state(&unit).enabled {
@@ -1685,7 +1766,7 @@ pub fn ensure_unit(acc: &AccountInfo) -> std::io::Result<String> {
             }
             Ok(_) => {
                 let belongs_here = fs::read_to_string(&path).is_ok_and(|text| {
-                    text.contains(MANAGED_MARK)
+                    is_managed(&text)
                         && confdir_from_exec(&text).as_deref() == Some(acc.confdir.as_path())
                 });
                 if belongs_here {
@@ -2182,10 +2263,7 @@ pub fn icon_theme_path() -> Option<PathBuf> {
     }
     cands
         .into_iter()
-        .find(|p| {
-            p.join("hicolor/scalable/status/linux-onedrive-gui-ok.svg")
-                .exists()
-        })
+        .find(|p| p.join("hicolor/scalable/status/drivedeck-ok.svg").exists())
         .map(|p| p.canonicalize().unwrap_or(p))
 }
 
@@ -2362,12 +2440,12 @@ impl Phase {
     /// Our own status icons (assets/icons), so the tray looks the same on every desktop.
     pub fn icon(self) -> &'static str {
         match self {
-            Phase::Syncing | Phase::Unknown | Phase::Resyncing => "linux-onedrive-gui-sync",
-            Phase::UpToDate => "linux-onedrive-gui-ok",
+            Phase::Syncing | Phase::Unknown | Phase::Resyncing => "drivedeck-sync",
+            Phase::UpToDate => "drivedeck-ok",
             Phase::Error | Phase::NeedsResync | Phase::SignedOut | Phase::BigDelete => {
-                "linux-onedrive-gui-error"
+                "drivedeck-error"
             }
-            Phase::Stopped | Phase::Off | Phase::Paused => "linux-onedrive-gui-off",
+            Phase::Stopped | Phase::Off | Phase::Paused => "drivedeck-off",
         }
     }
 }
@@ -2720,6 +2798,46 @@ pub fn show_in_folder(p: &Path) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn outside_starts_found() {
+        let root = std::env::temp_dir().join(format!("lodg-os-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let (user, system) = (root.join("user"), root.join("system"));
+        let link = |dir: &Path, wants: &str, unit: &str| {
+            fs::create_dir_all(dir.join(wants)).unwrap();
+            std::os::unix::fs::symlink("/usr/lib/systemd/user/x", dir.join(wants).join(unit))
+                .unwrap();
+        };
+        link(&user, "default.target.wants", "onedrive.service");
+        link(&user, "default.target.wants", "pipewire.service");
+        link(&user, "graphical-session.target.wants", "onedrive.service");
+        link(&system, "multi-user.target.wants", "onedrive@josh.service");
+        link(
+            &system,
+            "multi-user.target.wants",
+            "onedrive@someone.service",
+        );
+        let found = outside_starts_in(&user, &system, "josh");
+        assert_eq!(
+            found,
+            vec![
+                OutsideStart {
+                    unit: "onedrive.service".into(),
+                    system: false
+                },
+                OutsideStart {
+                    unit: "onedrive@josh.service".into(),
+                    system: true
+                },
+            ]
+        );
+        assert_eq!(
+            outside_starts_in(&root.join("none"), &root.join("none"), "josh"),
+            vec![]
+        );
+        let _ = fs::remove_dir_all(&root);
+    }
 
     #[test]
     fn schedule_windows() {

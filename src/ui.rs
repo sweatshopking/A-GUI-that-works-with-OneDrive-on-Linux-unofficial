@@ -3994,13 +3994,13 @@ fn add_create(ctx: &Shared) {
 
 // ---------------------------------------------------------------- app page
 
-fn autostart_file() -> PathBuf {
+pub fn autostart_file() -> PathBuf {
     core::config_home()
         .join("autostart")
         .join(format!("{}.desktop", core::APP_ID))
 }
 
-fn set_autostart(on: bool) -> Result<(), String> {
+pub fn set_autostart(on: bool) -> Result<(), String> {
     let f = autostart_file();
     if on {
         fs::create_dir_all(f.parent().unwrap())
@@ -4072,30 +4072,10 @@ fn prepare_app_page(ctx: &Shared) {
 
 /// For AppImages: add a menu entry, icon and Dolphin actions for the current user.
 fn add_to_menu(ctx: &Shared) {
-    let r = (|| -> std::io::Result<()> {
-        let data = core::data_home();
-        let icon_dir = data.join("icons/hicolor/scalable/apps");
-        fs::create_dir_all(&icon_dir)?;
-        core::atomic_write(
-            &icon_dir.join(format!("{}.svg", core::APP_ID)),
-            include_bytes!("../assets/linux-onedrive-gui.svg"),
-        )?;
-        let apps = data.join("applications");
-        fs::create_dir_all(&apps)?;
-        let desktop = include_str!("../packaging/linux-onedrive-gui.desktop").replace(
-            "Exec=linux-onedrive-gui",
-            &format!("Exec={}", core::desktop_exec()),
-        );
-        core::atomic_write(
-            &apps.join(format!("{}.desktop", core::APP_ID)),
-            desktop.as_bytes(),
-        )?;
-        crate::share::install_service_menu(&data)?;
-        Ok(())
-    })();
+    let r = crate::share::install_menu_entry();
     let ui = ctx.borrow().ui();
     ui.set_app_msg(ss(match r {
-        Ok(()) => "Added. Look for \"A GUI that works with OneDrive on Linux (unofficial)\" in your applications menu. Right-clicking a file in Dolphin now also shows a OneDrive menu with \"Copy view-only link\", \"Copy editing link\" and \"View on the OneDrive website\".".to_string(),
+        Ok(()) => "Added. Look for \"DriveDeck for OneDrive\" in your applications menu. Right-clicking a file in Dolphin now also shows a OneDrive menu with \"Copy view-only link\", \"Copy editing link\" and \"View on the OneDrive website\".".to_string(),
         Err(e) => format!("Couldn't add it: {e}"),
     }));
 }
@@ -4133,6 +4113,114 @@ fn put_client_to_work(replaced: bool) {
             core::start_idle_units(&settings);
         },
         |ctx, ()| refresh(ctx),
+    );
+}
+
+// ---------------------------------------------------------------- sync started outside this app
+
+/// What the outside-start banner says, or "" for nothing to show.
+fn outside_start_text(found: &[core::OutsideStart], kept: &[String]) -> String {
+    if found.iter().all(|o| kept.contains(&o.unit)) {
+        return String::new();
+    }
+    let names = |system: bool| {
+        found
+            .iter()
+            .filter(|o| o.system == system)
+            .map(|o| o.unit.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let (everyone, boot) = (names(false), names(true));
+    let mut parts = Vec::new();
+    if !everyone.is_empty() {
+        parts.push(format!(
+            "A setting for the whole computer starts {everyone} at login for everyone who uses it."
+        ));
+    }
+    if !boot.is_empty() {
+        parts.push(format!(
+            "A system service, {boot}, starts syncing for you when the computer starts."
+        ));
+    }
+    parts.push(
+        "Whoever looks after this computer may have set this up on purpose, or an older \
+         onedrive package left it behind. While it's there, OneDrive keeps syncing even \
+         when the account is turned off here."
+            .into(),
+    );
+    parts.join(" ")
+}
+
+fn show_outside_starts() {
+    bg(core::outside_starts, |ctx, found| {
+        let kept = AppSettings::load().outside_start_kept;
+        let ui = ctx.borrow().ui();
+        ui.set_outside_start(ss(outside_start_text(&found, &kept)));
+        ui.set_outside_start_hint(ss(
+            "Turning it off asks for your password and changes nothing else. It can be switched \
+             back on with systemctl.",
+        ));
+    });
+}
+
+/// Switches off the outside starts after the user asked to: one password prompt for both kinds.
+fn turn_off_outside_starts(ctx: &Shared) {
+    let ui = ctx.borrow().ui();
+    ui.set_outside_start_busy(true);
+    bg(
+        || {
+            let found = core::outside_starts();
+            let everyone: Vec<&str> = found
+                .iter()
+                .filter(|o| !o.system)
+                .map(|o| o.unit.as_str())
+                .collect();
+            let boot: Vec<&str> = found
+                .iter()
+                .filter(|o| o.system)
+                .map(|o| o.unit.as_str())
+                .collect();
+            if found.is_empty() {
+                return Ok(());
+            }
+            // the first argument says how many of the rest are for-everyone units
+            let script = r#"n=$1; shift; i=0
+for u; do
+    if [ "$i" -lt "$n" ]; then systemctl --global disable -- "$u"
+    else systemctl disable --now -- "$u"; fi || exit
+    i=$((i + 1))
+done"#;
+            let out = Command::new(clientinstall::elevate())
+                .args(["/bin/sh", "-c", script, "sh", &everyone.len().to_string()])
+                .args(&everyone)
+                .args(&boot)
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|e| format!("Couldn't ask for the password: {e}"))?;
+            match out.status.code() {
+                Some(0) => Ok(()),
+                Some(126) => {
+                    Err("Nothing was changed (the password window was closed).".to_string())
+                }
+                Some(127) => Err("Nothing was changed: your computer didn't allow it.".to_string()),
+                _ => Err(format!(
+                    "That didn't work: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                )),
+            }
+        },
+        |ctx, r: Result<(), String>| {
+            let ui = ctx.borrow().ui();
+            ui.set_outside_start_busy(false);
+            match r {
+                Ok(()) => {
+                    show_outside_starts();
+                    refresh(ctx);
+                }
+                Err(e) => ui.set_outside_start_hint(ss(e)),
+            }
+        },
     );
 }
 
@@ -4505,7 +4593,7 @@ pub(crate) fn use_startup_token() {
 }
 
 /// The settings window's title (as in app.slint), by which the panel finds it on KDE Plasma.
-pub const WINDOW_TITLE: &str = "A GUI that works with OneDrive on Linux (unofficial)";
+pub const WINDOW_TITLE: &str = "DriveDeck for OneDrive";
 
 pub fn run(account: Option<String>) {
     if !claim_window(account.as_deref()) {
@@ -4593,6 +4681,7 @@ pub fn run(account: Option<String>) {
     // the first load is synchronous so the window opens fully populated, on the right page
     apply_snapshot(&ctx, take_snapshot());
     show_client_check(&ctx, &core::check_client());
+    show_outside_starts();
     let start = account
         .and_then(|k| {
             ctx.borrow()
@@ -4906,6 +4995,20 @@ pub fn run(account: Option<String>) {
         ui.set_client_update(false);
         ui.set_client_problem(ss(""));
         ui.set_client_install_msg(ss(""));
+    });
+    on!(on_outside_start_off, |c| turn_off_outside_starts(c));
+    on!(on_outside_start_keep, |c| {
+        let mut s = AppSettings::load();
+        let ui = c.borrow().ui();
+        for o in core::outside_starts() {
+            if !s.outside_start_kept.contains(&o.unit) {
+                s.outside_start_kept.push(o.unit);
+            }
+        }
+        match s.save() {
+            Ok(()) => ui.set_outside_start(ss("")),
+            Err(e) => ui.set_outside_start_hint(ss(format!("Couldn't save that: {e}"))),
+        }
     });
     on!(on_client_instructions, |_c| core::run_detached(
         "xdg-open",

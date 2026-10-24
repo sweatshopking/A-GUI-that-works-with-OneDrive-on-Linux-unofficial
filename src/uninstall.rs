@@ -209,6 +209,7 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
     ]
     .into_iter()
     .chain(crate::share::user_icon_files())
+    .chain(crate::rename::old_user_files())
     {
         let result = if f.is_dir() {
             fs::remove_dir_all(&f)
@@ -226,7 +227,12 @@ pub fn remove_user_files(keep_setup: bool) -> Vec<String> {
 
 /// Asks a running tray icon to go away, so it doesn't restart anything while we clean up.
 fn stop_tray() -> bool {
-    let Ok(owner) = crate::dbus::name_owner_pid_checked(core::TRAY_BUS_NAME) else {
+    stop_tray_named(core::TRAY_BUS_NAME)
+}
+
+/// Stops the tray that owns `bus_name` (ours, or one from before the app was renamed).
+pub fn stop_tray_named(bus_name: &str) -> bool {
+    let Ok(owner) = crate::dbus::name_owner_pid_checked(bus_name) else {
         return false;
     };
     if let Some(pid) = owner
@@ -253,7 +259,7 @@ fn stop_tray() -> bool {
             return false;
         }
         for _ in 0..100 {
-            if crate::dbus::name_owner_pid(core::TRAY_BUS_NAME).is_none() {
+            if crate::dbus::name_owner_pid(bus_name).is_none() {
                 return true;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));

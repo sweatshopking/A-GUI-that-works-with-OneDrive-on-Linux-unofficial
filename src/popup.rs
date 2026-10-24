@@ -523,7 +523,7 @@ fn folder_name(p: &Path) -> Option<String> {
 /// folder in a tab, a program reusing its window); or is a Dolphin window that shows, or switches
 /// to, the folder. Under a fixed name, so the next panel unloads one still waiting.
 fn focus_opened_with_kwin(opened: &Opened) {
-    const NAME: &str = "linux-onedrive-gui-focus-opened";
+    const NAME: &str = "drivedeck-focus-opened";
     crate::dbus::kwin_unload_script(NAME);
     // a JSON string is a JavaScript string; the two separators JSON leaves alone are escaped too
     let js = |s: Option<&str>| {
@@ -680,7 +680,7 @@ fn launch(f: impl FnOnce() + 'static) {
 /// which then only flags the window for attention. Under a fixed name, so the next panel unloads
 /// one left waiting (for a window that never opened).
 fn focus_settings_with_kwin() {
-    const NAME: &str = "linux-onedrive-gui-focus-settings";
+    const NAME: &str = "drivedeck-focus-settings";
     crate::dbus::kwin_unload_script(NAME);
     let script = format!(
         r#"(function () {{
@@ -765,7 +765,7 @@ fn debug(what: &str) {
 /// out of the task bar, and gives it focus. Returns the script's name, to unload it later.
 fn place_with_kwin(at: Option<(i32, i32)>) -> Option<String> {
     let pid = std::process::id();
-    let name = format!("linux-onedrive-gui-popup-{pid}");
+    let name = format!("drivedeck-popup-{pid}");
     // numbers only go into the script
     let (px, py) = match at {
         Some((x, y)) => (x.to_string(), y.to_string()),

@@ -4,8 +4,8 @@
 
 use std::time::Duration;
 
-pub const RELEASES_URL: &str = "https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/releases/latest";
-const API_URL: &str = "https://api.github.com/repos/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/releases/latest";
+pub const RELEASES_URL: &str = "https://github.com/sweatshopking/DriveDeck/releases/latest";
+const API_URL: &str = "https://api.github.com/repos/sweatshopking/DriveDeck/releases/latest";
 
 /// "1.2.3" or "v1.2.3" as numbers; anything else (a pre-release tag, say) is None.
 fn parse(v: &str) -> Option<(u64, u64, u64)> {
@@ -39,7 +39,7 @@ pub fn latest_version() -> Result<Option<String>, ()> {
     let mut resp = agent
         .get(&url)
         // GitHub asks for one; the version tells nothing about the user
-        .header("User-Agent", "linux-onedrive-gui")
+        .header("User-Agent", "drivedeck")
         .header("Accept", "application/vnd.github+json")
         .call()
         .map_err(|_| ())?;

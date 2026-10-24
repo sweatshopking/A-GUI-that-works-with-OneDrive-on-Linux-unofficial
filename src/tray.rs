@@ -1014,7 +1014,7 @@ fn check_for_update(handle: &ksni::blocking::Handle<Tray>) {
 }
 
 /// Set on the tray we start after an update, so it waits for this one to leave.
-pub const RESTART_ENV: &str = "LINUX_ONEDRIVE_GUI_TRAY_RESTART";
+pub const RESTART_ENV: &str = "DRIVEDECK_TRAY_RESTART";
 
 fn restart_into_new_version() {
     let started = Command::new(core::self_command())

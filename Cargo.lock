@@ -1011,6 +1011,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
 
 [[package]]
+name = "drivedeck"
+version = "0.4.1"
+dependencies = [
+ "chrono",
+ "ksni",
+ "libc",
+ "raw-window-handle",
+ "serde",
+ "serde_json",
+ "slint",
+ "slint-build",
+ "ureq",
+ "wayland-backend",
+ "wayland-client",
+ "wayland-protocols",
+ "zbus",
+]
+
+[[package]]
 name = "drm"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2532,25 +2551,6 @@ name = "linebender_resource_handle"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d4a5ff6bcca6c4867b1c4fd4ef63e4db7436ef363e0ad7531d1558856bae64f4"
-
-[[package]]
-name = "linux-onedrive-gui"
-version = "0.4.1"
-dependencies = [
- "chrono",
- "ksni",
- "libc",
- "raw-window-handle",
- "serde",
- "serde_json",
- "slint",
- "slint-build",
- "ureq",
- "wayland-backend",
- "wayland-client",
- "wayland-protocols",
- "zbus",
-]
 
 [[package]]
 name = "linux-raw-sys"

@@ -43,8 +43,8 @@ pub fn os_release() -> HashMap<String, String> {
     static OS: std::sync::OnceLock<HashMap<String, String>> = std::sync::OnceLock::new();
     OS.get_or_init(|| {
         // lets the automated tests pretend to be another distribution
-        let path = std::env::var("LINUX_ONEDRIVE_GUI_OS_RELEASE")
-            .unwrap_or_else(|_| "/etc/os-release".into());
+        let path =
+            std::env::var("DRIVEDECK_OS_RELEASE").unwrap_or_else(|_| "/etc/os-release".into());
         parse_os_release(&fs::read_to_string(path).unwrap_or_default())
     })
     .clone()
@@ -173,11 +173,11 @@ fn image_based() -> bool {
 /// The installer that runs as root. The .deb and .rpm also install it as `HELPER`, together with a
 /// polkit action that words the password prompt; the AppImage hands it to /bin/sh instead.
 const SCRIPT: &str = include_str!("../packaging/install-client");
-const HELPER: &str = "/usr/libexec/linux-onedrive-gui/install-client";
+const HELPER: &str = "/usr/libexec/drivedeck/install-client";
 
 /// pkexec, unless the automated tests replace it.
-fn elevate() -> String {
-    std::env::var("LINUX_ONEDRIVE_GUI_PKEXEC").unwrap_or_else(|_| "pkexec".into())
+pub fn elevate() -> String {
+    std::env::var("DRIVEDECK_PKEXEC").unwrap_or_else(|_| "pkexec".into())
 }
 
 impl Plan {
@@ -292,7 +292,7 @@ pub fn aur_update() -> Option<(String, String)> {
     )
     .ok()?;
     let installed = installed.split_whitespace().nth(1)?.to_string();
-    let url = std::env::var("LINUX_ONEDRIVE_GUI_AUR_RPC")
+    let url = std::env::var("DRIVEDECK_AUR_RPC")
         .unwrap_or_else(|_| "https://aur.archlinux.org/rpc/v5/info".into());
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(15)))

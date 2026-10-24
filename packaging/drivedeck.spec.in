@@ -1,10 +1,10 @@
 # Binary-only spec: packaging/build.sh stages the files and passes their location as %{stage}.
-Name:           linux-onedrive-gui
+Name:           drivedeck
 Version:        @VERSION@
 Release:        1
-Summary:        OneDrive and SharePoint sync with a tray icon and settings window
+Summary:        DriveDeck for OneDrive: the easiest, most complete way to use OneDrive on Linux
 License:        GPL-3.0-or-later
-URL:            https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial
+URL:            https://github.com/sweatshopking/DriveDeck
 # libraries the window opens at runtime (dlopen), which automatic dependency detection can't see
 Requires:       libxkbcommon.so.0()(64bit)
 Requires:       libEGL.so.1()(64bit)
@@ -15,6 +15,9 @@ Requires:       xdg-utils
 # the sync engine, installed separately so it keeps getting its own updates
 Recommends:     onedrive >= 2.5.0
 Recommends:     (kdialog or zenity)
+# the app's name before 0.5.0
+Provides:       linux-onedrive-gui = %{version}-%{release}
+Obsoletes:      linux-onedrive-gui < 0.5.0
 
 %global debug_package %{nil}
 %global __strip /bin/true
@@ -29,14 +32,15 @@ command line.
 cp -a %{stage}/. %{buildroot}/
 
 %files
-%license /usr/share/licenses/linux-onedrive-gui/LICENSE
-%doc /usr/share/doc/linux-onedrive-gui/THIRD-PARTY.md
+%license /usr/share/licenses/drivedeck/LICENSE
+%doc /usr/share/doc/drivedeck/THIRD-PARTY.md
+/usr/bin/drivedeck
 /usr/bin/linux-onedrive-gui
-/usr/libexec/linux-onedrive-gui/install-client
-/usr/share/polkit-1/actions/io.github.sweatshopking.LinuxOnedriveGui.policy
-/usr/share/applications/linux-onedrive-gui.desktop
-/usr/share/metainfo/io.github.sweatshopking.LinuxOnedriveGui.metainfo.xml
-/usr/share/icons/hicolor/scalable/apps/linux-onedrive-gui.svg
-/usr/share/icons/hicolor/256x256/apps/linux-onedrive-gui.png
-/usr/share/icons/hicolor/scalable/status/linux-onedrive-gui-*.svg
-/usr/share/kio/servicemenus/linux-onedrive-gui.desktop
+/usr/libexec/drivedeck/install-client
+/usr/share/polkit-1/actions/io.github.sweatshopking.DriveDeck.policy
+/usr/share/applications/drivedeck.desktop
+/usr/share/metainfo/io.github.sweatshopking.DriveDeck.metainfo.xml
+/usr/share/icons/hicolor/scalable/apps/drivedeck.svg
+/usr/share/icons/hicolor/256x256/apps/drivedeck.png
+/usr/share/icons/hicolor/scalable/status/drivedeck-*.svg
+/usr/share/kio/servicemenus/drivedeck.desktop

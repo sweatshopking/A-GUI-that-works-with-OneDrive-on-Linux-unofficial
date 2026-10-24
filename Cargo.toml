@@ -1,12 +1,12 @@
 [package]
-name = "linux-onedrive-gui"
+name = "drivedeck"
 version = "0.4.1"
 edition = "2024"
-description = "Tray app and settings window for the OneDrive Client for Linux"
+description = "DriveDeck for OneDrive: the easiest, most complete way to use OneDrive on Linux"
 license = "GPL-3.0-or-later"
 authors = ["sweatshopking"]
-repository = "https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial"
-homepage = "https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial"
+repository = "https://github.com/sweatshopking/DriveDeck"
+homepage = "https://github.com/sweatshopking/DriveDeck"
 readme = "README.md"
 keywords = ["onedrive", "sharepoint", "sync", "tray", "linux"]
 categories = ["gui"]

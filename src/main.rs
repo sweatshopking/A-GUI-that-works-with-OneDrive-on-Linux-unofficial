@@ -1,9 +1,9 @@
-//! A GUI that works with OneDrive on Linux (unofficial) — a tray icon and settings window for the OneDrive Client for Linux.
+//! DriveDeck for OneDrive — a tray icon and settings window for the OneDrive Client for Linux.
 //!
-//!   linux-onedrive-gui              open the window (and start the tray icon if it isn't running)
-//!   linux-onedrive-gui --tray       tray icon only (used at login)
-//!   linux-onedrive-gui --popup [x y] the panel a click on the tray icon opens (x, y: where)
-//!   linux-onedrive-gui --client …   run the installed onedrive client (kept for units written by
+//!   drivedeck              open the window (and start the tray icon if it isn't running)
+//!   drivedeck --tray       tray icon only (used at login)
+//!   drivedeck --popup [x y] the panel a click on the tray icon opens (x, y: where)
+//!   drivedeck --client …   run the installed onedrive client (kept for units written by
 //!                                   older versions, which ran the client through the app)
 
 mod activation;
@@ -17,6 +17,7 @@ mod filewin;
 mod glass;
 mod graph;
 mod popup;
+mod rename;
 mod share;
 #[cfg(feature = "test-driver")]
 mod testdrive;
@@ -102,6 +103,7 @@ fn main() {
                 dbus::Claim::Owned(c) => Some(c),
                 dbus::Claim::Unavailable => None,
             };
+            rename::migrate();
             tray::run()
         }
         Some("--popup") => {
@@ -153,6 +155,8 @@ fn main() {
                 .position(|a| a == "--account")
                 .and_then(|i| args.get(i + 1))
                 .map(|a| a.split('\n').next().unwrap_or_default().to_string());
+            // before anything reads the settings
+            rename::migrate();
             ui::run(account)
         }
     }

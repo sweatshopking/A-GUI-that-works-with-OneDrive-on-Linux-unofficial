@@ -12,8 +12,9 @@
 set -euo pipefail
 
 LINUXDEPLOY_TAG="${LINUXDEPLOY_TAG:-1-alpha-20251107-1}"
-APP=linux-onedrive-gui
-APPSTREAM_ID=io.github.sweatshopking.LinuxOnedriveGui
+APP=drivedeck
+APPSTREAM_ID=io.github.sweatshopking.DriveDeck
+OLD_APP=linux-onedrive-gui # the name before 0.5.0
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${CARGO_TARGET_DIR:-$ROOT/target}/package-work"
@@ -72,6 +73,9 @@ stage_tree() {
     local dest="$1"
     rm -rf "$dest"
     install -Dm755 "$BIN" "$dest/usr/bin/$APP"
+    # the name before 0.5.0: login entries of earlier versions start it, and the app then moves
+    # them (and the rest of the user's setup) to the new name
+    ln -s "$APP" "$dest/usr/bin/$OLD_APP"
     # "Install it for me": the installer, and a polkit action that words its password prompt
     install -Dm755 "$ROOT/packaging/install-client" "$dest/usr/libexec/$APP/install-client"
     install -Dm644 "$ROOT/packaging/$APPSTREAM_ID.policy" "$dest/usr/share/polkit-1/actions/$APPSTREAM_ID.policy"
@@ -108,8 +112,11 @@ Architecture: $DEB_ARCH
 Maintainer: sweatshopking <336541686+sweatshopking@users.noreply.github.com>
 Depends: $linked, $runtime
 Recommends: onedrive (>= 2.5.0), kdialog | zenity
-Homepage: https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial
-Description: OneDrive and SharePoint sync with a tray icon and settings window
+Provides: $OLD_APP
+Conflicts: $OLD_APP
+Replaces: $OLD_APP
+Homepage: https://github.com/sweatshopking/DriveDeck
+Description: DriveDeck for OneDrive: the easiest, most complete way to use OneDrive on Linux
  A friendly front end for the OneDrive Client for Linux (abraunegg/onedrive),
  which does the syncing and is installed separately. Sign in, choose folders,
  set sync times, pause, see what synced and share links, without using the
@@ -155,13 +162,13 @@ build_appimage() {
     export APPIMAGE_EXTRACT_AND_RUN=1
     (
         cd "$WORK"
-        LDAI_OUTPUT="$DIST/A_GUI_that_works_with_OneDrive_on_Linux-unofficial-${VERSION}-${ARCH}.AppImage" \
+        LDAI_OUTPUT="$DIST/DriveDeck-${VERSION}-${ARCH}.AppImage" \
             "$ld" --appdir "$appdir" \
             --executable "$BIN" \
             --desktop-file "$ROOT/packaging/$APP.desktop" \
             --icon-file "$ROOT/assets/$APP.svg" >"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
         bundled_sources "$appdir" >"$appdir/usr/share/licenses/$APP/BUNDLED-LIBRARIES.txt"
-        LDAI_OUTPUT="$DIST/A_GUI_that_works_with_OneDrive_on_Linux-unofficial-${VERSION}-${ARCH}.AppImage" \
+        LDAI_OUTPUT="$DIST/DriveDeck-${VERSION}-${ARCH}.AppImage" \
             "$ld" --appdir "$appdir" --output appimage >>"$WORK/linuxdeploy.log" 2>&1 || { tail -40 "$WORK/linuxdeploy.log"; exit 1; }
     )
     ls -la "$DIST"/*-"$ARCH".AppImage

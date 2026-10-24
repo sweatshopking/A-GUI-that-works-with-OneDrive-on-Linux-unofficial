@@ -1,4 +1,6 @@
-# A GUI that works with OneDrive on Linux (unofficial)
+# DriveDeck for OneDrive
+
+**The easiest, most complete way to use OneDrive on Linux.**
 
 **Entirely unofficial — not endorsed by Microsoft at all.**
 
@@ -212,19 +214,23 @@ wherever it came from.
 
 ### 2. This app
 
-Download it from the [latest release](https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/releases/latest):
+Download it from the [latest release](https://github.com/sweatshopking/DriveDeck/releases/latest):
 
 | Your system | File | How to install |
 |---|---|---|
-| Ubuntu 22.04+, Linux Mint 21+, Debian 12+, Pop!_OS, Zorin | `linux-onedrive-gui_…_amd64.deb` | Double-click it, or `sudo apt install ./linux-onedrive-gui_*.deb` |
-| Fedora 41+, openSUSE | `linux-onedrive-gui-….x86_64.rpm` | Double-click it, or `sudo dnf install ./linux-onedrive-gui-*.rpm` (openSUSE: `sudo zypper install ./linux-onedrive-gui-*.rpm`) |
-| Anything else, or no admin rights | `A_GUI_that_works_with_OneDrive_on_Linux-unofficial-…-x86_64.AppImage` | Right-click → Properties → allow executing, then double-click it. In the app, *App settings → Add to my applications menu*. |
+| Ubuntu 22.04+, Linux Mint 21+, Debian 12+, Pop!_OS, Zorin | `drivedeck_…_amd64.deb` | Double-click it, or `sudo apt install ./drivedeck_*.deb` |
+| Fedora 41+, openSUSE | `drivedeck-….x86_64.rpm` | Double-click it, or `sudo dnf install ./drivedeck-*.rpm` (openSUSE: `sudo zypper install ./drivedeck-*.rpm`) |
+| Anything else, or no admin rights | `DriveDeck-…-x86_64.AppImage` | Right-click → Properties → allow executing, then double-click it. In the app, *App settings → Add to my applications menu*. |
 
 Those are for ordinary PCs. For ARM computers (Raspberry Pi 4/5, ARM laptops) pick the same kind of file
 ending in `arm64` / `aarch64`.
 
-Then open **A GUI that works with OneDrive on Linux (unofficial)** from your applications menu and follow
+Then open **DriveDeck for OneDrive** from your applications menu and follow
 the steps. To update, install the newer file the same way.
+
+DriveDeck used to be called "A GUI that works with OneDrive on Linux (unofficial)". Installing
+DriveDeck replaces it, and your accounts and settings carry over by themselves. With the AppImage,
+start the new file once; you can then delete the old one.
 
 ### Requirements
 
@@ -252,7 +258,7 @@ setup*.
 - Problems with **syncing itself** (files not syncing, errors from the client): the
   [OneDrive Client for Linux](https://github.com/abraunegg/onedrive/issues).
 - Problems with **this app** (a button that doesn't work, something confusing, ideas):
-  [this project's issues](https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial/issues).
+  [this project's issues](https://github.com/sweatshopking/DriveDeck/issues).
 
 ## How it works
 
@@ -264,7 +270,7 @@ normal configuration files.
 - Status and activity come from each service's log; controls go through `systemctl --user`.
 - Browsing online folders, finding SharePoint libraries, storage use and sharing links use Microsoft Graph
   with the client's saved sign-in, which the app only reads.
-- The app's own settings (names, schedules, pauses) live in `~/.config/linux-onedrive-gui/settings.json`.
+- The app's own settings (names, schedules, pauses) live in `~/.config/drivedeck/settings.json`.
 - Every week, an automated check makes sure the newest client release still has everything this app
   relies on ([`packaging/check-client-compat.sh`](packaging/check-client-compat.sh)), and opens an issue if not.
 
@@ -275,7 +281,7 @@ xkbcommon and wayland. Then:
 
 ```sh
 cargo build --release
-./target/release/linux-onedrive-gui
+./target/release/drivedeck
 ```
 
 To build the release packages the way the GitHub workflow does (needs podman or docker):

@@ -94,7 +94,7 @@ pub trait Tray: Sized + Send + 'static {
 
     /// The visualization hands over an XDG activation token just before `activate` (KDE Plasma
     /// 6, GNOME's AppIndicator extension), so a window the item opens can come to the front.
-    /// (Added for linux-onedrive-gui; see vendor/ksni/README.vendored.)
+    /// (Added for drivedeck; see vendor/ksni/README.vendored.)
     fn provide_xdg_activation_token(&mut self, _token: String) {}
 
     /// The user asked for a scroll action. This is caused from input such as

@@ -328,7 +328,8 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
         "u_result" => get_u_result, "u_remove_app_label" => get_u_remove_app_label,
         "client_problem" => get_client_problem, "client_hint" => get_client_hint, "client_install_msg" => get_client_install_msg,
         "ci_text" => get_ci_text, "ci_title" => get_ci_title, "ci_action" => get_ci_action,
-        "client_done" => get_client_done
+        "client_done" => get_client_done, "outside_start" => get_outside_start,
+        "outside_start_hint" => get_outside_start_hint
     );
     r.or_else(|| {
         Some(match k {
@@ -367,6 +368,7 @@ fn get_str(ui: &AppWindow, k: &str) -> Option<String> {
             "client_can_install" => ui.get_client_can_install().to_string(),
             "client_update" => ui.get_client_update().to_string(),
             "client_installing" => ui.get_client_installing().to_string(),
+            "outside_start_busy" => ui.get_outside_start_busy().to_string(),
             "ci_visible" => ui.get_ci_visible().to_string(),
             "u_busy" => ui.get_u_busy().to_string(),
             "a_current" => ui.get_a_current().to_string(),
@@ -485,10 +487,9 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "open_online" => ui.invoke_open_online_page(0),
         "si_open_url" => ui.invoke_si_open_url(),
         "a_show" => ui.invoke_a_show(n),
-        "open_url_project" => ui.invoke_open_url(
-            "https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial"
-                .into(),
-        ),
+        "open_url_project" => {
+            ui.invoke_open_url("https://github.com/sweatshopking/DriveDeck".into())
+        }
         "sync_now" => ui.invoke_sync_now(),
         "big_delete_online" => ui.invoke_big_delete_online(),
         "big_delete_restore" => ui.invoke_big_delete_restore(),
@@ -529,6 +530,8 @@ fn call(ui: &AppWindow, name: &str, n: Option<i32>) -> bool {
         "ci_cancel" => ui.invoke_ci_cancel(),
         "ci_myself" => ui.invoke_ci_myself(),
         "client_done_ok" => ui.invoke_client_done_ok(),
+        "outside_start_off" => ui.invoke_outside_start_off(),
+        "outside_start_keep" => ui.invoke_outside_start_keep(),
         "u_confirm" => ui.invoke_u_confirm(),
         "u_cancel" => ui.invoke_u_cancel(),
         _ => return false,

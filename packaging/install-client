@@ -1,6 +1,6 @@
 #!/bin/sh
-# Installs or updates the OneDrive Client for Linux for linux-onedrive-gui. Runs as root through
-# pkexec: as /usr/libexec/linux-onedrive-gui/install-client when the app came as a .deb or .rpm
+# Installs or updates the OneDrive Client for Linux for drivedeck. Runs as root through
+# pkexec: as /usr/libexec/drivedeck/install-client when the app came as a .deb or .rpm
 # (its polkit action words the password prompt), otherwise handed to /bin/sh by the app.
 #   install-client apt <release folder>  Ubuntu/Debian: the client author's package source,
 #                                        e.g. xUbuntu_24.04 or Debian_12
@@ -66,9 +66,8 @@ apt_install() {
         chmod 644 "$key"
         echo "deb [arch=$(dpkg --print-architecture) signed-by=$key] $repo ./" > /etc/apt/sources.list.d/onedrive.list
     fi
-    # Left behind by Ubuntu's and Debian's old onedrive package: it would sync the default account
-    # for every user at login, outside this app.
-    rm -f /etc/systemd/user/default.target.wants/onedrive.service
+    # A system-wide "start at login" for the client (an admin's choice, or left by an older onedrive
+    # package) is never changed here: the app reports it and switches it off only when asked.
     step "Checking for packages…"
     # the lock timeout may not cover the package lists, which the desktop's updater refreshes;
     # any other failure is reported straight away
@@ -107,7 +106,7 @@ aur_install() {
     fi
     if [ -d /run/systemd/system ] &&
         systemd-run --quiet --wait --pipe --collect -p DynamicUser=yes true >/dev/null 2>&1; then
-        name="linux-onedrive-gui-build-$$"
+        name="drivedeck-build-$$"
         dir="/var/lib/$name" # the account's StateDirectory; really /var/lib/private/$name
         trap 'rm -rf "/var/lib/private/$name" "/var/lib/$name"' EXIT
         isolate() {

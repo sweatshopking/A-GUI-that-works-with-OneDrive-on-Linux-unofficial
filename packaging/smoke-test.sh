@@ -25,15 +25,15 @@ case "$kind" in
         export DEBIAN_FRONTEND=noninteractive
         apt-get update -qq
         log "Installing the .deb with apt"
-        apt-get install -y -qq "$DIST"/linux-onedrive-gui_*_"$DEB_ARCH".deb >/dev/null
+        apt-get install -y -qq "$DIST"/drivedeck_*_"$DEB_ARCH".deb >/dev/null
         apt-get install -y -qq --no-install-recommends xvfb imagemagick >/dev/null
-        app=(linux-onedrive-gui)
+        app=(drivedeck)
         ;;
     rpm)
         log "Installing the .rpm with dnf"
-        dnf install -y -q "$DIST"/linux-onedrive-gui-*."$ARCH".rpm >/dev/null
+        dnf install -y -q "$DIST"/drivedeck-*."$ARCH".rpm >/dev/null
         dnf install -y -q xorg-x11-server-Xvfb ImageMagick >/dev/null
-        app=(linux-onedrive-gui)
+        app=(drivedeck)
         # the package recommends the OneDrive Client for Linux, which Fedora carries; dnf
         # installs recommendations, so it should be here and new enough
         onedrive --version
@@ -48,7 +48,7 @@ case "$kind" in
             libx11-6 libx11-xcb1 libxcursor1 libxrandr2 libxi6 libxkbcommon0 libxkbcommon-x11-0 \
             libwayland-client0 libwayland-cursor0 libwayland-egl1 libegl1 \
             xvfb imagemagick >/dev/null
-        image=("$DIST"/A_GUI_that_works_with_OneDrive_on_Linux-unofficial-*-"$ARCH".AppImage)
+        image=("$DIST"/DriveDeck-*-"$ARCH".AppImage)
         chmod +x "${image[0]}"
         # containers have no FUSE; on a desktop the AppImage mounts itself instead
         export APPIMAGE_EXTRACT_AND_RUN=1

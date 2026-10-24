@@ -454,14 +454,63 @@ component ClientBanner inherits Rectangle {
     }
 }
 
+// Shown while a sync service is switched on outside this app (for every user, or at boot).
+component OutsideStartBanner inherits Rectangle {
+    in property <string> text;
+    in property <string> hint;
+    in property <bool> busy;
+    callback turn-off();
+    callback keep();
+    border-radius: 12px;
+    border-width: 1px;
+    border-color: Theme.warn.with-alpha(0.6);
+    background: Theme.warn.with-alpha(0.13);
+    height: outside-layout.preferred-height;
+    outside-layout := VerticalLayout {
+        padding: 12px;
+        spacing: 6px;
+        Text {
+            text: "Syncing is also set up outside this app";
+            font-weight: 600;
+            wrap: word-wrap;
+        }
+        Text {
+            text: root.text;
+            wrap: word-wrap;
+            font-size: 12px;
+        }
+        HorizontalLayout {
+            alignment: start;
+            spacing: 8px;
+            Button {
+                text: root.busy ? "Turning it off…" : "Turn it off";
+                enabled: !root.busy;
+                clicked => {
+                    root.turn-off();
+                }
+            }
+            Button {
+                text: "Leave it as it is";
+                enabled: !root.busy;
+                clicked => {
+                    root.keep();
+                }
+            }
+        }
+        Hint {
+            text: root.hint;
+        }
+    }
+}
+
 component Overlay inherits Rectangle {
     background: Theme.dark ? #0000008c : #00000052;
     TouchArea { }  // swallow clicks behind the dialog
 }
 
 export component AppWindow inherits Window {
-    title: "A GUI that works with OneDrive on Linux (unofficial)";
-    icon: @image-url("../assets/linux-onedrive-gui.svg");
+    title: "DriveDeck for OneDrive";
+    icon: @image-url("../assets/drivedeck.svg");
     preferred-width: 1020px;
     preferred-height: 700px;
     min-width: 780px;
@@ -686,6 +735,13 @@ export component AppWindow inherits Window {
     callback client-install();
     callback client-not-now();
 
+    // ---------------- sync started outside this app (empty when there's none, or it was kept)
+    in property <string> outside-start;
+    in property <string> outside-start-hint;
+    in property <bool> outside-start-busy;
+    callback outside-start-off();
+    callback outside-start-keep();
+
     // ---------------- "install the client" confirmation
     in property <bool> ci-visible;
     in property <string> ci-title;
@@ -851,6 +907,21 @@ export component AppWindow inherits Window {
                     }
                     install => {
                         root.client-install();
+                    }
+                }
+            }
+            if root.outside-start != "": VerticalLayout {
+                padding: 12px;
+                padding-bottom: 0px;
+                OutsideStartBanner {
+                    text: root.outside-start;
+                    hint: root.outside-start-hint;
+                    busy: root.outside-start-busy;
+                    turn-off => {
+                        root.outside-start-off();
+                    }
+                    keep => {
+                        root.outside-start-keep();
                     }
                 }
             }
@@ -2296,7 +2367,12 @@ export component AppWindow inherits Window {
                                 text: "About";
                             }
                             Text {
-                                text: "A GUI that works with OneDrive on Linux (unofficial) " + root.app-version;
+                                text: "DriveDeck for OneDrive " + root.app-version;
+                                font-weight: 600;
+                            }
+                            Text {
+                                text: "The easiest, most complete way to use OneDrive on Linux.";
+                                wrap: word-wrap;
                             }
                             Text {
                                 text: root.app-client;
@@ -2311,7 +2387,7 @@ export component AppWindow inherits Window {
                                 Button {
                                     text: "Project page";
                                     clicked => {
-                                        root.open-url("https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial");
+                                        root.open-url("https://github.com/sweatshopking/DriveDeck");
                                     }
                                 }
                                 Button {
@@ -3082,7 +3158,7 @@ component FileList inherits Rectangle {
 
 export component PopupPanel inherits Window {
     title: "OneDrive";
-    icon: @image-url("../assets/linux-onedrive-gui.svg");
+    icon: @image-url("../assets/drivedeck.svg");
     no-frame: true;
     width: 380px;
     height: 600px;
@@ -3164,7 +3240,7 @@ export component PopupPanel inherits Window {
                         width: 30px;
                         height: 30px;
                         y: (parent.height - self.height) / 2;
-                        source: @image-url("../assets/linux-onedrive-gui.svg");
+                        source: @image-url("../assets/drivedeck.svg");
                     }
                     VerticalLayout {
                         alignment: center;
@@ -3512,7 +3588,7 @@ export struct VersionRow {
 
 export component FileWindow inherits Window {
     title: root.mode == 0 ? "Version history — " + root.file-name : "Share — " + root.file-name;
-    icon: @image-url("../assets/linux-onedrive-gui.svg");
+    icon: @image-url("../assets/drivedeck.svg");
     preferred-width: 520px;
     preferred-height: root.mode == 0 ? 560px : 500px;
     min-width: 380px;

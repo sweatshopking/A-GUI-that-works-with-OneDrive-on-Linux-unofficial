@@ -21,7 +21,7 @@ the icon is clicked, so the panel opens in front. `vendor/ksni/README.vendored` 
 So that one AppImage runs on many distributions, it also carries a few small unmodified libraries
 from Ubuntu 22.04 (currently libpng and Brotli).
 Inside the AppImage, `usr/share/doc/<package>/copyright` holds each one's license, and
-`usr/share/licenses/linux-onedrive-gui/BUNDLED-LIBRARIES.txt` lists the exact source package and
+`usr/share/licenses/drivedeck/BUNDLED-LIBRARIES.txt` lists the exact source package and
 version of each. Their source is available from `https://launchpad.net/ubuntu/+source/<source>/<version>`
 or with `apt-get source <source>=<version>` on Ubuntu 22.04. If you can't get it there, open an
 issue on this project and it will be provided.

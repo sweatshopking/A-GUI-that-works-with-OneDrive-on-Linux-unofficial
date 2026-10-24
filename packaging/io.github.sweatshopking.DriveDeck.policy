@@ -4,10 +4,10 @@
 <!-- Words the password prompt for "Install it for me" in a way people recognise, instead of
      showing the installer script. The .deb and .rpm install this; the AppImage can't. -->
 <policyconfig>
-  <vendor>A GUI that works with OneDrive on Linux (unofficial)</vendor>
-  <vendor_url>https://github.com/sweatshopking/A-GUI-that-works-with-OneDrive-on-Linux-unofficial</vendor_url>
-  <icon_name>linux-onedrive-gui</icon_name>
-  <action id="io.github.sweatshopking.LinuxOnedriveGui.install-client">
+  <vendor>DriveDeck for OneDrive</vendor>
+  <vendor_url>https://github.com/sweatshopking/DriveDeck</vendor_url>
+  <icon_name>drivedeck</icon_name>
+  <action id="io.github.sweatshopking.DriveDeck.install-client">
     <description>Install or update the OneDrive Client for Linux</description>
     <message>Installing software needs your password so your computer can check that it's you. It is checked once and then forgotten: it isn't saved, and the OneDrive app never sees it. It is only used to install or update the OneDrive client, which does the syncing, and the parts it needs. Nothing else is changed.</message>
     <defaults>
@@ -15,6 +15,6 @@
       <allow_inactive>auth_admin</allow_inactive>
       <allow_active>auth_admin</allow_active>
     </defaults>
-    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/linux-onedrive-gui/install-client</annotate>
+    <annotate key="org.freedesktop.policykit.exec.path">/usr/libexec/drivedeck/install-client</annotate>
   </action>
 </policyconfig>

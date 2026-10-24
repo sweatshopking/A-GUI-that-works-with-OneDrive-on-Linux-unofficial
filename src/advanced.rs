@@ -653,9 +653,9 @@ pub const SPECS: &[Spec] = &[
             key: "log_dir",
             group: "Logging",
             label: "Log folder",
-            hint: "Leave empty for the app's own folder (~/.local/share/linux-onedrive-gui/logs).",
+            hint: "Leave empty for the app's own folder (~/.local/share/drivedeck/logs).",
             kind: Kind::Text {
-                placeholder: "~/.local/share/linux-onedrive-gui/logs",
+                placeholder: "~/.local/share/drivedeck/logs",
                 check: check_abs_path,
             },
             default: "",

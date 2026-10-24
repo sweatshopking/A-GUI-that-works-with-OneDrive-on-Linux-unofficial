@@ -4,29 +4,29 @@ MimeType=application/octet-stream;inode/directory;
 Actions=sharePeople;copyLink;copyEditLink;versions;viewOnline;
 X-KDE-Submenu=OneDrive
 X-KDE-Priority=TopLevel
-Icon=linux-onedrive-gui
+Icon=drivedeck
 
 [Desktop Action sharePeople]
 Name=Share with people…
 Icon=document-share
-Exec=linux-onedrive-gui --share-people %f
+Exec=drivedeck --share-people %f
 
 [Desktop Action copyLink]
 Name=Copy view-only link
 Icon=edit-link
-Exec=linux-onedrive-gui --share-link %f
+Exec=drivedeck --share-link %f
 
 [Desktop Action copyEditLink]
 Name=Copy editing link
 Icon=document-edit
-Exec=linux-onedrive-gui --share-edit-link %f
+Exec=drivedeck --share-edit-link %f
 
 [Desktop Action versions]
 Name=Version history
 Icon=view-history
-Exec=linux-onedrive-gui --versions %f
+Exec=drivedeck --versions %f
 
 [Desktop Action viewOnline]
 Name=View on the OneDrive website
 Icon=internet-web-browser
-Exec=linux-onedrive-gui --view-online %f
+Exec=drivedeck --view-online %f

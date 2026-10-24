@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=DriveDeck for OneDrive
+GenericName=OneDrive Sync
+Comment=The easiest, most complete way to use OneDrive on Linux
+Exec=drivedeck
+Icon=drivedeck
+Terminal=false
+Categories=Network;FileTransfer;
+Keywords=onedrive;sharepoint;microsoft;sync;cloud;
+StartupNotify=true
+StartupWMClass=drivedeck
