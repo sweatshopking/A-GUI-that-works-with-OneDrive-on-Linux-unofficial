@@ -56,14 +56,27 @@ struct Node {
 
 impl Tree {
     fn covered(&self, path: &str) -> bool {
-        self.selected
-            .iter()
-            .any(|s| path == s || path.starts_with(&format!("{s}/")))
+        if self.selected.contains(path) {
+            return true;
+        }
+        let mut prefix = path;
+        while let Some(slash) = prefix.rfind('/') {
+            if slash == 0 {
+                return false;
+            }
+            prefix = &prefix[..slash];
+            if self.selected.contains(prefix) {
+                return true;
+            }
+        }
+        false
     }
     fn inherited(&self, path: &str) -> bool {
+        let prefix = format!("{path}/");
         self.selected
-            .iter()
-            .any(|s| path.starts_with(&format!("{s}/")))
+            .range(prefix.clone()..)
+            .next()
+            .is_some_and(|selected| selected.starts_with(&prefix))
     }
 }
 
@@ -5219,6 +5232,20 @@ pub fn run(account: Option<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn folder_selection_uses_path_boundaries() {
+        let tree = Tree {
+            selected: ["/A/B".into(), "/AB/C".into()].into(),
+            ..Default::default()
+        };
+        assert!(tree.covered("/A/B/C"));
+        assert!(!tree.covered("/A/BC"));
+        assert!(!tree.covered("/AB"));
+        assert!(tree.inherited("/A"));
+        assert!(!tree.inherited("/A/B"));
+        assert!(tree.inherited("/AB"));
+    }
 
     #[test]
     fn default_folders() {
