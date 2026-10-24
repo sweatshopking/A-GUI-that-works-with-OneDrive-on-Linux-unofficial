@@ -82,6 +82,7 @@ impl Tree {
 
 struct SignIn {
     key: String,
+    confdir: PathBuf,
     unit: Option<String>,
     child: Child,
     stdin: Option<ChildStdin>,
@@ -2814,7 +2815,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: Option<bool>) {
                 .is_some_and(|current| Arc::ptr_eq(current, &cancelled));
             if !is_current {
                 if let SignInStart::Ready(si) = result {
-                    close_sign_in(si);
+                    close_sign_in(*si);
                 }
                 return;
             }
@@ -2822,9 +2823,9 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: Option<bool>) {
             match result {
                 SignInStart::Ready(si) if !cancelled.load(Ordering::Acquire) => {
                     ctx.borrow().ui().set_si_text(ss("Opening the Microsoft sign-in page in your browser…\n\nLog in and approve access. This window updates by itself when you're done."));
-                    ctx.borrow_mut().signin = Some(si);
+                    ctx.borrow_mut().signin = Some(*si);
                 }
-                SignInStart::Ready(si) => close_sign_in(si),
+                SignInStart::Ready(si) => close_sign_in(*si),
                 SignInStart::Failed(message, client_blocked) => {
                     let ui = ctx.borrow().ui();
                     ui.set_si_visible(false);
@@ -2840,7 +2841,7 @@ fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: Option<bool>) {
 }
 
 enum SignInStart {
-    Ready(SignIn),
+    Ready(Box<SignIn>),
     Failed(String, bool),
     Cancelled,
 }
@@ -2914,8 +2915,9 @@ fn begin_sign_in(
     let url_file = browser_shim(&mut cmd);
     core::activate(&mut cmd);
     match spawn_capture(cmd, out.clone(), true) {
-        Ok((child, stdin, readers)) => SignInStart::Ready(SignIn {
+        Ok((child, stdin, readers)) => SignInStart::Ready(Box::new(SignIn {
             key: acc.key(),
+            confdir: acc.confdir.clone(),
             unit: acc.unit.clone(),
             child,
             stdin,
@@ -2928,7 +2930,7 @@ fn begin_sign_in(
             was_active,
             finished: false,
             _busy: busy,
-        }),
+        })),
         Err(e) => {
             let restore = restore_signin_service(&acc, was_active);
             SignInStart::Failed(
@@ -2983,11 +2985,38 @@ fn close_sign_in(mut si: SignIn) {
 }
 
 /// Called on a timer while a sign-in is running.
+fn sign_in_folder_removed(confdir: &Path) -> bool {
+    !confdir.is_dir()
+}
+
 fn poll_signin(ctx: &Shared) {
     let mut c = ctx.borrow_mut();
     let ui = c.ui();
     let Some(si) = c.signin.as_mut() else { return };
     if si.finished {
+        return;
+    }
+    if sign_in_folder_removed(&si.confdir) {
+        let Some(mut si) = c.signin.take() else {
+            return;
+        };
+        ui.set_si_text(ss(
+            "This account's settings folder was removed during sign-in. Add the account again to sign in.",
+        ));
+        ui.set_si_done(true);
+        ui.set_si_need_paste(false);
+        ui.set_si_has_url(false);
+        c.tokens.remove(&si.key);
+        drop(c);
+        bg(
+            move || {
+                let _ = si.child.kill();
+                let _ = si.child.wait();
+                finish_reading(std::mem::take(&mut si.readers));
+                drop(si); // release the busy marker; don't restart a service for a removed account
+            },
+            |_, ()| {},
+        );
         return;
     }
     let text = si.out.lock().unwrap().clone();
@@ -5663,6 +5692,16 @@ mod tests {
         assert!(!refresh_due(false, true));
         assert!(!refresh_due(true, true));
         assert!(refresh_due(true, false));
+    }
+
+    #[test]
+    fn sign_in_stops_when_its_settings_folder_is_removed() {
+        let confdir = std::env::temp_dir().join(format!("lodg-signin-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&confdir);
+        fs::create_dir_all(&confdir).unwrap();
+        assert!(!sign_in_folder_removed(&confdir));
+        fs::remove_dir_all(&confdir).unwrap();
+        assert!(sign_in_folder_removed(&confdir));
     }
 
     #[test]
