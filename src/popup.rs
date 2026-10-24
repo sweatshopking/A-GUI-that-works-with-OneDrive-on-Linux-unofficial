@@ -933,33 +933,43 @@ pub fn run(at: Option<(i32, i32)>) {
                     .collect()
             })
             .unwrap_or_default();
-            let mut started = 0;
-            let mut errors = Vec::new();
-            for i in &infos {
-                match core::sync_now(i) {
-                    Ok(_) => started += 1,
-                    Err(e) => errors.push(format!("{}: {e}", i.name)),
-                }
+            if infos.is_empty() {
+                return;
             }
-            // at once, rather than at the next refresh
-            if let Some(ui) = weak.upgrade()
-                && !infos.is_empty()
-            {
-                if errors.is_empty() {
-                    ui.set_summary(ss("Starting a sync…"));
-                    ui.set_summary_tone(1);
-                } else {
-                    ui.set_summary(ss(if started == 0 {
-                        format!("Couldn't start syncing: {}", errors.join("; "))
-                    } else {
-                        format!(
-                            "Started {started} account(s); some couldn't start: {}",
-                            errors.join("; ")
-                        )
-                    }));
-                    ui.set_summary_tone(2);
-                }
+            if let Some(ui) = weak.upgrade() {
+                ui.set_summary(ss("Starting a sync…"));
+                ui.set_summary_tone(1);
             }
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let mut started = 0;
+                let mut errors = Vec::new();
+                for i in &infos {
+                    match core::sync_now(i) {
+                        Ok(_) => started += 1,
+                        Err(e) => errors.push(format!("{}: {e}", i.name)),
+                    }
+                }
+                // at once, rather than at the next refresh
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        if errors.is_empty() {
+                            ui.set_summary(ss("Starting a sync…"));
+                            ui.set_summary_tone(1);
+                        } else {
+                            ui.set_summary(ss(if started == 0 {
+                                format!("Couldn't start syncing: {}", errors.join("; "))
+                            } else {
+                                format!(
+                                    "Started {started} account(s); some couldn't start: {}",
+                                    errors.join("; ")
+                                )
+                            }));
+                            ui.set_summary_tone(2);
+                        }
+                    }
+                });
+            });
         });
     }
     {
@@ -976,21 +986,30 @@ pub fn run(at: Option<(i32, i32)>) {
                     .collect()
             })
             .unwrap_or_default();
-            let mut errors = Vec::new();
-            for i in &infos {
-                if let Err(e) = core::pause(i, secs as i64) {
-                    errors.push(format!("{}: {e}", i.name));
+            if infos.is_empty() {
+                return;
+            }
+            let weak = weak.clone();
+            std::thread::spawn(move || {
+                let mut errors = Vec::new();
+                for i in &infos {
+                    if let Err(e) = core::pause(i, secs as i64) {
+                        errors.push(format!("{}: {e}", i.name));
+                    }
                 }
-            }
-            if !errors.is_empty()
-                && let Some(ui) = weak.upgrade()
-            {
-                ui.set_summary(ss(format!(
-                    "Couldn't update every pause setting: {}",
-                    errors.join("; ")
-                )));
-                ui.set_summary_tone(2);
-            }
+                if errors.is_empty() {
+                    return;
+                }
+                let _ = slint::invoke_from_event_loop(move || {
+                    if let Some(ui) = weak.upgrade() {
+                        ui.set_summary(ss(format!(
+                            "Couldn't update every pause setting: {}",
+                            errors.join("; ")
+                        )));
+                        ui.set_summary_tone(2);
+                    }
+                });
+            });
         });
     }
     ui.on_settings(|i| {
