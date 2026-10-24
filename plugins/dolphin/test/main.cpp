@@ -20,9 +20,9 @@ int main(int argc, char **argv)
             return 1;
         }
         const struct { const char *path, *want; } cases[] = {
-            {"/t/OneDrive/a.txt", "emblem-linux-onedrive-gui-synced"},
-            {"/t/OneDrive/v (syncing).mkv", "emblem-linux-onedrive-gui-syncing"},
-            {"/t/OneDrive/r (error).xlsx", "emblem-linux-onedrive-gui-error"},
+            {"/t/OneDrive/a.txt", "emblem-drivedeck-synced"},
+            {"/t/OneDrive/v (syncing).mkv", "emblem-drivedeck-syncing"},
+            {"/t/OneDrive/r (error).xlsx", "emblem-drivedeck-error"},
             {"/t/elsewhere/x.txt", ""},
         };
         for (const auto &c : cases) {

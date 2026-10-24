@@ -22,7 +22,7 @@ rules the Options page edits; skipped for now if the check is costly, then shown
 
 ## How file managers ask
 The tray serves a session D-Bus object (zbus, already a dependency):
-- name `io.github.sweatshopking.LinuxOnedriveGui.Badges`, path `/io/github/sweatshopking/LinuxOnedriveGui/Badges`
+- name `io.github.sweatshopking.DriveDeck.Badges`, path `/io/github/sweatshopking/DriveDeck/Badges`
 - `GetStatus(as paths) -> as` (same order; values above)
 - signal `Changed(as paths)` (empty list = "ask again for everything"), sent when a file starts or
   finishes transferring, the blocked list changes, or an account's phase changes.
@@ -42,7 +42,7 @@ No tray running → no badges (plugins treat a D-Bus error as "").
 ## Status log (update after every step)
 - 2026-10-23 19:0x: design written. Next: src/badges.rs (state + D-Bus), hook into tray poll.
 - 2026-10-23 19:1x: src/badges.rs (status_of + zbus GetStatus/Changed, 2 unit tests pass) wired into tray.rs (Acc.moving from Progress events, publish_badges after log events + every 3 s poll, badges::serve() at tray start). Next: clippy, Nemo/Caja python extension, Dolphin C++ plugin.
-- 2026-10-23 19:3x: plugins/nemo-caja/linux-onedrive-gui-badges.py, plugins/emblems/*.svg (4 emblems, look ok), plugins/dolphin (badges.cpp KOverlayIconPlugin + CMake, NOT built yet: build in archlinux container). TODO: Nemo 'shown' dict unbounded (cap), install step (servicemenu-like user install for nemo/caja + emblems into ~/.local/share/icons/hicolor/scalable/emblems).
+- 2026-10-23 19:3x: plugins/nemo-caja/drivedeck-badges.py, plugins/emblems/*.svg (4 emblems, look ok), plugins/dolphin (badges.cpp KOverlayIconPlugin + CMake, NOT built yet: build in archlinux container). TODO: Nemo 'shown' dict unbounded (cap), install step (servicemenu-like user install for nemo/caja + emblems into ~/.local/share/icons/hicolor/scalable/emblems).
 - 2026-10-23 19:5x: Dolphin plugin BUILDS (archlinux container, KF6). clippy clean. Local WIP commit on branch file-badges (not pushed). Next: install helper (user-level nemo/caja ext + emblems; Dolphin .so via pkexec), live test with a fake/real tray in a nested session.
 - 2026-10-23 20:0x: badges::install_user_files (emblems -> ~/.local/share/icons/hicolor/scalable/emblems, nemo/caja ext if the FM is installed) at tray start; uninstall removes them. 66 tests pass, clippy clean, committed (local). Nemo shown-dict capped at 5000. Next: live test (fake badge D-Bus service + Dolphin with QT_PLUGIN_PATH in nested KWin), Dolphin .so install path (pkexec / packages).
 - 2026-10-23 19:0x(local 18:5x): live Dolphin GUI test in private dbus session on real Wayland: Dolphin shows EMPTY folder view even WITHOUT plugin -> test env problem (KIO listing in private session), not plugin. Switched to headless plugin test in archlinux container (plugins/dolphin/test).

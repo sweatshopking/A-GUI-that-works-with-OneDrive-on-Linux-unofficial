@@ -1,4 +1,4 @@
-// Sync badges in Dolphin for Linux OneDrive GUI: asks the app's tray, over the session bus, what
+// Sync badges in Dolphin for DriveDeck: asks the app's tray, over the session bus, what
 // state each file is in (docs/badges-design.md). No tray running = no badges.
 #include <KOverlayIconPlugin>
 #include <QDBusConnection>
@@ -7,15 +7,15 @@
 #include <QUrl>
 
 namespace {
-const QString Service = QStringLiteral("io.github.sweatshopking.LinuxOnedriveGui.Badges");
-const QString Path = QStringLiteral("/io/github/sweatshopking/LinuxOnedriveGui/Badges");
+const QString Service = QStringLiteral("io.github.sweatshopking.DriveDeck.Badges");
+const QString Path = QStringLiteral("/io/github/sweatshopking/DriveDeck/Badges");
 const QString Iface = Service;
 }
 
 class Badges : public KOverlayIconPlugin
 {
     Q_OBJECT
-    Q_PLUGIN_METADATA(IID "org.kde.overlayicon.linux-onedrive-gui" FILE "badges.json")
+    Q_PLUGIN_METADATA(IID "org.kde.overlayicon.drivedeck" FILE "badges.json")
 
 public:
     Badges()
@@ -53,7 +53,7 @@ private:
         if (state.isEmpty()) {
             return {};
         }
-        return {QStringLiteral("emblem-linux-onedrive-gui-") + state};
+        return {QStringLiteral("emblem-drivedeck-") + state};
     }
 
     static QString ask(const QString &path)

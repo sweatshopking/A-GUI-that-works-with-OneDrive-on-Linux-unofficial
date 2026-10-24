@@ -8,9 +8,9 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::core::Phase;
 
-pub const BUS_NAME: &str = "io.github.sweatshopking.LinuxOnedriveGui.Badges";
-pub const OBJECT_PATH: &str = "/io/github/sweatshopking/LinuxOnedriveGui/Badges";
-pub const INTERFACE: &str = "io.github.sweatshopking.LinuxOnedriveGui.Badges";
+pub const BUS_NAME: &str = "io.github.sweatshopking.DriveDeck.Badges";
+pub const OBJECT_PATH: &str = "/io/github/sweatshopking/DriveDeck/Badges";
+pub const INTERFACE: &str = "io.github.sweatshopking.DriveDeck.Badges";
 
 /// One account, as the badges see it.
 #[derive(Clone, Debug, PartialEq)]
@@ -81,23 +81,23 @@ pub fn status_of(accs: &[AccState], path: &Path) -> &'static str {
     }
 }
 
-const EXTENSION: &str = include_str!("../plugins/nemo-caja/linux-onedrive-gui-badges.py");
+const EXTENSION: &str = include_str!("../plugins/nemo-caja/drivedeck-badges.py");
 pub const EMBLEMS: [(&str, &str); 4] = [
     (
-        "emblem-linux-onedrive-gui-synced.svg",
-        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-synced.svg"),
+        "emblem-drivedeck-synced.svg",
+        include_str!("../plugins/emblems/emblem-drivedeck-synced.svg"),
     ),
     (
-        "emblem-linux-onedrive-gui-syncing.svg",
-        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-syncing.svg"),
+        "emblem-drivedeck-syncing.svg",
+        include_str!("../plugins/emblems/emblem-drivedeck-syncing.svg"),
     ),
     (
-        "emblem-linux-onedrive-gui-error.svg",
-        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-error.svg"),
+        "emblem-drivedeck-error.svg",
+        include_str!("../plugins/emblems/emblem-drivedeck-error.svg"),
     ),
     (
-        "emblem-linux-onedrive-gui-paused.svg",
-        include_str!("../plugins/emblems/emblem-linux-onedrive-gui-paused.svg"),
+        "emblem-drivedeck-paused.svg",
+        include_str!("../plugins/emblems/emblem-drivedeck-paused.svg"),
     ),
 ];
 
@@ -117,7 +117,7 @@ pub fn user_files() -> Vec<(std::path::PathBuf, Option<&'static str>)> {
     for fm in ["nemo", "caja"] {
         let file = data
             .join(format!("{fm}-python/extensions"))
-            .join("linux-onedrive-gui-badges.py");
+            .join("drivedeck-badges.py");
         let present = crate::core::which(fm).is_some();
         out.push((file, present.then_some(EXTENSION)));
     }
@@ -142,7 +142,7 @@ pub fn install_user_files() {
 
 struct Badges;
 
-#[zbus::interface(name = "io.github.sweatshopking.LinuxOnedriveGui.Badges")]
+#[zbus::interface(name = "io.github.sweatshopking.DriveDeck.Badges")]
 impl Badges {
     /// One answer per path, in the same order.
     fn get_status(&self, paths: Vec<String>) -> Vec<String> {

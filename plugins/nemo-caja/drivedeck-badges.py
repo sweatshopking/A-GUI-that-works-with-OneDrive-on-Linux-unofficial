@@ -1,4 +1,4 @@
-# Sync badges for Nemo and Caja (Linux OneDrive GUI). The same file works in both: Nemo loads it
+# Sync badges for Nemo and Caja (DriveDeck). The same file works in both: Nemo loads it
 # from nemo-python/extensions, Caja from caja-python/extensions. It asks the app's tray, over the
 # session bus, what state each file is in (docs/badges-design.md); no tray running = no badges.
 import gi
@@ -11,14 +11,14 @@ except (ValueError, ImportError):
     gi.require_version("Caja", "2.0")
     from gi.repository import Caja as FM
 
-BUS = "io.github.sweatshopking.LinuxOnedriveGui.Badges"
-PATH = "/io/github/sweatshopking/LinuxOnedriveGui/Badges"
+BUS = "io.github.sweatshopking.DriveDeck.Badges"
+PATH = "/io/github/sweatshopking/DriveDeck/Badges"
 IFACE = BUS
 EMBLEMS = {
-    "synced": "emblem-linux-onedrive-gui-synced",
-    "syncing": "emblem-linux-onedrive-gui-syncing",
-    "error": "emblem-linux-onedrive-gui-error",
-    "paused": "emblem-linux-onedrive-gui-paused",
+    "synced": "emblem-drivedeck-synced",
+    "syncing": "emblem-drivedeck-syncing",
+    "error": "emblem-drivedeck-error",
+    "paused": "emblem-drivedeck-paused",
 }
 
 

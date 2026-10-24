@@ -12,8 +12,8 @@ class F:
     def invalidate_extension_info(self): pass
 
 b = ext.Badges(); bad = 0
-for p, want in [("/t/OneDrive/a.txt", ["emblem-linux-onedrive-gui-synced"]),
-                ("/t/OneDrive/r (error).xlsx", ["emblem-linux-onedrive-gui-error"]),
+for p, want in [("/t/OneDrive/a.txt", ["emblem-drivedeck-synced"]),
+                ("/t/OneDrive/r (error).xlsx", ["emblem-drivedeck-error"]),
                 ("/t/elsewhere/x", [])]:
     f = F(p); b.update_file_info(f); ok = f.emblems == want; bad += not ok
     print("ok  " if ok else "FAIL", p, f.emblems)
