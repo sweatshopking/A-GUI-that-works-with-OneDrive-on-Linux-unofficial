@@ -1,7 +1,7 @@
 //! System tray icon: live status per account, the panel a click opens (src/popup.rs), a short
 //! menu, and the sync schedule enforcer.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
@@ -34,6 +34,7 @@ struct Acc {
     /// Files already notified about this session (until they sync), so a client restart or a
     /// new login doesn't repeat the same notification
     told_blocked: HashSet<String>,
+    told_blocked_order: VecDeque<String>,
     /// Told about the current big delete; a finished sync means it's over
     told_big_delete: bool,
     /// Large files being uploaded or downloaded right now (file manager badges)
@@ -53,6 +54,7 @@ impl Acc {
             blocked: Vec::new(),
             fresh_blocked: Vec::new(),
             told_blocked: HashSet::new(),
+            told_blocked_order: VecDeque::new(),
             told_big_delete: false,
             moving: HashSet::new(),
         }
@@ -700,8 +702,18 @@ fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
         LogEvent::Blocked { path, reason }
             if reason.needs_attention()
                 && when.timestamp() >= tray_started().timestamp()
-                && a.told_blocked.insert(path.clone()) =>
+                && !a.told_blocked.contains(path) =>
         {
+            if a.told_blocked_order.len() >= core::MAX_TRACKED_BLOCKED
+                && let Some(oldest) = a.told_blocked_order.pop_front()
+            {
+                a.told_blocked.remove(&oldest);
+            }
+            a.told_blocked.insert(path.clone());
+            a.told_blocked_order.push_back(path.clone());
+            if a.fresh_blocked.len() >= core::MAX_TRACKED_BLOCKED {
+                a.fresh_blocked.remove(0);
+            }
             a.fresh_blocked.push(core::Blocked {
                 path: path.clone(),
                 reason: *reason,
@@ -709,6 +721,7 @@ fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
         }
         LogEvent::File { path, .. } => {
             a.told_blocked.remove(path);
+            a.told_blocked_order.retain(|notified| notified != path);
         }
         _ => {}
     }
@@ -1371,5 +1384,23 @@ mod tests {
         );
         apply_one(&mut a, now, blocked("a.docx", Locked));
         assert_eq!(a.fresh_blocked.len(), 1);
+    }
+
+    #[test]
+    fn blocked_session_history_is_bounded() {
+        use crate::core::BlockReason::Locked;
+        let mut a = acc();
+        let now = tray_started() + chrono::Duration::seconds(5);
+        for n in 0..=core::MAX_TRACKED_BLOCKED {
+            apply_one(&mut a, now, blocked(&format!("file-{n}"), Locked));
+        }
+        assert_eq!(a.blocked.len(), core::MAX_TRACKED_BLOCKED);
+        assert_eq!(a.fresh_blocked.len(), core::MAX_TRACKED_BLOCKED);
+        assert_eq!(a.told_blocked.len(), core::MAX_TRACKED_BLOCKED);
+        assert!(!a.told_blocked.contains("file-0"));
+        assert!(
+            a.told_blocked
+                .contains(&format!("file-{}", core::MAX_TRACKED_BLOCKED))
+        );
     }
 }

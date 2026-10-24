@@ -1934,6 +1934,9 @@ pub struct Blocked {
     pub reason: BlockReason,
 }
 
+/// The journal snapshot and the tray both keep the newest 200 blocked files.
+pub const MAX_TRACKED_BLOCKED: usize = 200;
+
 /// Keeps the list of blocked files up to date with one log event.
 pub fn track_blocked(list: &mut Vec<Blocked>, ev: &LogEvent) {
     match ev {
@@ -1943,6 +1946,9 @@ pub fn track_blocked(list: &mut Vec<Blocked>, ev: &LogEvent) {
                 path: path.clone(),
                 reason: *reason,
             });
+            if list.len() > MAX_TRACKED_BLOCKED {
+                list.remove(0);
+            }
         }
         // uploaded, downloaded or deleted since: nothing left to do for it
         LogEvent::File { path, .. } => list.retain(|b| &b.path != path),
@@ -3430,6 +3436,26 @@ mod tests {
         track_blocked(&mut list, &ev);
         track_blocked(&mut list, &LogEvent::ClientStart);
         assert!(list.is_empty());
+    }
+
+    #[test]
+    fn blocked_tracking_keeps_only_the_newest_files() {
+        let mut list = Vec::new();
+        for n in 0..=MAX_TRACKED_BLOCKED {
+            track_blocked(
+                &mut list,
+                &LogEvent::Blocked {
+                    path: format!("file-{n}"),
+                    reason: BlockReason::Locked,
+                },
+            );
+        }
+        assert_eq!(list.len(), MAX_TRACKED_BLOCKED);
+        assert_eq!(list.first().unwrap().path, "file-1");
+        assert_eq!(
+            list.last().unwrap().path,
+            format!("file-{MAX_TRACKED_BLOCKED}")
+        );
     }
 
     #[test]
