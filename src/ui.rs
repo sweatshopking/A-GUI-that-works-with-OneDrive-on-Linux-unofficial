@@ -359,9 +359,14 @@ fn refresh(ctx: &Shared) {
 /// being read to be read again: on a slow computer every read would be thrown away, and the
 /// window would stop updating.
 fn refresh_tick(ctx: &Shared) {
-    if !ctx.borrow().refreshing {
+    let visible = ctx.borrow().ui().window().is_visible();
+    if refresh_due(visible, ctx.borrow().refreshing) {
         refresh(ctx);
     }
+}
+
+fn refresh_due(visible: bool, refreshing: bool) -> bool {
+    visible && !refreshing
 }
 
 fn read_and_apply_snapshot() {
@@ -4949,6 +4954,7 @@ fn listen_for_hand_offs() {
                     if let Some(i) = idx {
                         select(ctx, i as i32);
                     }
+                    refresh(ctx);
                 })
             });
         }
@@ -5630,6 +5636,14 @@ mod tests {
         assert!(tree.inherited("/A"));
         assert!(!tree.inherited("/A/B"));
         assert!(tree.inherited("/AB"));
+    }
+
+    #[test]
+    fn hidden_settings_do_not_poll_status() {
+        assert!(!refresh_due(false, false));
+        assert!(!refresh_due(false, true));
+        assert!(!refresh_due(true, true));
+        assert!(refresh_due(true, false));
     }
 
     #[test]
