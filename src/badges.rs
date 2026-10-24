@@ -23,7 +23,88 @@ pub struct AccState {
     pub blocked: HashSet<String>,
 }
 
-static STATE: Mutex<Vec<AccState>> = Mutex::new(Vec::new());
+struct IndexedAccount {
+    root: PathBuf,
+    root_depth: usize,
+    phase: Phase,
+    moving: HashSet<String>,
+    blocked: HashSet<String>,
+}
+
+#[derive(Default)]
+struct BadgeIndex {
+    accounts: Vec<IndexedAccount>,
+}
+
+impl BadgeIndex {
+    fn new(accs: &[AccState]) -> Self {
+        let accounts = accs
+            .iter()
+            .map(|a| IndexedAccount {
+                root: a.root.clone(),
+                root_depth: a.root.components().count(),
+                phase: a.phase,
+                moving: affected_paths(&a.moving),
+                blocked: affected_paths(&a.blocked),
+            })
+            .collect();
+        Self { accounts }
+    }
+
+    fn status(&self, path: &Path) -> &'static str {
+        // the deepest root wins, for a SharePoint library synced inside another account's folder
+        let Some((a, rel)) = self
+            .accounts
+            .iter()
+            .filter_map(|a| Some((a, path.strip_prefix(&a.root).ok()?)))
+            .max_by_key(|(a, _)| a.root_depth)
+        else {
+            return "";
+        };
+        let rel = rel.to_string_lossy();
+        if a.blocked.contains(rel.as_ref()) {
+            return "error";
+        }
+        if a.moving.contains(rel.as_ref()) {
+            return "syncing";
+        }
+        match a.phase {
+            Phase::Paused | Phase::Off | Phase::Stopped => "paused",
+            Phase::Error | Phase::SignedOut | Phase::NeedsResync | Phase::BigDelete => "error",
+            // before the first log line, don't claim anything
+            Phase::Unknown => "",
+            Phase::Syncing | Phase::Resyncing | Phase::UpToDate => "synced",
+        }
+    }
+}
+
+/// A file and every folder above it, including the account root. A folder only needs a hash
+/// lookup to learn whether it contains a moving or blocked file.
+fn affected_paths(paths: &HashSet<String>) -> HashSet<String> {
+    let mut affected = HashSet::new();
+    for file in paths {
+        let mut path = file.as_str();
+        affected.insert(path.to_string());
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            affected.insert(parent.to_string());
+            path = parent;
+        }
+        affected.insert(String::new());
+    }
+    affected
+}
+
+struct BadgeState {
+    accs: Vec<AccState>,
+    index: BadgeIndex,
+}
+
+static STATE: Mutex<BadgeState> = Mutex::new(BadgeState {
+    accs: Vec::new(),
+    index: BadgeIndex {
+        accounts: Vec::new(),
+    },
+});
 static CONN: OnceLock<zbus::blocking::Connection> = OnceLock::new();
 
 /// The tray calls this whenever an account changes, and every few seconds. Plugins are told to
@@ -32,9 +113,10 @@ static CONN: OnceLock<zbus::blocking::Connection> = OnceLock::new();
 pub fn publish(accs: Vec<AccState>) {
     static PENDING: Mutex<(Option<std::time::Instant>, bool)> = Mutex::new((None, false));
     let mut st = STATE.lock().unwrap_or_else(|e| e.into_inner());
-    let changed = *st != accs;
+    let changed = st.accs != accs;
     if changed {
-        *st = accs;
+        st.index = BadgeIndex::new(&accs);
+        st.accs = accs;
     }
     drop(st);
     let mut p = PENDING.lock().unwrap_or_else(|e| e.into_inner());
@@ -77,38 +159,9 @@ pub fn enabled() -> bool {
 }
 
 /// "synced", "syncing", "error", "paused", or "" (not in a synced folder: no badge).
+#[cfg(test)]
 pub fn status_of(accs: &[AccState], path: &Path) -> &'static str {
-    // the deepest root wins, for a SharePoint library synced inside another account's folder
-    let Some((a, rel)) = accs
-        .iter()
-        .filter_map(|a| Some((a, path.strip_prefix(&a.root).ok()?)))
-        .max_by_key(|(a, _)| a.root.components().count())
-    else {
-        return "";
-    };
-    let rel = rel.to_string_lossy();
-    // a folder takes the state of anything inside it
-    let inside = |set: &HashSet<String>| {
-        rel.is_empty() && !set.is_empty()
-            || set.iter().any(|f| {
-                f == rel.as_ref()
-                    || f.strip_prefix(rel.as_ref())
-                        .is_some_and(|tail| tail.starts_with('/'))
-            })
-    };
-    if inside(&a.blocked) {
-        return "error";
-    }
-    if inside(&a.moving) {
-        return "syncing";
-    }
-    match a.phase {
-        Phase::Paused | Phase::Off | Phase::Stopped => "paused",
-        Phase::Error | Phase::SignedOut | Phase::NeedsResync | Phase::BigDelete => "error",
-        // before the first log line, don't claim anything
-        Phase::Unknown => "",
-        Phase::Syncing | Phase::Resyncing | Phase::UpToDate => "synced",
-    }
+    BadgeIndex::new(accs).status(path)
 }
 
 const EXTENSION: &str = include_str!("../plugins/nemo-caja/drivedeck-badges.py");
@@ -312,7 +365,7 @@ impl Badges {
         let st = STATE.lock().unwrap_or_else(|e| e.into_inner());
         paths
             .iter()
-            .map(|p| status_of(&st, Path::new(p)).to_string())
+            .map(|p| st.index.status(Path::new(p)).to_string())
             .collect()
     }
 }
