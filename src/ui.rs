@@ -2293,14 +2293,85 @@ fn preview_apply(ctx: &Shared) {
     let Some(p) = ctx.borrow_mut().preview.take() else {
         return;
     };
-    let Some(acc) = ctx.borrow().account(&p.key).cloned() else {
-        if let Err(e) = restore_snapshot(&p) {
-            ctx.borrow_mut().preview = Some(p);
-            ctx.borrow().ui().set_s_msg(ss(format!(
-                "The account disappeared and preview settings couldn't be restored: {e}"
-            )));
-        }
-        return;
+    let ui = ctx.borrow().ui();
+    ui.set_p_busy(true);
+    ui.set_p_can_apply(false);
+    ui.set_p_live(ss("Starting sync…"));
+    let acc = ctx.borrow().account(&p.key).cloned();
+    bg(
+        move || apply_preview_in_background(p, acc),
+        |ctx, result| {
+            let ui = ctx.borrow().ui();
+            ui.set_p_busy(false);
+            match result {
+                PreviewApplyResult::Started {
+                    title,
+                    mode,
+                    cleanup,
+                    account,
+                } => {
+                    ui.set_p_visible(false);
+                    let mut msg = format!(
+                        "{}: {} The status shows when it's done.",
+                        title,
+                        match mode {
+                            PreviewMode::Resync => "full resync started.",
+                            PreviewMode::ForceDelete | PreviewMode::Check => "started.",
+                        }
+                    );
+                    if let Err(e) = cleanup {
+                        msg.push_str(&format!(" The committed settings are safe, but the recovery record couldn't be cleared: {e}"));
+                    }
+                    ui.set_s_msg(ss(msg));
+                    ui.set_o_msg(ss(""));
+                    if mode == PreviewMode::Resync {
+                        ui.set_f_msg(ss("Resync started."));
+                    }
+                    load_folders(ctx, &account, true);
+                    refresh(ctx);
+                }
+                PreviewApplyResult::Failed(message) => {
+                    ui.set_p_visible(false);
+                    ui.set_s_msg(ss(message));
+                    refresh(ctx);
+                }
+                PreviewApplyResult::Restored => {
+                    ui.set_p_visible(false);
+                    refresh(ctx);
+                }
+                PreviewApplyResult::KeepPreview(p, message) => {
+                    ui.set_p_visible(true);
+                    ui.set_p_busy(false);
+                    ui.set_p_can_apply(false);
+                    ui.set_p_text(ss(message));
+                    ctx.borrow_mut().preview = Some(p);
+                }
+            }
+        },
+    );
+}
+
+enum PreviewApplyResult {
+    Started {
+        title: String,
+        mode: PreviewMode,
+        cleanup: Result<(), String>,
+        account: AccountInfo,
+    },
+    Failed(String),
+    Restored,
+    KeepPreview(Preview, String),
+}
+
+fn apply_preview_in_background(p: Preview, account: Option<AccountInfo>) -> PreviewApplyResult {
+    let Some(acc) = account else {
+        return match restore_snapshot(&p) {
+            Ok(()) => PreviewApplyResult::Restored,
+            Err(e) => PreviewApplyResult::KeepPreview(
+                p,
+                format!("The account disappeared and preview settings couldn't be restored: {e}"),
+            ),
+        };
     };
     let job = core::resync_unit(&acc.confdir);
     let client = core::client_binary().unwrap_or_else(|| PathBuf::from("onedrive"));
@@ -2324,7 +2395,7 @@ fn preview_apply(ctx: &Shared) {
         core::release_hold(u);
     }
     core::systemctl(&["reset-failed", &job]);
-    let r = Command::new("systemd-run")
+    let result = Command::new("systemd-run")
         .args([
             "--user",
             "--collect",
@@ -2344,93 +2415,65 @@ fn preview_apply(ctx: &Shared) {
             &script,
         ])
         .output();
-    let ui = ctx.borrow().ui();
-    ui.set_p_visible(false);
-    match r {
+    match result {
         Ok(o) if o.status.success() => {
             if let Err(e) = mark_pending_committed(&p) {
                 let (stopped, stop_error) = core::systemctl(&["stop", &job]);
                 if stopped {
-                    fail_preview_apply(
-                        ctx,
+                    return rollback_preview_apply(
                         p,
                         format!(
                             "The recovery record couldn't be committed: {e}; the sync job was stopped"
                         ),
                     );
-                } else {
-                    let ui = ctx.borrow().ui();
-                    ui.set_p_visible(false);
-                    ui.set_s_msg(ss(format!(
-                        "The sync job started, but its recovery state couldn't be saved or stopped: {e}; {}. Restart this app to retry recovery. No other sync operation will start for this account in this session.",
-                        stop_error.trim()
-                    )));
-                    // Keep the account blocked until process exit; startup recovery will stop the
-                    // one-time job before it restores the saved files.
-                    std::mem::forget(p);
                 }
-                return;
+                // Keep the account blocked until process exit; startup recovery will stop the
+                // one-time job before it restores the saved files.
+                std::mem::forget(p);
+                return PreviewApplyResult::Failed(format!(
+                    "The sync job started, but its recovery state couldn't be saved or stopped: {e}; {}. Restart this app to retry recovery. No other sync operation will start for this account in this session.",
+                    stop_error.trim()
+                ));
             }
-            let cleanup = clear_pending_preview();
-            let mut msg = format!(
-                "{}: {} The status shows when it's done.",
-                p.title,
-                match p.mode {
-                    PreviewMode::Resync => "full resync started.",
-                    PreviewMode::ForceDelete | PreviewMode::Check => "started.",
-                }
-            );
-            if let Err(e) = cleanup {
-                msg.push_str(&format!(" The committed settings are safe, but the recovery record couldn't be cleared: {e}"));
-            }
-            ui.set_s_msg(ss(msg));
-            ui.set_o_msg(ss(""));
-            if p.mode == PreviewMode::Resync {
-                ui.set_f_msg(ss("Resync started."));
+            let title = p.title.clone();
+            let mode = p.mode;
+            let cleanup = clear_pending_preview().map_err(|e| e.to_string());
+            PreviewApplyResult::Started {
+                title,
+                mode,
+                cleanup,
+                account: acc,
             }
         }
-        Ok(o) => {
-            fail_preview_apply(
-                ctx,
-                p,
-                format!(
-                    "Couldn't start the sync engine: {}",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                ),
-            );
-        }
-        Err(e) => {
-            fail_preview_apply(ctx, p, format!("Couldn't start the sync engine: {e}"));
-        }
+        Ok(o) => rollback_preview_apply(
+            p,
+            format!(
+                "Couldn't start the sync engine: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+        ),
+        Err(e) => rollback_preview_apply(p, format!("Couldn't start the sync engine: {e}")),
     }
-    load_folders(ctx, &acc, true);
-    refresh(ctx);
 }
 
-fn fail_preview_apply(ctx: &Shared, mut p: Preview, cause: String) {
+fn rollback_preview_apply(mut p: Preview, cause: String) -> PreviewApplyResult {
     // The apply did not start; make sure recovery still describes an uncommitted preview.
     if let Err(e) = save_pending_preview(&p) {
-        let ui = ctx.borrow().ui();
-        ui.set_p_visible(true);
-        ui.set_p_busy(false);
-        ui.set_p_can_apply(false);
-        ui.set_p_text(ss(format!(
-            "{cause}. The recovery record couldn't be refreshed, so syncing remains paused: {e}"
-        )));
-        ctx.borrow_mut().preview = Some(p);
-        return;
+        return PreviewApplyResult::KeepPreview(
+            p,
+            format!(
+                "{cause}. The recovery record couldn't be refreshed, so syncing remains paused: {e}"
+            ),
+        );
     }
     if let Err(e) = restore_snapshot(&p) {
         p.running = false;
-        let ui = ctx.borrow().ui();
-        ui.set_p_visible(true);
-        ui.set_p_busy(false);
-        ui.set_p_can_apply(false);
-        ui.set_p_text(ss(format!(
-            "{cause}. Preview settings couldn't be fully restored; syncing remains paused. {e}"
-        )));
-        ctx.borrow_mut().preview = Some(p);
-        return;
+        return PreviewApplyResult::KeepPreview(
+            p,
+            format!(
+                "{cause}. Preview settings couldn't be fully restored; syncing remains paused. {e}"
+            ),
+        );
     }
     let restart = if p.was_active {
         p.unit.as_deref().map(|u| core::systemctl(&["start", u]))
@@ -2444,7 +2487,7 @@ fn fail_preview_apply(ctx: &Shared, mut p: Preview, cause: String) {
         ),
         _ => cause,
     };
-    ctx.borrow().ui().set_s_msg(ss(msg));
+    PreviewApplyResult::Failed(msg)
 }
 
 fn update_preview_live(ctx: &Shared) {
