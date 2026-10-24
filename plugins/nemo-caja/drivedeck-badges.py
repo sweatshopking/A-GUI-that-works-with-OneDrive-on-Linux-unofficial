@@ -29,6 +29,8 @@ class Badges(GObject.GObject, FM.InfoProvider):
         self.states = {}  # uri -> (path, state), refreshed together when the tray changes
         self.refreshing = False
         self.refresh_again = False
+        self.refresh_scheduled = False
+        self.owner_generation = 0
         try:
             self.bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
             self.bus.signal_subscribe(BUS, IFACE, "Changed", PATH, None,
@@ -39,17 +41,6 @@ class Badges(GObject.GObject, FM.InfoProvider):
         except GLib.Error:
             self.bus = None
 
-    def ask(self, paths):
-        if self.bus is None:
-            return [""] * len(paths)
-        try:
-            reply = self.bus.call_sync(BUS, PATH, IFACE, "GetStatus",
-                                       GLib.Variant("(as)", (paths,)), GLib.VariantType("(as)"),
-                                       Gio.DBusCallFlags.NO_AUTO_START, 300, None)
-            return reply.unpack()[0]
-        except GLib.Error:
-            return [""] * len(paths)
-
     def update_file_info(self, file):
         location = file.get_location()
         path = location.get_path() if location else None
@@ -57,9 +48,11 @@ class Badges(GObject.GObject, FM.InfoProvider):
             return FM.OperationResult.COMPLETE
         uri = file.get_uri()
         cached = self.states.get(uri)
-        state = cached[1] if cached and cached[0] == path else self.ask([path])[0]
+        state = cached[1] if cached and cached[0] == path else ""
         self.shown[uri] = (file, path)
         self.states[uri] = (path, state)
+        if (not cached or cached[0] != path) and self.bus is not None:
+            self.schedule_refresh()
         if len(self.shown) > 5000:  # forget the oldest; they're refreshed when shown again
             oldest = next(iter(self.shown))
             del self.shown[oldest]
@@ -69,6 +62,17 @@ class Badges(GObject.GObject, FM.InfoProvider):
             file.add_emblem(emblem)
         return FM.OperationResult.COMPLETE
 
+    def schedule_refresh(self):
+        if self.refresh_scheduled:
+            return
+        self.refresh_scheduled = True
+        GLib.timeout_add(25, self.flush_pending)
+
+    def flush_pending(self):
+        self.refresh_scheduled = False
+        self.refresh_shown()
+        return GLib.SOURCE_REMOVE
+
     def changed(self, *_args):
         self.refresh_shown()
 
@@ -76,9 +80,11 @@ class Badges(GObject.GObject, FM.InfoProvider):
         name, _old_owner, new_owner = parameters.unpack()
         if name != BUS:
             return
+        self.owner_generation += 1
         if new_owner:
             self.refresh_shown()
         else:
+            self.refresh_again = False
             self.apply_states(list(self.shown.items()), [""] * len(self.shown))
 
     def refresh_shown(self):
@@ -93,16 +99,21 @@ class Badges(GObject.GObject, FM.InfoProvider):
             return
         self.refreshing = True
         paths = [path for _uri, (_file, path) in entries]
+        user_data = (entries, self.owner_generation)
         try:
             self.bus.call(BUS, PATH, IFACE, "GetStatus",
                           GLib.Variant("(as)", (paths,)), GLib.VariantType("(as)"),
                           Gio.DBusCallFlags.NO_AUTO_START, 300, None,
-                          self.refresh_done, entries)
+                          self.refresh_done, user_data)
         except GLib.Error:
             self.refreshing = False
             self.apply_states(entries, [""] * len(entries))
+            if self.refresh_again:
+                self.refresh_again = False
+                self.refresh_shown()
 
-    def refresh_done(self, connection, result, entries):
+    def refresh_done(self, connection, result, user_data):
+        entries, generation = user_data
         try:
             states = connection.call_finish(result).unpack()[0]
             if len(states) != len(entries):
@@ -110,13 +121,17 @@ class Badges(GObject.GObject, FM.InfoProvider):
         except GLib.Error:
             states = [""] * len(entries)
         self.refreshing = False
-        self.apply_states(entries, states)
+        if generation == self.owner_generation:
+            self.apply_states(entries, states)
         if self.refresh_again:
             self.refresh_again = False
             self.refresh_shown()
 
     def apply_states(self, entries, states):
         for (uri, (file, path)), state in zip(entries, states):
+            shown = self.shown.get(uri)
+            if shown is None or shown[1] != path:
+                continue
             current = (path, state)
             if self.states.get(uri) != current:
                 self.states[uri] = current

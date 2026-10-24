@@ -11,13 +11,6 @@ class F:
     def add_emblem(self, e): self.emblems.append(e)
     def invalidate_extension_info(self): self.invalidations = getattr(self, "invalidations", 0) + 1
 
-b = ext.Badges(); bad = 0
-for p, want in [("/t/OneDrive/a.txt", ["emblem-drivedeck-synced"]),
-                ("/t/OneDrive/r (error).xlsx", ["emblem-drivedeck-error"]),
-                ("/t/elsewhere/x", [])]:
-    f = F(p); b.update_file_info(f); ok = f.emblems == want; bad += not ok
-    print("ok  " if ok else "FAIL", p, f.emblems)
-
 class Bus:
     def __init__(self): self.calls, self.changed = 0, {}
     def call(self, _name, _path, _iface, _method, params, _reply, _flags,
@@ -34,14 +27,28 @@ def ext_state(p):
         if s in p.rsplit("/", 1)[-1]: return s
     return "synced"
 
-# Repeated queries use the cached answer. A Changed signal asks once for all shown paths and
-# invalidates only the file whose answer changed.
-bus = Bus(); b.bus = bus
-f = next(f for f in [b.shown[u][0] for u in b.shown] if f.p.endswith("/a.txt"))
+# Initial file requests are batched asynchronously. Repeated queries use the cached answer;
+# Changed refreshes all shown paths once and invalidates only the file whose answer changed.
+bus = Bus(); b = ext.Badges(); b.bus = bus; bad = 0
+files = []
+for p, want in [("/t/OneDrive/a.txt", ["emblem-drivedeck-synced"]),
+                ("/t/OneDrive/r (error).xlsx", ["emblem-drivedeck-error"]),
+                ("/t/elsewhere/x", [])]:
+    f = F(p); files.append((f, want)); b.update_file_info(f)
+    ok = f.emblems == [] and bus.calls == 0; bad += not ok
+    print("ok  " if ok else "FAIL", p, "queued without a D-Bus call")
+b.flush_pending()
+for f, want in files:
+    b.update_file_info(f)
+    ok = f.emblems == want; bad += not ok
+    print("ok  " if ok else "FAIL", f.p, f.emblems)
+
+f = next(f for f, _ in files if f.p.endswith("/a.txt"))
 b.update_file_info(f)
+f.invalidations = 0
 bus.changed[f.p] = "error"
 b.changed()
-ok = bus.calls == 1 and f.invalidations == 1
+ok = bus.calls == 2 and f.invalidations == 1
 bad += not ok
 print("ok  " if ok else "FAIL", "Changed uses one batch call")
 sys.exit(bad)

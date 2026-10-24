@@ -37,6 +37,15 @@ int main(int argc, char **argv)
         };
         for (const auto &c : cases) {
             const QStringList got = plugin->getOverlays(QUrl::fromLocalFile(QString::fromUtf8(c.path)));
+            const bool deferred = got.isEmpty();
+            bad += !deferred;
+            printf("%s %s queued for a batched lookup\n", deferred ? "ok  " : "FAIL", c.path);
+        }
+        // The queued paths are answered together once the event loop runs.
+        QTimer::singleShot(300, &app, &QCoreApplication::quit);
+        app.exec();
+        for (const auto &c : cases) {
+            const QStringList got = plugin->getOverlays(QUrl::fromLocalFile(QString::fromUtf8(c.path)));
             const QString g = got.value(0);
             const bool ok = g == QString::fromUtf8(c.want);
             bad += !ok;
@@ -45,10 +54,10 @@ int main(int argc, char **argv)
         const auto path = QUrl::fromLocalFile(QStringLiteral("/t/OneDrive/a.txt"));
         const QStringList again = plugin->getOverlays(path);
         const bool cached = again.value(0) == QStringLiteral("emblem-drivedeck-synced")
-            && statusCalls() == 4;
+            && statusCalls() == 1;
         bad += !cached;
         printf("%s repeated path uses cached status\n", cached ? "ok  " : "FAIL");
-        // "Changed": the plugin asks again (in one call) and reports only what changed
+        // "Changed": the plugin refreshes asynchronously in one call and reports only changes
         int reported = 0;
         QString aNow;
         QObject::connect(plugin, &KOverlayIconPlugin::overlaysChanged, [&](const QUrl &u, const QStringList &o) {
@@ -63,7 +72,7 @@ int main(int argc, char **argv)
         }
         QTimer::singleShot(3000, &app, &QCoreApplication::quit);
         app.exec();
-        const bool ok = reported == 1 && aNow == QStringLiteral("emblem-drivedeck-error") && statusCalls() == 5;
+        const bool ok = reported == 1 && aNow == QStringLiteral("emblem-drivedeck-error") && statusCalls() == 2;
         bad += !ok;
         printf("%s Changed -> %d update(s), a.txt now '%s'\n", ok ? "ok  " : "FAIL", reported, qPrintable(aNow));
         remove("/tmp/badges-flip");
