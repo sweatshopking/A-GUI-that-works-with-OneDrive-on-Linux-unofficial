@@ -147,6 +147,7 @@ struct Ctx {
     refresh_again: bool,
     /// The user closed the window while a dry run was still stopping; close once it has.
     close_when_idle: bool,
+    preview_finishing: bool,
     rows: Rc<VecModel<FolderRow>>,
     /// The folder backup waiting for the user to confirm it
     backup_ask: Option<BackupAsk>,
@@ -2371,41 +2372,77 @@ fn finish_cancel(ctx: &Shared) {
     let Some(mut p) = ctx.borrow_mut().preview.take() else {
         return;
     };
-    if let Err(e) = restore_snapshot(&p) {
-        p.running = false;
-        let ui = ctx.borrow().ui();
-        ui.set_p_busy(false);
-        ui.set_p_can_apply(false);
-        ui.set_p_text(ss(format!(
-            "Settings couldn't be fully restored. Syncing remains paused until recovery succeeds. {e}"
-        )));
-        ctx.borrow_mut().preview = Some(p);
-        return;
-    }
-    if p.was_active
-        && let Some(u) = &p.unit
-    {
-        let (ok, err) = core::systemctl(&["start", u]);
-        if !ok {
-            ctx.borrow().ui().set_s_msg(ss(format!(
-                "Preview settings were restored, but syncing couldn't be restarted: {}",
-                err.trim()
-            )));
-        }
-    }
+    p.running = false;
+    ctx.borrow_mut().preview_finishing = true;
     let ui = ctx.borrow().ui();
-    ui.set_p_visible(false);
-    let key = p.key.clone();
-    let acc = ctx.borrow().account(&key).cloned();
-    if let Some(acc) = acc {
-        load_options(ctx, &acc);
-        load_folders(ctx, &acc, true);
-    }
-    refresh(ctx);
-    if ctx.borrow().close_when_idle {
-        window_hiding();
-        let _ = ctx.borrow().ui().hide();
-    }
+    ui.set_p_busy(true);
+    ui.set_p_can_apply(false);
+    ui.set_p_live(ss("Restoring the previous settings…"));
+    bg(
+        move || {
+            let key = p.key.clone();
+            match restore_snapshot(&p) {
+                Err(e) => PreviewCancelResult::Failed(
+                    p,
+                    format!(
+                        "Settings couldn't be fully restored. Syncing remains paused until recovery succeeds. {e}"
+                    ),
+                ),
+                Ok(()) => {
+                    let restart_error = if p.was_active {
+                        p.unit.as_deref().and_then(|u| {
+                            let (ok, err) = core::systemctl(&["start", u]);
+                            (!ok).then_some(err)
+                        })
+                    } else {
+                        None
+                    };
+                    PreviewCancelResult::Restored { key, restart_error }
+                }
+            }
+        },
+        |ctx, result| {
+            ctx.borrow_mut().preview_finishing = false;
+            let ui = ctx.borrow().ui();
+            ui.set_p_busy(false);
+            match result {
+                PreviewCancelResult::Failed(p, message) => {
+                    ui.set_p_can_apply(false);
+                    ui.set_p_text(ss(message));
+                    ui.set_p_live(ss(""));
+                    ctx.borrow_mut().preview = Some(p);
+                    ctx.borrow_mut().close_when_idle = false;
+                }
+                PreviewCancelResult::Restored { key, restart_error } => {
+                    ui.set_p_visible(false);
+                    if let Some(err) = restart_error {
+                        ui.set_s_msg(ss(format!(
+                            "Preview settings were restored, but syncing couldn't be restarted: {}",
+                            err.trim()
+                        )));
+                    }
+                    let acc = ctx.borrow().account(&key).cloned();
+                    if let Some(acc) = acc {
+                        load_options(ctx, &acc);
+                        load_folders(ctx, &acc, true);
+                    }
+                    refresh(ctx);
+                    if ctx.borrow().close_when_idle {
+                        window_hiding();
+                        let _ = ctx.borrow().ui().hide();
+                    }
+                }
+            }
+        },
+    );
+}
+
+enum PreviewCancelResult {
+    Restored {
+        key: String,
+        restart_error: Option<String>,
+    },
+    Failed(Preview, String),
 }
 
 fn preview_cancel(ctx: &Shared) {
@@ -4832,7 +4869,10 @@ fn listen_for_hand_offs() {
                 with_ctx(|ctx| {
                     let busy = {
                         let c = ctx.borrow();
-                        c.preview.is_some() || c.signin.is_some() || c.signin_starting.is_some()
+                        c.preview.is_some()
+                            || c.preview_finishing
+                            || c.signin.is_some()
+                            || c.signin_starting.is_some()
                     };
                     // an update replaced us: reopen as the new version, unless that would
                     // interrupt a preview or a sign-in
@@ -4979,6 +5019,7 @@ pub fn run(account: Option<String>) {
         refreshing: true,
         refresh_again: false,
         close_when_idle: false,
+        preview_finishing: false,
         rows,
         backup_ask: None,
         conflicts: Vec::new(),
@@ -5403,9 +5444,13 @@ pub fn run(account: Option<String>) {
     {
         let w = ctx.clone();
         ui.window().on_close_requested(move || {
+            if w.borrow().preview_finishing {
+                w.borrow_mut().close_when_idle = true;
+                return slint::CloseRequestResponse::KeepWindowShown;
+            }
             if w.borrow().preview.is_some() {
                 preview_cancel(&w);
-                let still = w.borrow().preview.as_ref().is_some_and(|p| p.running);
+                let still = w.borrow().preview.is_some() || w.borrow().preview_finishing;
                 if still {
                     w.borrow_mut().close_when_idle = true;
                     return slint::CloseRequestResponse::KeepWindowShown;
