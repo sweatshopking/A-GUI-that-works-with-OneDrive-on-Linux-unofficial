@@ -137,6 +137,7 @@ struct Ctx {
     libraries: Vec<graph::Library>,
     signin: Option<SignIn>,
     signin_starting: Option<Arc<AtomicBool>>,
+    preview_starting: Option<Arc<AtomicBool>>,
     preview: Option<Preview>,
     /// What the client's installer has printed so far, while it runs.
     install_out: Option<Arc<Mutex<String>>>,
@@ -1920,11 +1921,54 @@ fn finish_reading(readers: Vec<std::thread::JoinHandle<()>>) {
 }
 
 fn start_preview(ctx: &Shared, acc: &AccountInfo, title: &str, change: PreviewChange) {
-    if ctx.borrow().preview.is_some() {
+    if ctx.borrow().preview.is_some()
+        || ctx.borrow().preview_starting.is_some()
+        || ctx.borrow().preview_finishing
+    {
         return;
     }
     let unit = acc.unit.clone();
-    let was_active = unit.as_deref().is_some_and(|u| core::unit_state(u).active);
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let acc = acc.clone();
+    let title = title.to_string();
+    ctx.borrow_mut().preview_starting = Some(cancelled.clone());
+    let ui = ctx.borrow().ui();
+    ui.set_p_title(ss(&title));
+    ui.set_p_text(ss("Preparing the preview…"));
+    ui.set_p_live(ss("Checking the sync service…"));
+    ui.set_p_busy(true);
+    ui.set_p_can_apply(false);
+    ui.set_p_visible(true);
+    let cancel_for_done = cancelled.clone();
+    bg(
+        move || unit.as_deref().is_some_and(|u| core::unit_state(u).active),
+        move |ctx, was_active| {
+            let current = ctx
+                .borrow()
+                .preview_starting
+                .as_ref()
+                .is_some_and(|current| Arc::ptr_eq(current, &cancel_for_done));
+            if !current {
+                return;
+            }
+            ctx.borrow_mut().preview_starting = None;
+            if cancel_for_done.load(Ordering::Acquire) {
+                ctx.borrow().ui().set_p_visible(false);
+                return;
+            }
+            start_preview_ready(ctx, &acc, &title, change, was_active);
+        },
+    );
+}
+
+fn start_preview_ready(
+    ctx: &Shared,
+    acc: &AccountInfo,
+    title: &str,
+    change: PreviewChange,
+    was_active: bool,
+) {
+    let unit = acc.unit.clone();
     let out = Arc::new(Mutex::new(PreviewLog::default()));
     let cancelled = Arc::new(AtomicBool::new(false));
     let confdir = acc.confdir.clone();
@@ -2446,6 +2490,11 @@ enum PreviewCancelResult {
 }
 
 fn preview_cancel(ctx: &Shared) {
+    if let Some(cancelled) = ctx.borrow_mut().preview_starting.take() {
+        cancelled.store(true, Ordering::Release);
+        ctx.borrow().ui().set_p_visible(false);
+        return;
+    }
     let running = {
         let c = ctx.borrow();
         let Some(p) = c.preview.as_ref() else { return };
@@ -4871,6 +4920,7 @@ fn listen_for_hand_offs() {
                         let c = ctx.borrow();
                         c.preview.is_some()
                             || c.preview_finishing
+                            || c.preview_starting.is_some()
                             || c.signin.is_some()
                             || c.signin_starting.is_some()
                     };
@@ -5012,6 +5062,7 @@ pub fn run(account: Option<String>) {
         libraries: Vec::new(),
         signin: None,
         signin_starting: None,
+        preview_starting: None,
         preview: None,
         install_out: None,
         update_dismissed: false,
@@ -5444,6 +5495,9 @@ pub fn run(account: Option<String>) {
     {
         let w = ctx.clone();
         ui.window().on_close_requested(move || {
+            if let Some(cancelled) = w.borrow_mut().preview_starting.take() {
+                cancelled.store(true, Ordering::Release);
+            }
             if w.borrow().preview_finishing {
                 w.borrow_mut().close_when_idle = true;
                 return slint::CloseRequestResponse::KeepWindowShown;
