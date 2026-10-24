@@ -4,6 +4,8 @@
 
 **Entirely unofficial — not endorsed by Microsoft at all.**
 
+### [⬇ Download the latest version](https://github.com/sweatshopking/DriveDeck/releases/latest)
+
 ## Why this app
 
 - **The easiest way to get OneDrive on Linux.** Download one file for your system (.deb, .rpm or
