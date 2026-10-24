@@ -7,7 +7,7 @@ use std::io::{BufRead, BufReader};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -611,6 +611,51 @@ fn clear_moving(handle: &ksni::blocking::Handle<Tray>, unit: &str) {
     });
 }
 
+struct FollowControl {
+    stop: AtomicBool,
+    done: AtomicBool,
+}
+
+struct FollowDone(Arc<FollowControl>);
+
+impl Drop for FollowDone {
+    fn drop(&mut self) {
+        self.0.done.store(true, Ordering::Release);
+    }
+}
+
+fn prune_followers(
+    following: &mut HashMap<String, Arc<FollowControl>>,
+    present_units: &HashSet<String>,
+) {
+    following.retain(|unit, control| {
+        if !present_units.contains(unit) {
+            control.stop.store(true, Ordering::Release);
+        }
+        !control.done.load(Ordering::Acquire)
+    });
+}
+
+/// Waits for journal output with a short timeout so a removed account can stop a quiet follower.
+fn journal_ready(out: &BufReader<std::process::ChildStdout>, control: &FollowControl) -> bool {
+    while !control.stop.load(Ordering::Acquire) {
+        let mut fd = libc::pollfd {
+            fd: out.get_ref().as_raw_fd(),
+            events: libc::POLLIN | libc::POLLHUP,
+            revents: 0,
+        };
+        // SAFETY: `fd` points to one initialized pollfd for the duration of the call.
+        let ready = unsafe { libc::poll(&mut fd, 1, 1000) };
+        if ready > 0 {
+            return true;
+        }
+        if ready < 0 && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted {
+            return false;
+        }
+    }
+    false
+}
+
 /// Hands the file manager badges the accounts' current state.
 fn publish_badges(t: &Tray) {
     if !crate::badges::enabled() {
@@ -693,7 +738,8 @@ fn apply_one(a: &mut Acc, when: DateTime<Local>, ev: LogEvent) {
 }
 
 /// Follows one unit's journal for as long as the tray runs.
-fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
+fn follow(handle: ksni::blocking::Handle<Tray>, unit: String, control: Arc<FollowControl>) {
+    let _done = FollowDone(control.clone());
     // the status lines first, so "last synced" is right even when the recent log is busy
     let status: Vec<_> = core::journal_status_lines(&unit)
         .iter()
@@ -702,19 +748,30 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
             Some((when, core::parse_log(msg)?))
         })
         .collect();
-    apply_events(&handle, &unit, status);
+    if apply_events(&handle, &unit, status) != Some(true) {
+        return;
+    }
     // files blocked before the recent log, and not synced since
     let blocked = core::blocked_files(&unit);
-    handle.update(|t: &mut Tray| {
+    let found = handle.update(|t: &mut Tray| {
         if let Some(a) = t
             .accs
             .iter_mut()
             .find(|a| a.info.unit.as_deref() == Some(unit.as_str()))
         {
             a.blocked = blocked;
+            true
+        } else {
+            false
         }
     });
+    if found != Some(true) {
+        return;
+    }
     loop {
+        if control.stop.load(Ordering::Acquire) {
+            return;
+        }
         let child = Command::new("journalctl")
             .args([
                 "--user",
@@ -732,7 +789,12 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
             .stderr(Stdio::null())
             .spawn();
         let Ok(mut child) = child else {
-            thread::sleep(Duration::from_secs(10));
+            for _ in 0..10 {
+                if control.stop.load(Ordering::Acquire) {
+                    return;
+                }
+                thread::sleep(Duration::from_secs(1));
+            }
             continue;
         };
         let mut out = BufReader::new(child.stdout.take().unwrap());
@@ -743,6 +805,9 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
         // While more lines are already waiting (a busy sync), events are collected and applied
         // together, so a flood of file lines doesn't redraw the menu for every one of them.
         loop {
+            if out.buffer().is_empty() && !journal_ready(&out, &control) {
+                break;
+            }
             raw.clear();
             match out.read_until(b'\n', &mut raw) {
                 Ok(0) | Err(_) => break,
@@ -768,7 +833,12 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
         let _ = child.wait();
         moving.clear();
         clear_moving(&handle, &unit);
-        thread::sleep(Duration::from_secs(5));
+        for _ in 0..5 {
+            if control.stop.load(Ordering::Acquire) {
+                return;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
     }
 }
 
@@ -780,7 +850,7 @@ fn set_device_held(confdir: &std::path::Path, held: bool) {
 
 /// Every few seconds: re-read accounts and settings, poll systemd, and apply schedules.
 fn poll(handle: ksni::blocking::Handle<Tray>) {
-    let mut following: HashSet<String> = HashSet::new();
+    let mut following: HashMap<String, Arc<FollowControl>> = HashMap::new();
     let mut last_phase: HashMap<String, Phase> = HashMap::new();
     tray_started();
     let mut replaced_seen = false;
@@ -834,6 +904,8 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         // ksni callbacks only ever read the cache.
         let hold = core::device_hold();
         let (infos, mut unit_states) = core::discover_with_states(&settings);
+        let present_units: HashSet<String> = infos.iter().filter_map(|i| i.unit.clone()).collect();
+        prune_followers(&mut following, &present_units);
         let states: Vec<(UnitState, bool)> = infos
             .iter()
             .map(|i| {
@@ -898,10 +970,15 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
 
         for i in &infos {
             if let Some(u) = &i.unit
-                && following.insert(u.clone())
+                && !following.contains_key(u)
             {
+                let control = Arc::new(FollowControl {
+                    stop: AtomicBool::new(false),
+                    done: AtomicBool::new(false),
+                });
+                following.insert(u.clone(), control.clone());
                 let (h, u) = (handle.clone(), u.clone());
-                thread::spawn(move || follow(h, u));
+                thread::spawn(move || follow(h, u, control));
             }
         }
 
@@ -1003,12 +1080,6 @@ fn poll(handle: ksni::blocking::Handle<Tray>) {
         for (name, list) in fresh {
             share::notify(&format!("OneDrive: {name}"), &core::blocked_text(&list));
         }
-        // a unit that was removed stops its follower on its next log line; forget it so a re-add works
-        following.retain(|u| {
-            handle
-                .update(|t: &mut Tray| t.accs.iter().any(|a| a.info.unit.as_deref() == Some(u)))
-                .unwrap_or(false)
-        });
         // after an update, hand over to the new version (once the new file has stayed put for a
         // whole round, so we don't catch an install half-way)
         if core::program_file_replaced() {
@@ -1232,6 +1303,22 @@ mod tests {
         assert!(moving.contains("large.zip"));
         assert!(track_follower_event(&mut moving, &progress(true)));
         assert!(moving.is_empty());
+    }
+
+    #[test]
+    fn removed_quiet_followers_are_cancelled_then_pruned() {
+        let control = Arc::new(FollowControl {
+            stop: AtomicBool::new(false),
+            done: AtomicBool::new(false),
+        });
+        let mut following = HashMap::from([("onedrive-a.service".into(), control.clone())]);
+        prune_followers(&mut following, &HashSet::new());
+        assert!(control.stop.load(Ordering::Acquire));
+        assert!(following.contains_key("onedrive-a.service"));
+
+        control.done.store(true, Ordering::Release);
+        prune_followers(&mut following, &HashSet::new());
+        assert!(following.is_empty());
     }
 
     #[test]
