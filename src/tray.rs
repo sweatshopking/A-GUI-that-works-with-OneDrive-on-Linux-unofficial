@@ -261,16 +261,15 @@ impl Tray {
         let Some(a) = self.accs.get_mut(idx) else {
             return;
         };
-        match core::sync_now(&a.info) {
-            Ok(u) => {
-                a.info.unit = Some(u);
-                a.unit.starting = true;
-                a.unit.active = true;
-                a.last_error = None;
+        let info = a.info.clone();
+        a.unit.starting = true;
+        a.unit.active = true;
+        a.last_error = None;
+        thread::spawn(move || {
+            if let Err(e) = core::sync_now(&info) {
+                share::notify(&format!("OneDrive: {}", info.name), &e);
             }
-            Err(e) => a.last_error = Some(e),
-        }
-        a.prefs = AppSettings::load().prefs(&a.info.confdir);
+        });
     }
 
     /// Pauses for `secs` seconds (-1 = until 06:00 tomorrow, 0 = resume).
@@ -278,16 +277,13 @@ impl Tray {
         let Some(a) = self.accs.get_mut(idx) else {
             return;
         };
-        match core::pause(&a.info, secs) {
-            Ok(until) => {
-                a.prefs = AppSettings::load().prefs(&a.info.confdir);
-                if a.info.unit.is_some() {
-                    a.unit.active = until == 0;
-                }
-                a.last_error = None;
+        let info = a.info.clone();
+        a.last_error = None;
+        thread::spawn(move || {
+            if let Err(e) = core::pause(&info, secs) {
+                share::notify(&format!("OneDrive: {}", info.name), &e);
             }
-            Err(e) => a.last_error = Some(e),
-        }
+        });
     }
 }
 
