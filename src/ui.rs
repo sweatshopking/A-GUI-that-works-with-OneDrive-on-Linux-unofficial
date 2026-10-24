@@ -2692,7 +2692,7 @@ fn load_activity(ctx: &Shared, acc: &AccountInfo) {
 
 // ---------------------------------------------------------------- sign in / out
 
-fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: bool) {
+fn sign_in(ctx: &Shared, acc: &AccountInfo, enable_after: Option<bool>) {
     if ctx.borrow().signin.is_some() || ctx.borrow().signin_starting.is_some() {
         return;
     }
@@ -2748,7 +2748,11 @@ enum SignInStart {
     Cancelled,
 }
 
-fn begin_sign_in(acc: AccountInfo, enable_after: bool, cancelled: Arc<AtomicBool>) -> SignInStart {
+fn begin_sign_in(
+    acc: AccountInfo,
+    enable_after: Option<bool>,
+    cancelled: Arc<AtomicBool>,
+) -> SignInStart {
     if let Some(why) = client_blocker() {
         return SignInStart::Failed(why, true);
     }
@@ -2767,10 +2771,14 @@ fn begin_sign_in(acc: AccountInfo, enable_after: bool, cancelled: Arc<AtomicBool
             );
         }
     };
-    let was_active = acc
+    let unit_state = acc
         .unit
         .as_deref()
-        .is_some_and(|u| core::unit_state(u).active);
+        .map(core::unit_state)
+        .unwrap_or_default();
+    let was_active = unit_state.active;
+    let enable_after =
+        enable_after.unwrap_or_else(|| acc.unit.as_ref().is_none_or(|_| !unit_state.enabled));
     if cancelled.load(Ordering::Acquire) {
         return SignInStart::Cancelled;
     }
@@ -4281,7 +4289,7 @@ fn add_create(ctx: &Shared) {
     if library.is_some() {
         after_sign_in(acc, true, false);
     } else {
-        sign_in(ctx, &acc, true);
+        sign_in(ctx, &acc, Some(true));
     }
     refresh(ctx);
 }
@@ -5117,11 +5125,7 @@ pub fn run(account: Option<String>) {
     });
     on!(on_sign_in, |c| {
         if let Some(acc) = current(c) {
-            let enable = acc
-                .unit
-                .as_deref()
-                .is_none_or(|u| !core::unit_state(u).enabled);
-            sign_in(c, &acc, enable);
+            sign_in(c, &acc, None);
         }
     });
     on!(on_sign_out, |c| sign_out(c));
