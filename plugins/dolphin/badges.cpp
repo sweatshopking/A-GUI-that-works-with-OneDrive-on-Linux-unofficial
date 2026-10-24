@@ -21,7 +21,7 @@ class Badges : public KOverlayIconPlugin
 public:
     Badges()
     {
-        const auto bus = QDBusConnection::sessionBus();
+        auto bus = QDBusConnection::sessionBus();
         bus.connect(Service, Path, Iface, QStringLiteral("Changed"), this, SLOT(changed()));
         bus.connect(QStringLiteral("org.freedesktop.DBus"), QStringLiteral("/org/freedesktop/DBus"),
                     QStringLiteral("org.freedesktop.DBus"), QStringLiteral("NameOwnerChanged"),
