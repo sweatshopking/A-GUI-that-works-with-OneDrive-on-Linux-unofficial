@@ -1295,9 +1295,11 @@ fn save_options(ctx: &Shared) {
             ui.set_o_msg(ss(format!("Couldn't save: {e}")));
             return;
         }
-        restart_if_running(&acc);
     }
     if resync.is_empty() && direction_changes.is_empty() {
+        if !plain.is_empty() {
+            restart_if_running(acc.clone());
+        }
         ui.set_o_msg(ss(if signin_changed {
             "Saved. Sign out and in again for the settings marked † to take effect."
         } else if plain.is_empty() {
@@ -1310,6 +1312,9 @@ fn save_options(ctx: &Shared) {
     }
     if !resync.is_empty() && !ui.get_o_allow_resync() {
         if direction_changes.is_empty() {
+            if !plain.is_empty() {
+                restart_if_running(acc.clone());
+            }
             ui.set_o_msg(ss("Saved, except the settings marked * — they need a full resync, which is turned off for this account."));
             return;
         }
@@ -1409,12 +1414,13 @@ fn big_delete_choose(ctx: &Shared, delete_online: bool) {
     }
 }
 
-fn restart_if_running(acc: &AccountInfo) {
-    if let Some(u) = &acc.unit
-        && core::unit_state(u).active
-    {
-        core::unit_action("restart", u);
-    }
+fn restart_if_running(acc: AccountInfo) {
+    let Some(unit) = acc.unit else { return };
+    std::thread::spawn(move || {
+        if core::unit_state(&unit).active {
+            core::unit_action("restart", &unit);
+        }
+    });
 }
 
 // ---------------------------------------------------------------- folders tab
