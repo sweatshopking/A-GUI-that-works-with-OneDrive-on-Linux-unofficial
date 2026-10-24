@@ -578,6 +578,43 @@ fn apply_events(
     })
 }
 
+/// Whether this journal event changes the follower's set of active transfers. Repeated progress
+/// percentages for the same file don't need another tray update.
+fn track_follower_event(moving: &mut HashSet<String>, ev: &LogEvent) -> bool {
+    match ev {
+        LogEvent::Progress { path, done, .. } => {
+            if *done {
+                moving.remove(path)
+            } else {
+                moving.insert(path.clone())
+            }
+        }
+        LogEvent::File { path, .. } => {
+            moving.remove(path);
+            true
+        }
+        LogEvent::Complete | LogEvent::ClientStart | LogEvent::Error(_) => {
+            moving.clear();
+            true
+        }
+        _ => true,
+    }
+}
+
+fn clear_moving(handle: &ksni::blocking::Handle<Tray>, unit: &str) {
+    handle.update(|t: &mut Tray| {
+        if let Some(a) = t
+            .accs
+            .iter_mut()
+            .find(|a| a.info.unit.as_deref() == Some(unit))
+            && !a.moving.is_empty()
+        {
+            a.moving.clear();
+            publish_badges(t);
+        }
+    });
+}
+
 /// Hands the file manager badges the accounts' current state.
 fn publish_badges(t: &Tray) {
     if !crate::badges::enabled() {
@@ -705,6 +742,7 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
         let mut out = BufReader::new(child.stdout.take().unwrap());
         let mut raw = Vec::new();
         let mut batch = Vec::new();
+        let mut moving = HashSet::new();
         // Lines are read as bytes: a file name that isn't valid UTF-8 must not end the follow.
         // While more lines are already waiting (a busy sync), events are collected and applied
         // together, so a flood of file lines doesn't redraw the menu for every one of them.
@@ -717,8 +755,7 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
             let line = String::from_utf8_lossy(&raw);
             if let Some((when, msg)) = core::split_journal_line(line.trim_end())
                 && let Some(ev) = core::parse_log(msg)
-                // the popup reads progress itself; here it would only redraw the menu
-                && !matches!(ev, LogEvent::Progress { .. })
+                && track_follower_event(&mut moving, &ev)
             {
                 batch.push((when, ev));
             }
@@ -733,6 +770,8 @@ fn follow(handle: ksni::blocking::Handle<Tray>, unit: String) {
         }
         let _ = child.kill();
         let _ = child.wait();
+        moving.clear();
+        clear_moving(&handle, &unit);
         thread::sleep(Duration::from_secs(5));
     }
 }
@@ -1178,6 +1217,23 @@ mod tests {
             path: path.into(),
             reason,
         }
+    }
+
+    #[test]
+    fn follower_tracks_transfer_changes_without_repeating_percent_updates() {
+        let mut moving = HashSet::new();
+        let progress = |done| LogEvent::Progress {
+            up: true,
+            path: "large.zip".into(),
+            percent: 40,
+            eta: None,
+            done,
+        };
+        assert!(track_follower_event(&mut moving, &progress(false)));
+        assert!(!track_follower_event(&mut moving, &progress(false)));
+        assert!(moving.contains("large.zip"));
+        assert!(track_follower_event(&mut moving, &progress(true)));
+        assert!(moving.is_empty());
     }
 
     #[test]
