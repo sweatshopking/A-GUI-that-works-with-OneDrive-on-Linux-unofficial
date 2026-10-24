@@ -1556,9 +1556,9 @@ export component AppWindow inherits Window {
                                             border-color: Theme.accent;
                                             accessible-role: button;
                                             accessible-label: row.loading ? "Loading subfolders for " + row.name : (row.expanded ? "Collapse " : "Expand ") + row.name;
-                                            accessible-enabled: row.has-children;
+                                            accessible-enabled: row.has-children && !row.loading;
                                             accessible-action-default => {
-                                                if (row.has-children) {
+                                                if (row.has-children && !row.loading) {
                                                     root.f-expand(i);
                                                 }
                                             }
@@ -1567,7 +1567,7 @@ export component AppWindow inherits Window {
                                                 font-size: 14px;
                                             }
                                             TouchArea {
-                                                enabled: row.has-children;
+                                                enabled: row.has-children && !row.loading;
                                                 clicked => {
                                                     expand-focus.focus();
                                                     root.f-expand(i);
@@ -1576,7 +1576,7 @@ export component AppWindow inherits Window {
                                             expand-focus := FocusScope {
                                                 x: 0;
                                                 width: 0;
-                                                enabled: row.has-children;
+                                                enabled: row.has-children && !row.loading;
                                                 key-pressed(event) => {
                                                     if (event.text == Key.Space || event.text == Key.Return) {
                                                         root.f-expand(i);

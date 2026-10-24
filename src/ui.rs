@@ -42,6 +42,8 @@ struct Tree {
     sync_all_original: bool,
     root_files_original: bool,
     loaded_for: Option<String>,
+    generation: u64,
+    loading_requests: usize,
 }
 
 #[derive(Clone)]
@@ -55,6 +57,25 @@ struct Node {
 }
 
 impl Tree {
+    fn invalidate_requests(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.loading_requests = 0;
+        self.generation
+    }
+
+    fn begin_request(&mut self) -> u64 {
+        self.loading_requests += 1;
+        self.generation
+    }
+
+    fn finish_request(&mut self, generation: u64) -> Option<usize> {
+        if generation != self.generation {
+            return None;
+        }
+        self.loading_requests = self.loading_requests.saturating_sub(1);
+        Some(self.loading_requests)
+    }
+
     fn covered(&self, path: &str) -> bool {
         if self.selected.contains(path) {
             return true;
@@ -1433,9 +1454,15 @@ fn restart_if_running(acc: AccountInfo) {
 
 fn load_folders(ctx: &Shared, acc: &AccountInfo, force: bool) {
     let key = acc.key();
-    if !force && ctx.borrow().tree.loaded_for.as_deref() == Some(key.as_str()) {
-        return;
-    }
+    let generation = {
+        let mut c = ctx.borrow_mut();
+        if !force && c.tree.loaded_for.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        let generation = c.tree.invalidate_requests();
+        c.ui().set_f_loading(false);
+        generation
+    };
     let rules = match core::read_sync_list(&acc.confdir) {
         Ok(rules) => rules,
         Err(e) => {
@@ -1449,6 +1476,7 @@ fn load_folders(ctx: &Shared, acc: &AccountInfo, force: bool) {
         let mut c = ctx.borrow_mut();
         let mut t = Tree {
             loaded_for: Some(key.clone()),
+            generation,
             ..Default::default()
         };
         for r in rules {
@@ -1480,8 +1508,16 @@ fn load_folders(ctx: &Shared, acc: &AccountInfo, force: bool) {
 
 fn fetch_children(ctx: &Shared, acc: &AccountInfo, path: String) {
     let (key, confdir, drive) = (acc.key(), acc.confdir.clone(), acc.drive_id.clone());
-    let cached = ctx.borrow().token(&key);
-    ctx.borrow().ui().set_f_loading(true);
+    let (cached, generation) = {
+        let mut c = ctx.borrow_mut();
+        if c.tree.loaded_for.as_deref() != Some(key.as_str()) {
+            return;
+        }
+        let cached = c.token(&key);
+        c.tree.begin_request();
+        c.ui().set_f_loading(true);
+        (cached, c.tree.generation)
+    };
     bg(
         {
             let path = path.clone();
@@ -1494,9 +1530,12 @@ fn fetch_children(ctx: &Shared, acc: &AccountInfo, path: String) {
         move |ctx, r| {
             {
                 let mut c = ctx.borrow_mut();
-                c.ui().set_f_loading(false);
-                if c.tree.loaded_for.as_deref() != Some(key.as_str()) {
+                let Some(pending) = c.tree.finish_request(generation) else {
                     return; // user moved on to another account
+                };
+                c.ui().set_f_loading(pending > 0);
+                if c.tree.loaded_for.as_deref() != Some(key.as_str()) {
+                    return;
                 }
                 match r {
                     Ok((t, folders)) => {
@@ -1642,6 +1681,9 @@ fn folder_expand(ctx: &Shared, i: usize) {
             c.tree.rows[i].expanded = true;
             None
         } else {
+            if n.loading {
+                return;
+            }
             c.tree.rows[i].loading = true;
             Some(n.path)
         }
@@ -5684,6 +5726,22 @@ mod tests {
         assert!(tree.inherited("/A"));
         assert!(!tree.inherited("/A/B"));
         assert!(tree.inherited("/AB"));
+    }
+
+    #[test]
+    fn folder_loading_tracks_parallel_and_stale_requests() {
+        let mut tree = Tree::default();
+        let generation = tree.invalidate_requests();
+        assert_eq!(tree.begin_request(), generation);
+        assert_eq!(tree.begin_request(), generation);
+        assert_eq!(tree.finish_request(generation), Some(1));
+        assert_eq!(tree.finish_request(generation), Some(0));
+
+        let stale = tree.begin_request();
+        let current = tree.invalidate_requests();
+        assert_ne!(stale, current);
+        assert_eq!(tree.finish_request(stale), None);
+        assert_eq!(tree.loading_requests, 0);
     }
 
     #[test]
